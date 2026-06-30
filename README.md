@@ -26,6 +26,14 @@
 | `src/smb_finder/intent.py` | 자연어 → 키워드 (규칙 우선, LLM 선택) |
 | `src/smb_finder/finder.py` | 오케스트레이터 (정규화→검색→응답, 시간 측정) |
 | `src/smb_finder/api.py` | FastAPI 앱 — `POST /find` (OpenAPI 도구) |
+| `integrations/langflow/` | 노코드 외피 — 이 서비스를 Langflow 커스텀 컴포넌트로 감싼다 ([README](integrations/langflow/README.md)) |
+
+## 노코드 외피 (Langflow)
+
+코딩 없이 워크플로를 짜는 외피로 [Langflow](https://github.com/langflow-ai/langflow)를 쓴다.
+`smb_finder` 코드는 그대로 두고, `integrations/langflow/`의 커스텀 컴포넌트가 `POST /find`를
+**사내 localhost로** 호출해 캔버스에 끌어다 쓸 수 있게 감싼다(외부 전송 없음). 자세한 실행은
+[`integrations/langflow/README.md`](integrations/langflow/README.md).
 
 ## 설치 · 실행
 
