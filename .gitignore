@@ -1,0 +1,19 @@
+# 비밀정보 — 절대 커밋 금지 (CLAUDE.md 보안 규칙)
+.env
+.env.*
+!.env.example
+
+# 폴더 인덱스 캐시 (공유폴더 경로 정보 포함 — 외부 공유 금지)
+*.index.json
+.cache/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
