@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "smb_agent": "./smb_agent/graph.py:graph"
+  },
+  "env": ".env"
+}

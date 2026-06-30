@@ -14,12 +14,16 @@
 
 | 경로 | 역할 |
 |---|---|
-| `components/smb_finder/smb_folder_finder.py` | Langflow 커스텀 컴포넌트 — `POST /find`를 호출해 표/메시지로 반환 |
+| `components/smb_finder/smb_folder_finder.py` | **SMB 공유폴더 찾기** — `POST /find`(폴더 이름·경로) |
+| `components/smb_finder/smb_content_indexer.py` | **SMB 폴더 내용 DB화** — `POST /refresh-content`(폴더 경로 입력 → 본문 인덱싱) |
+| `components/smb_finder/smb_content_search.py` | **SMB 파일 내용 검색** — `POST /search-content`(파일 본문 검색) |
 | `docker-compose.yml` | Langflow를 띄우고 `components/`를 마운트(`LANGFLOW_COMPONENTS_PATH`) |
 
-컴포넌트 출력 2개:
-- **폴더 목록(DataFrame)** — `path/name/score/depth` 표. 시각 워크플로·표시용.
-- **요약 메시지(Message)** — 사람이 읽는 텍스트. 챗봇/에이전트 도구용. (입력 `query`는 `tool_mode`라 에이전트 도구로도 노출됨)
+내용 검색은 **두 컴포넌트가 짝**이다: 먼저 **DB화**로 원하는 폴더를 인덱싱하고, 그 뒤 **내용 검색**으로 찾는다.
+
+> **DB화는 폴더 단위**다. 공유폴더 전체를 한 번에 돌지 않고, 입력한 **경로 아래만** 인덱싱한다
+> (`검사결과/2026/OO검사` 처럼). 여러 폴더를 차례로 DB화하면 누적되고, 같은 폴더를 다시 DB화하면
+> 그 폴더만 갱신된다. 경로를 비우면 공유 전체(느림)가 대상이 된다.
 
 ## 보안 (CLAUDE.md — 항상 우선)
 
@@ -55,10 +59,18 @@ LANGFLOW_COMPONENTS_PATH="$(pwd)/components" langflow run --port 7860
 - 이 경우 컴포넌트 주소는 기본값 `http://localhost:8010` 그대로 두면 된다.
 
 ### 3) 캔버스에서 사용
-1. 좌측 컴포넌트 목록 **smb_finder** 카테고리 → **SMB 공유폴더 찾기** 끌어다 놓기.
-2. `질의`에 "OO검사 결과 폴더 찾아줘" 입력(또는 Chat Input 연결).
-3. **요약 메시지** 출력을 Chat Output에, 또는 **폴더 목록**을 다음 노드에 연결.
-4. 실행 → smb-finder가 인메모리 인덱스로 즉시 응답.
+
+**내용 검색 (DB화 → 검색, 2단계):**
+1. **SMB 폴더 내용 DB화** 끌어다 놓기 → `DB화할 폴더 경로`에 `검사결과/2026/OO검사` 입력 → 실행.
+   - 결과 메시지에 `'…' DB화 완료: N개 파일 적재`가 뜨면 성공(0건이면 경로/`.env` 확인).
+2. **SMB 파일 내용 검색** 끌어다 놓기 → `질의`에 "BRCA1 변이 보고서" → **요약 메시지**를 Chat Output에 연결 → 실행.
+
+**폴더 찾기 (이름·경로):**
+- **SMB 공유폴더 찾기** → `질의`에 "OO검사 결과 폴더 찾아줘" → 실행.
+
+> 각 컴포넌트의 입력은 `tool_mode`라 그대로 **에이전트 도구**가 된다. "폴더 찾기 + 내용 검색"을
+> 한 에이전트에 물리면 질의 성격에 따라 알아서 고른다. DB화 컴포넌트도 도구로 쓰면 에이전트가
+> "이 폴더 인덱싱해줘"에 반응한다.
 
 ## 버전
 

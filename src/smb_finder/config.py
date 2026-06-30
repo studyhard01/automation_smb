@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     find_budget_ms: int = Field(default=1500, description="이 시간을 넘기면 부분 결과라도 반환")
     find_default_limit: int = Field(default=5, description="기본 반환 폴더 수")
 
+    # ── 내용 검색 인덱스 (FTS5, 파일 본문) ──
+    content_index_db_path: str = Field(default=".cache/content.fts.db", description="내용 인덱스 SQLite(FTS5) 경로 — 환자 본문 포함, 외부 공유 금지")
+    content_index_max_depth: int = Field(default=0, description="내용 인덱싱 최대 깊이 (0=무제한)")
+    content_index_build_budget_sec: int = Field(default=300, description="내용 인덱스 빌드 시간 상한(초). 추출이 느려 폴더보다 넉넉")
+    content_max_file_mb: float = Field(default=20.0, description="이보다 큰 파일은 내용 인덱싱 건너뜀(추출 비용·지연 방지)")
+    content_max_chars_per_file: int = Field(default=200_000, description="파일당 저장 본문 상한(글자). 인덱스 비대화 방지")
+    content_extensions: str = Field(
+        default=".txt,.csv,.tsv,.md,.log,.json,.xml,.htm,.html,.docx,.xlsx,.pptx,.pdf",
+        description="내용 인덱싱 대상 확장자(쉼표 구분). pdf는 pypdf 설치 시에만 본문 추출",
+    )
+    content_search_budget_ms: int = Field(default=1500, description="내용 검색 시간 예산(ms)")
+    content_default_limit: int = Field(default=10, description="기본 반환 파일 수")
+
     # ── L2 의도 해석 LLM (OpenAI 호환) ──
     llm_intent_enabled: bool = Field(default=False, description="모호한 질의를 LLM으로 정규화할지")
     llm_base_url: str = Field(default="http://localhost:8080", description="OpenAI 호환 LLM base_url")
@@ -48,6 +61,16 @@ class Settings(BaseSettings):
     def exclude_set(self) -> set[str]:
         """인덱싱 제외 폴더명 집합 (소문자 정규화)."""
         return {x.strip().lower() for x in self.smb_index_exclude.split(",") if x.strip()}
+
+    @property
+    def content_ext_set(self) -> set[str]:
+        """내용 인덱싱 대상 확장자 집합 (소문자, 점 포함)."""
+        return {x.strip().lower() for x in self.content_extensions.split(",") if x.strip()}
+
+    @property
+    def content_max_file_bytes(self) -> int:
+        """내용 인덱싱 파일 크기 상한(바이트)."""
+        return int(self.content_max_file_mb * 1024 * 1024)
 
 
 def load_settings() -> Settings:
