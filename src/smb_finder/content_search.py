@@ -38,14 +38,15 @@ class ContentSearcher:
         over_budget = elapsed_ms > self._settings.content_search_budget_ms
         if over_budget:
             _logger.warning(
-                "내용 검색 시간 예산 초과: %.1fms > %dms (query=%r)",
-                elapsed_ms, self._settings.content_search_budget_ms, request.query,
+                "내용 검색 시간 예산 초과: %.1fms > %dms (query_len=%d, hits=%d)",
+                elapsed_ms, self._settings.content_search_budget_ms, len(request.query), len(hits),
             )
 
         return ContentSearchResponse(
             query=request.query,
             terms=terms,
             hits=hits,
+            result_count=len(hits),
             elapsed_ms=round(elapsed_ms, 1),
             over_budget=over_budget,
             indexed_files=self._index.count(),

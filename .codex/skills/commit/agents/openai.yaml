@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Commit"
+  short_description: "Stage, inspect, and commit changes with project security checks."
+  default_prompt: "Use $commit to safely commit the current repository changes."

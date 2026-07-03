@@ -80,6 +80,34 @@ class ContentIndex:
             else:
                 self._conn.execute("DELETE FROM files")
 
+    def metadata_by_subpath(self, subpath: str) -> dict[str, tuple[int, float]]:
+        """특정 경로 아래 기존 파일의 size/mtime 메타데이터를 path 기준으로 반환한다."""
+        subpath = subpath.strip().strip("/")
+        with self._lock:
+            if subpath:
+                rows = self._conn.execute(
+                    "SELECT path, size, mtime FROM files WHERE path = ? OR path LIKE ?",
+                    (subpath, subpath + "/%"),
+                ).fetchall()
+            else:
+                rows = self._conn.execute("SELECT path, size, mtime FROM files").fetchall()
+        return {
+            path: (int(size) if str(size).isdigit() else 0, float(mtime) if mtime else 0.0)
+            for path, size, mtime in rows
+        }
+
+    def delete_path(self, path: str) -> None:
+        """단일 파일 경로의 기존 인덱스를 삭제한다."""
+        with self._lock:
+            self._conn.execute("DELETE FROM files WHERE path = ?", (path,))
+
+    def delete_paths(self, paths: set[str]) -> None:
+        """여러 파일 경로의 기존 인덱스를 삭제한다."""
+        if not paths:
+            return
+        with self._lock:
+            self._conn.executemany("DELETE FROM files WHERE path = ?", [(path,) for path in paths])
+
     def add(self, *, path: str, name: str, content: str, ext: str, size: int, mtime: float) -> None:
         """파일 1건을 인덱스에 넣는다 (commit은 호출자가 일괄로)."""
         with self._lock:

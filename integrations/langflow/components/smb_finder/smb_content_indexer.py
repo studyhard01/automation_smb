@@ -1,6 +1,6 @@
 """Langflow 커스텀 컴포넌트 — 폴더 내용 DB화(인덱싱) 트리거.
 
-사용자가 **인덱싱할 폴더 경로**를 입력하면 `smb_finder` 서비스의 `POST /refresh-content`를
+사용자가 **인덱싱할 폴더 경로**를 입력하면 `smb_finder` 서비스의 관리자 job API를
 호출해 그 폴더 아래 파일 본문을 추출·DB화한다. 이후 'SMB 파일 내용 검색' 컴포넌트로 찾는다.
 
 공유폴더 전체를 한 번에 도는 대신 **원하는 폴더만** 범위로 DB화한다(지연·범위 통제).
@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from lfx.custom.custom_component.component import Component
 from lfx.io import IntInput, MessageTextInput, Output
@@ -22,7 +24,7 @@ from lfx.schema.message import Message
 
 
 class SMBContentIndexerComponent(Component):
-    """지정 폴더 아래 파일 본문을 DB화한다 (smb-finder /refresh-content 래퍼)."""
+    """지정 폴더 아래 파일 본문을 DB화한다 (smb-finder admin job 래퍼)."""
 
     display_name = "SMB 폴더 내용 DB화"
     description = "입력한 폴더 경로 아래 파일 본문을 추출해 검색용으로 DB화한다 (사내 smb-finder 호출)."
@@ -60,11 +62,32 @@ class SMBContentIndexerComponent(Component):
             value="http://localhost:8010",
             advanced=True,
         ),
+        MessageTextInput(
+            name="admin_api_token",
+            display_name="관리자 API 토큰",
+            info="/admin/content-index-jobs 호출용 토큰. 실제 값은 Langflow secret/env에서 주입하고 저장소에 남기지 않는다.",
+            value="",
+            advanced=True,
+        ),
         IntInput(
             name="timeout_ms",
             display_name="요청 timeout(ms)",
-            info="DB화는 느릴 수 있어 넉넉히 둔다. 초과 시 흐름은 유지하고 상태로만 보고한다.",
-            value=600_000,
+            info="job 생성/상태조회 1회 HTTP 요청 timeout(ms).",
+            value=1500,
+            advanced=True,
+        ),
+        IntInput(
+            name="poll_interval_ms",
+            display_name="job 조회 간격(ms)",
+            info="관리자 job API 상태 조회 간격.",
+            value=1000,
+            advanced=True,
+        ),
+        IntInput(
+            name="poll_timeout_ms",
+            display_name="job 조회 예산(ms)",
+            info="Langflow 컴포넌트가 job 완료를 기다리는 최대 시간. 초과하면 job_id와 현재 상태를 반환한다.",
+            value=30_000,
             advanced=True,
         ),
     ]
@@ -73,21 +96,74 @@ class SMBContentIndexerComponent(Component):
         Output(display_name="결과 메시지", name="message", method="run_indexing"),
     ]
 
+    def _admin_headers(self) -> dict[str, str]:
+        token = (self.admin_api_token or "").strip()
+        return {"X-Admin-Token": token} if token else {}
+
+    def _format_job_status(self, stats: dict, scope: str) -> str:
+        status = stats.get("status", "unknown")
+        job_id = stats.get("job_id", "")
+        indexed = stats.get("indexed", 0)
+        elapsed_ms = stats.get("elapsed_ms", 0)
+        if status == "succeeded":
+            over = stats.get("over_budget", False)
+            parts = [
+                f"'{scope}' DB화 완료: {indexed}개 파일 적재",
+                f"(건너뜀 {stats.get('skipped_unchanged', 0)}, 삭제 {stats.get('removed_stale', 0)}, "
+                f"미지원 {stats.get('unsupported', 0)}, 빈문서 {stats.get('empty', 0)}, "
+                f"오류 {stats.get('errors', 0)}, {elapsed_ms}ms"
+                + (", 시간예산초과 — 부분 적재" if over else "")
+                + ")",
+            ]
+            if indexed == 0:
+                parts.append("※ 0건입니다. 경로가 맞는지, .env의 SMB 자격증명이 채워졌는지 확인하세요.")
+            return " ".join(parts)
+        if status == "failed":
+            msg = stats.get("message") or stats.get("error_code") or "알 수 없는 오류"
+            return f"'{scope}' DB화 job 실패: {msg}"
+        return f"'{scope}' DB화 job {status}: {job_id} ({elapsed_ms}ms). 아직 실행 중이면 잠시 뒤 상태를 다시 확인하세요."
+
+    async def _poll_job(self, client: httpx.AsyncClient, status_url: str, scope: str) -> dict:
+        deadline = asyncio.get_running_loop().time() + max(0.1, int(self.poll_timeout_ms) / 1000)
+        interval_s = max(0.1, int(self.poll_interval_ms) / 1000)
+        last_status: dict = {}
+
+        while True:
+            resp = await client.get(status_url, headers=self._admin_headers())
+            resp.raise_for_status()
+            last_status = resp.json()
+            if last_status.get("status") in {"succeeded", "failed"}:
+                return last_status
+            if asyncio.get_running_loop().time() + interval_s > deadline:
+                return last_status
+            await asyncio.sleep(interval_s)
+
     async def run_indexing(self) -> Message:
-        """smb-finder `POST /refresh-content`를 호출해 폴더를 DB화하고 결과를 요약한다."""
+        """smb-finder 관리자 job API로 폴더 DB화를 시작하고 상태를 요약한다."""
         path = (self.path or "").strip()
-        url = f"{str(self.service_url).rstrip('/')}/refresh-content"
-        timeout_s = max(1.0, int(self.timeout_ms) / 1000)
-        # host/share만 선택 전달 — 자격증명은 서버 .env에서만 온다(여기서 보내지 않음).
+        base_url = str(self.service_url).rstrip("/")
+        timeout_s = max(0.1, int(self.timeout_ms) / 1000)
         payload = {"path": path, "host": (self.host or "").strip(), "share_name": (self.share_name or "").strip()}
+        scope = path or "(공유 전체)"
+        if not (self.admin_api_token or "").strip():
+            msg = "ADMIN_API_TOKEN이 필요합니다. 내용 DB화는 /admin/content-index-jobs job API로만 실행합니다."
+            self.status = msg
+            return Message(text=msg)
 
         try:
-            async with httpx.AsyncClient(timeout=timeout_s) as client:
-                resp = await client.post(url, json=payload)
+            async with httpx.AsyncClient(base_url=base_url, timeout=timeout_s) as client:
+                resp = await client.post(
+                    "/admin/content-index-jobs",
+                    json=payload,
+                    headers=self._admin_headers(),
+                )
                 resp.raise_for_status()
-                stats = resp.json()
+                created = resp.json()
+                status_url = created.get("status_url") or f"/admin/content-index-jobs/{created.get('job_id', '')}"
+                stats = await self._poll_job(client, status_url, scope)
+                text = self._format_job_status(stats, scope)
         except httpx.TimeoutException:
-            msg = f"timeout({self.timeout_ms}ms) — DB화가 길어집니다. 서비스 로그를 확인하세요."
+            msg = f"timeout({self.timeout_ms}ms) — DB화 job 생성/상태조회가 지연됩니다. 잠시 뒤 다시 확인하세요."
             self.status = msg
             return Message(text=msg)
         except Exception as e:  # noqa: BLE001 — 노코드 캔버스에서 흐름이 끊기지 않게 흡수
@@ -95,18 +171,5 @@ class SMBContentIndexerComponent(Component):
             self.status = msg
             return Message(text=msg)
 
-        scope = stats.get("path") or "(공유 전체)"
-        share = stats.get("share", "")
-        indexed = stats.get("indexed", 0)
-        over = stats.get("over_budget", False)
-        parts = [
-            f"[{share}] '{scope}' DB화 완료: {indexed}개 파일 적재",
-            f"(미지원 {stats.get('unsupported', 0)}, 빈문서 {stats.get('empty', 0)}, "
-            f"오류 {stats.get('errors', 0)}, {stats.get('elapsed_sec', '?')}s"
-            + (", 시간예산초과 — 부분 적재" if over else "") + ")",
-        ]
-        if indexed == 0:
-            parts.append("※ 0건입니다. 경로가 맞는지, .env의 SMB 자격증명이 채워졌는지 확인하세요.")
-        text = " ".join(parts)
         self.status = text
         return Message(text=text)

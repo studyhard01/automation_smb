@@ -1,0 +1,4 @@
+interface:
+  display_name: "Service Reviewer"
+  short_description: "UI-only usability review from an internal lab user viewpoint."
+  default_prompt: "Use $service-reviewer to open the service URL and review the UI as a non-developer lab user."

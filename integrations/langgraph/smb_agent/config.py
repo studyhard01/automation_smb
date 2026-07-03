@@ -29,6 +29,12 @@ class AgentSettings(BaseSettings):
     )
     find_limit: int = Field(default=5, description="폴더 찾기 기본 반환 수")
     content_limit: int = Field(default=10, description="내용 검색 기본 반환 수")
+    admin_api_token: str = Field(
+        default="",
+        description="smb-finder /admin API token. Empty keeps the legacy /refresh-content fallback.",
+    )
+    content_index_poll_interval_ms: int = Field(default=1000, description="Content index job status poll interval.")
+    content_index_poll_timeout_ms: int = Field(default=5000, description="Maximum time spent polling a content job.")
 
     # ── 온프레미스 LLM (OpenAI 호환) — smb_finder와 동일 키 재사용 ──
     llm_base_url: str = Field(
@@ -36,7 +42,7 @@ class AgentSettings(BaseSettings):
         description="OpenAI 호환 LLM base_url(온프레미스). llama.cpp 등. 외부 API 금지.",
     )
     llm_model: str = Field(default="local-model", description="LLM 모델명")
-    llm_api_key: str = Field(default="sk-no-key", description="LLM API 키 (llama.cpp 등은 임의값 가능)")
+    llm_api_key: str = Field(default="local-no-key", description="LLM API 키 (llama.cpp 등은 임의값 가능)")
     llm_timeout_ms: int = Field(default=20_000, description="에이전트 LLM 호출 timeout(ms)")
     llm_temperature: float = Field(default=0.0, description="에이전트 LLM temperature")
 

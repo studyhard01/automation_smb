@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     content_search_budget_ms: int = Field(default=1500, description="내용 검색 시간 예산(ms)")
     content_default_limit: int = Field(default=10, description="기본 반환 파일 수")
 
+    # ── 관리자 API (무거운 인덱싱 작업) ──
+    admin_api_token: str = Field(
+        default="",
+        description="관리자 전용 API 토큰. 비어 있으면 /admin/* 엔드포인트는 비활성화",
+    )
+    content_index_job_retention: int = Field(default=50, description="메모리에 보관할 최근 내용 인덱싱 job 수")
+
     # ── L2 의도 해석 LLM (OpenAI 호환) ──
     llm_intent_enabled: bool = Field(default=False, description="모호한 질의를 LLM으로 정규화할지")
     llm_base_url: str = Field(default="http://localhost:8080", description="OpenAI 호환 LLM base_url")

@@ -100,7 +100,7 @@ class SMBContentSearchComponent(Component):
             over = result.get("over_budget", False)
             indexed = result.get("indexed_files", 0)
             if indexed == 0 and "error" not in result:
-                self.status = "내용 인덱스가 비어 있음 — 서비스에서 POST /refresh-content 먼저 실행"
+                self.status = "내용 인덱스가 비어 있음 — SMB 폴더 내용 DB화 컴포넌트를 먼저 실행"
             else:
                 self.status = (
                     f"{hit_n}건 / {result.get('elapsed_ms', '?')}ms (인덱스 {indexed}파일)"

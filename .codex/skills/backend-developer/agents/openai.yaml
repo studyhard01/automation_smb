@@ -1,0 +1,4 @@
+interface:
+  display_name: "Backend Developer"
+  short_description: "Builds server, API, data, and operations changes."
+  default_prompt: "Use $backend-developer to implement the assigned backend work and report blockers to the planner."

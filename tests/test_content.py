@@ -10,10 +10,12 @@ import io
 import zipfile
 
 from smb_finder.config import Settings
+from smb_finder import content_indexer
 from smb_finder.content_index import ContentIndex
 from smb_finder.content_search import ContentSearcher
 from smb_finder.extract import extract_text
 from smb_finder.models import ContentSearchRequest
+from smb_finder.smb_client import FileEntry
 
 
 # ── 추출 ────────────────────────────────────────────────────
@@ -138,6 +140,86 @@ def test_content_searcher_strips_filler_and_times(tmp_path):
     resp = searcher.search(ContentSearchRequest(query="BRCA1 파일 찾아줘"))
     assert resp.terms == ["BRCA1"]  # '파일/찾아줘' 군더더기 제거
     assert resp.hits and resp.hits[0].name == "a.txt"
+    assert resp.result_count == len(resp.hits)
     assert not resp.over_budget
     assert resp.indexed_files == 2
+    idx.close()
+
+
+def test_content_search_budget_warning_does_not_log_raw_query(tmp_path, caplog):
+    idx = _index(tmp_path)
+    settings = Settings(content_default_limit=10, content_search_budget_ms=-1)
+    searcher = ContentSearcher(idx, settings)
+    sensitive_query = "SECRET_PATIENT_456 BRCA1 파일 찾아줘"
+
+    with caplog.at_level("WARNING", logger="smb_finder.content_search"):
+        resp = searcher.search(ContentSearchRequest(query=sensitive_query))
+
+    assert resp.over_budget
+    assert sensitive_query not in caplog.text
+    assert "query_len=" in caplog.text
+    idx.close()
+
+
+def test_content_indexer_skips_unchanged_and_removes_stale(monkeypatch, tmp_path):
+    class FakeSMBClient:
+        read_count = 0
+
+        def __init__(self, *args, **kwargs):
+            self.files = [
+                FileEntry(
+                    path="A/keep.txt",
+                    name="keep.txt",
+                    ext=".txt",
+                    size=4,
+                    mtime=10.0,
+                    abs_path="keep",
+                ),
+                FileEntry(
+                    path="A/new.txt",
+                    name="new.txt",
+                    ext=".txt",
+                    size=3,
+                    mtime=20.0,
+                    abs_path="new",
+                ),
+            ]
+
+        def connect(self):
+            return True
+
+        def disconnect(self):
+            return None
+
+        def walk_files(self, **kwargs):
+            return iter(self.files)
+
+        def read_bytes(self, abs_path, max_bytes):
+            type(self).read_count += 1
+            return {"keep": b"keep", "new": b"new"}[abs_path]
+
+    idx = ContentIndex(str(tmp_path / "content.fts.db"))
+    idx.add(path="A/keep.txt", name="keep.txt", content="keep", ext=".txt", size=4, mtime=10.0)
+    idx.add(path="A/stale.txt", name="stale.txt", content="stale", ext=".txt", size=5, mtime=9.0)
+    idx.commit()
+    idx.close()
+
+    monkeypatch.setattr(content_indexer, "SMBClient", FakeSMBClient)
+    settings = Settings(
+        smb_host="configured-host",
+        smb_share_name="configured-share",
+        content_index_db_path=str(tmp_path / "content.fts.db"),
+    )
+
+    stats = content_indexer.build_content_index(settings, subpath="A")
+
+    assert stats["indexed"] == 1
+    assert stats["skipped_unchanged"] == 1
+    assert stats["removed_stale"] == 1
+    assert FakeSMBClient.read_count == 1
+
+    idx = ContentIndex(str(tmp_path / "content.fts.db"))
+    names = {h.name for h in idx.search(["new"], limit=10)}
+    assert names == {"new.txt"}
+    assert idx.search(["stale"], limit=10) == []
     idx.close()
