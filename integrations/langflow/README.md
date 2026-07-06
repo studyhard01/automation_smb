@@ -114,13 +114,16 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       # 인증이 켜진 Langflow API에 flow를 등록해야 하는 경우:
       # LANGFLOW_API_KEY: ${LANGFLOW_API_KEY}
+      # SMB 폴더 내용 DB화 컴포넌트가 smb-finder admin job API를 호출해야 하는 경우:
+      # ADMIN_API_TOKEN: ${ADMIN_API_TOKEN}
       # 로컬 LLM에 key가 필요한 경우에만:
       # LANGFLOW_COMPOSER_LOCAL_API_KEY: ${LANGFLOW_COMPOSER_LOCAL_API_KEY}
 ```
 
 **내용 검색 (DB화 → 검색, 2단계):**
 1. **SMB 폴더 내용 DB화** 끌어다 놓기 → `DB화할 폴더 경로`에 `검사결과/2026/OO검사` 입력 → 실행.
-   - `관리자 API 토큰`을 Langflow secret/env로 넣어 `/admin/content-index-jobs`를 사용한다. 토큰이 없으면 DB화는 실행하지 않는다.
+   - `관리자 API 토큰 환경변수`에는 실제 토큰 값이 아니라 `ADMIN_API_TOKEN` 같은 환경변수 이름만 넣는다.
+     실제 토큰은 커밋하지 않는 `docker-compose.override.yml` 또는 Langflow 실행 환경에만 둔다.
    - 결과 메시지에 `'…' DB화 완료: N개 파일 적재`가 뜨면 성공이고, 아직 실행 중이면 job id와 현재 상태가 반환된다.
 2. **SMB 파일 내용 검색** 끌어다 놓기 → `질의`에 "BRCA1 변이 보고서" → **요약 메시지**를 Chat Output에 연결 → 실행.
 

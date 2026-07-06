@@ -84,6 +84,30 @@ def _require_admin_token(x_admin_token: str | None) -> None:
         )
 
 
+def _require_allowed_smb_target(request: RefreshContentRequest) -> None:
+    """관리자 인덱싱 target override가 서버 allowlist에 있는지 확인한다."""
+    host = (request.host or "").strip().lower()
+    share = (request.share_name or "").strip().lower()
+    if host and host not in _settings.smb_allowed_host_set:
+        raise HTTPException(
+            status_code=403,
+            detail=ApiErrorResponse(
+                code="smb_host_not_allowed",
+                message="허용되지 않은 SMB 호스트입니다.",
+                retryable=False,
+            ).model_dump(),
+        )
+    if share and share not in _settings.smb_allowed_share_set:
+        raise HTTPException(
+            status_code=403,
+            detail=ApiErrorResponse(
+                code="smb_share_not_allowed",
+                message="허용되지 않은 SMB 공유명입니다.",
+                retryable=False,
+            ).model_dump(),
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """시작 시 인덱스를 로드(캐시 우선)해 첫 요청부터 빠르게 응답한다.
@@ -142,8 +166,11 @@ async def find_share_folder(request: FindRequest) -> FindResponse:
     operation_id="refresh_index",
     summary="폴더 인덱스 재빌드",
 )
-async def refresh_index() -> RefreshIndexResponse:
+async def refresh_index(
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> RefreshIndexResponse:
     """SMB를 다시 순회해 인덱스를 갱신한다 (관리용 — 느림, 사용자 경로 아님)."""
+    _require_admin_token(x_admin_token)
     started = time.perf_counter()
     index = await run_in_threadpool(build_index, _settings)
     _state["index"].replace(index.entries)  # 동일 인스턴스 갱신 (Finder가 참조 유지)
@@ -179,17 +206,42 @@ async def search_file_content(request: ContentSearchRequest) -> ContentSearchRes
     operation_id="index_folder_content",
     summary="폴더 내용 DB화(인덱싱)",
 )
-async def refresh_content_index(request: RefreshContentRequest | None = None) -> RefreshContentResponse:
+async def refresh_content_index(
+    request: RefreshContentRequest | None = None,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> RefreshContentResponse:
     """지정 폴더(path) 아래 파일 본문을 추출해 내용 인덱스에 적재한다 (느림 — 사용자가 명시 실행).
 
     path를 주면 그 폴더만 (재)색인하고 다른 폴더 인덱스는 보존한다. 비우면 공유 전체.
     이후 /search-content가 이 인덱스에서 즉시 검색한다.
     """
+    return await _refresh_content_index_impl(request, x_admin_token=x_admin_token)
+
+
+async def _refresh_content_index_impl(
+    request: RefreshContentRequest | None,
+    x_admin_token: str | None,
+) -> RefreshContentResponse:
+    """관리자 인증 후 내용 인덱스를 동기 갱신한다."""
+    _require_admin_token(x_admin_token)
     req = request or RefreshContentRequest()
+    _require_allowed_smb_target(req)
     started = time.perf_counter()
-    stats = await run_in_threadpool(
-        build_content_index, _settings, req.path, req.host, req.share_name
-    )
+    try:
+        stats = await run_in_threadpool(
+            build_content_index, _settings, req.path, req.host, req.share_name
+        )
+    except RuntimeError as exc:
+        if "already running" not in str(exc):
+            raise
+        raise HTTPException(
+            status_code=409,
+            detail=ApiErrorResponse(
+                code="content_index_busy",
+                message="다른 내용 인덱싱 작업이 실행 중입니다. 잠시 뒤 다시 시도하세요.",
+                retryable=True,
+            ).model_dump(),
+        ) from exc
     content_index = _state.get("content_index")
     indexed_files = content_index.count() if content_index else 0
     return RefreshContentResponse(
@@ -217,6 +269,7 @@ async def create_content_index_job(
     새 API는 `ADMIN_API_TOKEN`이 설정된 환경에서만 열린다.
     """
     _require_admin_token(x_admin_token)
+    _require_allowed_smb_target(request)
     job = _content_jobs.create(request)
     background_tasks.add_task(_content_jobs.run, job.job_id, _settings, build_content_index)
     _logger.info(

@@ -51,6 +51,14 @@ class Settings(BaseSettings):
         description="관리자 전용 API 토큰. 비어 있으면 /admin/* 엔드포인트는 비활성화",
     )
     content_index_job_retention: int = Field(default=50, description="메모리에 보관할 최근 내용 인덱싱 job 수")
+    smb_allowed_hosts: str = Field(
+        default="",
+        description="관리자 인덱싱에서 host override를 허용할 SMB 호스트 목록(쉼표 구분). 비우면 SMB_HOST만 허용",
+    )
+    smb_allowed_shares: str = Field(
+        default="",
+        description="관리자 인덱싱에서 share_name override를 허용할 공유명 목록(쉼표 구분). 비우면 SMB_SHARE_NAME만 허용",
+    )
 
     # ── L2 의도 해석 LLM (OpenAI 호환) ──
     llm_intent_enabled: bool = Field(default=False, description="모호한 질의를 LLM으로 정규화할지")
@@ -73,6 +81,20 @@ class Settings(BaseSettings):
     def content_ext_set(self) -> set[str]:
         """내용 인덱싱 대상 확장자 집합 (소문자, 점 포함)."""
         return {x.strip().lower() for x in self.content_extensions.split(",") if x.strip()}
+
+    @property
+    def smb_allowed_host_set(self) -> set[str]:
+        """관리자 override 허용 SMB 호스트 집합."""
+        configured = {self.smb_host.strip().lower()} if self.smb_host.strip() else set()
+        extra = {x.strip().lower() for x in self.smb_allowed_hosts.split(",") if x.strip()}
+        return configured | extra
+
+    @property
+    def smb_allowed_share_set(self) -> set[str]:
+        """관리자 override 허용 SMB 공유명 집합."""
+        configured = {self.smb_share_name.strip().lower()} if self.smb_share_name.strip() else set()
+        extra = {x.strip().lower() for x in self.smb_allowed_shares.split(",") if x.strip()}
+        return configured | extra
 
     @property
     def content_max_file_bytes(self) -> int:

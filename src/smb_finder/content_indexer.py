@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from . import extract
@@ -16,6 +17,7 @@ from .content_index import ContentIndex
 from .smb_client import SMBClient
 
 _logger = logging.getLogger(__name__)
+_BUILD_LOCK = threading.Lock()
 
 
 def _same_file(old_meta: tuple[int, float] | None, size: int, mtime: float) -> bool:
@@ -27,6 +29,16 @@ def _same_file(old_meta: tuple[int, float] | None, size: int, mtime: float) -> b
 
 
 def build_content_index(settings: Settings, subpath: str = "", host: str = "", share_name: str = "") -> dict:
+    """내용 인덱스 빌드를 프로세스 안에서 직렬화한다."""
+    if not _BUILD_LOCK.acquire(blocking=False):
+        raise RuntimeError("content index build already running")
+    try:
+        return _build_content_index_locked(settings, subpath, host, share_name)
+    finally:
+        _BUILD_LOCK.release()
+
+
+def _build_content_index_locked(settings: Settings, subpath: str = "", host: str = "", share_name: str = "") -> dict:
     """지정 경로 아래 파일 본문을 추출해 내용 인덱스에 적재한다.
 
     subpath가 비면 공유 루트 전체를 대상으로 한다. 지정하면 그 폴더 아래만 증분 갱신하며,
@@ -97,7 +109,6 @@ def build_content_index(settings: Settings, subpath: str = "", host: str = "", s
                 stats["skipped_unchanged"] += 1
                 continue
 
-            index.delete_path(fe.path)
             try:
                 data = client.read_bytes(fe.abs_path, settings.content_max_file_bytes)
             except Exception as e:  # noqa: BLE001 - 한 파일 읽기 실패는 건너뜀
@@ -107,6 +118,7 @@ def build_content_index(settings: Settings, subpath: str = "", host: str = "", s
 
             result = extract.extract_text(fe.name, data, settings.content_max_chars_per_file)
             if result.status == "ok":
+                index.delete_path(fe.path)
                 index.add(
                     path=fe.path,
                     name=fe.name,
@@ -117,8 +129,10 @@ def build_content_index(settings: Settings, subpath: str = "", host: str = "", s
                 )
                 stats["indexed"] += 1
             elif result.status == "unsupported":
+                index.delete_path(fe.path)
                 stats["unsupported"] += 1
             elif result.status == "empty":
+                index.delete_path(fe.path)
                 stats["empty"] += 1
             else:
                 stats["errors"] += 1

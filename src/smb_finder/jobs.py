@@ -42,6 +42,7 @@ class ContentIndexJobStore:
         self._jobs: dict[str, _ContentIndexJob] = {}
         self._order: list[str] = []
         self._lock = threading.Lock()
+        self._run_lock = threading.Lock()
 
     def create(self, request: RefreshContentRequest) -> ContentIndexJobStatusResponse:
         """새 job을 생성하고 queued 상태로 등록한다."""
@@ -73,30 +74,45 @@ class ContentIndexJobStore:
             job.status = "running"
             job.started_at = time.time()
 
-        started = time.perf_counter()
-        try:
-            stats = build_content_index(settings, job.request.path, job.request.host, job.request.share_name)
-        except Exception:  # noqa: BLE001 - 응답/로그에 원문 예외를 싣지 않는다
+        if not self._run_lock.acquire(blocking=False):
             with self._lock:
                 job = self._jobs.get(job_id)
                 if job is None:
                     return
                 job.status = "failed"
                 job.finished_at = time.time()
-                job.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-                job.error_code = "content_index_failed"
-                job.message = "내용 인덱싱 작업 중 오류가 발생했습니다."
+                job.elapsed_ms = 0.0
+                job.error_code = "content_index_busy"
+                job.message = "다른 내용 인덱싱 작업이 실행 중입니다. 잠시 뒤 다시 시도하세요."
             return
 
-        with self._lock:
-            job = self._jobs.get(job_id)
-            if job is None:
+        started = time.perf_counter()
+        try:
+            try:
+                stats = build_content_index(settings, job.request.path, job.request.host, job.request.share_name)
+            except Exception:  # noqa: BLE001 - 응답/로그에 원문 예외를 싣지 않는다
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    if job is None:
+                        return
+                    job.status = "failed"
+                    job.finished_at = time.time()
+                    job.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                    job.error_code = "content_index_failed"
+                    job.message = "내용 인덱싱 작업 중 오류가 발생했습니다."
                 return
-            job.stats = stats
-            job.status = "succeeded"
-            job.finished_at = time.time()
-            job.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-            job.message = "내용 인덱싱 작업이 완료되었습니다."
+
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is None:
+                    return
+                job.stats = stats
+                job.status = "succeeded"
+                job.finished_at = time.time()
+                job.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                job.message = "내용 인덱싱 작업이 완료되었습니다."
+        finally:
+            self._run_lock.release()
 
     def _trim_locked(self) -> None:
         """retention을 넘는 오래된 job을 제거한다."""

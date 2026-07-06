@@ -77,6 +77,29 @@ def test_auto_planner_does_not_call_external_local_llm(monkeypatch):
     assert "local_llm_url_not_internal" in spec.warnings
 
 
+def test_llm_planner_receives_only_intent_summary(monkeypatch):
+    captured: dict[str, str] = {}
+
+    def fake_call(self, *, instruction, base_url, model, api_key):  # noqa: ANN001, ARG001
+        captured["instruction"] = instruction
+        return {"template_id": "folder_search", "confidence": 0.91}
+
+    monkeypatch.setattr(WorkflowPlanner, "_call_openai_compatible_chat", fake_call)
+
+    spec = WorkflowPlanner().plan(
+        r"환자 홍길동 \\10.0.0.5\secret SMB_PASSWORD=abc123 폴더 workflow",
+        llm_provider="local",
+        local_base_url="http://localhost:11434/v1",
+        local_model="local-model",
+    )
+
+    assert spec.planner == "local"
+    assert "has_folder_search_hint" in captured["instruction"]
+    assert "홍길동" not in captured["instruction"]
+    assert "10.0.0.5" not in captured["instruction"]
+    assert "abc123" not in captured["instruction"]
+
+
 def test_renderer_rejects_unsupported_template_request():
     spec = WorkflowPlanner().plan("폴더 내용 DB화 workflow를 만들어줘", llm_provider="rule")
 

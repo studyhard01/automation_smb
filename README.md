@@ -95,9 +95,10 @@ curl -s -X POST http://localhost:8010/search-content \
 # 폴더 인덱스 갱신 (이름 검색용)
 curl -s -X POST http://localhost:8010/refresh
 
-# 내용 DB화 — 원하는 폴더만 인덱싱 (path 지정)
+# 내용 DB화 — 원하는 폴더만 인덱싱 (path 지정, 관리자 토큰 필요)
 curl -s -X POST http://localhost:8010/refresh-content \
   -H 'Content-Type: application/json' \
+  -H 'X-Admin-Token: <ADMIN_API_TOKEN>' \
   -d '{"path": "검사결과/2026/OO검사"}'
 
 # 운영 권장: 관리자용 백그라운드 job으로 내용 DB화
@@ -116,7 +117,9 @@ curl -s http://localhost:8010/admin/content-index-jobs/<job_id> \
 > 이번 범위에서 사라진 기존 인덱스만 정리한다. 이후 `/search-content`는 떠 있는 인덱스에서 즉시 검색한다.
 > (`PDF` 본문까지 쓰려면 `uv pip install -e ".[pdf]"`).
 > 운영 자동화와 관리자 UI는 동기 `/refresh-content` 대신 `/admin/content-index-jobs`를 사용한다.
-> `ADMIN_API_TOKEN`이 비어 있으면 `/admin/*` 엔드포인트는 닫힌다.
+> `ADMIN_API_TOKEN`이 비어 있으면 `/refresh`, `/refresh-content`, `/admin/*` 인덱싱 엔드포인트는 닫힌다.
+> host/share override는 `SMB_ALLOWED_HOSTS`, `SMB_ALLOWED_SHARES` 또는 기본 `SMB_HOST`/`SMB_SHARE_NAME`에
+> 포함된 대상만 허용한다.
 
 ## 테스트 · 린트
 

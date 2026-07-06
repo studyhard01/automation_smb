@@ -98,6 +98,7 @@ def test_refresh_index_response_contract(monkeypatch, tmp_path):
         api._settings = Settings(
             smb_index_cache_path=str(tmp_path / "folder.index.json"),
             smb_index_build_budget_sec=60,
+            admin_api_token="secret",
         )
         api._state.clear()
         api._state["index"] = FolderIndex([])
@@ -107,7 +108,7 @@ def test_refresh_index_response_contract(monkeypatch, tmp_path):
 
         monkeypatch.setattr(api, "build_index", fake_build_index)
 
-        resp = asyncio.run(api.refresh_index())
+        resp = asyncio.run(api.refresh_index(x_admin_token="secret"))
 
         assert resp.folders == 1
         assert resp.indexed_folders == 1
@@ -118,6 +119,20 @@ def test_refresh_index_response_contract(monkeypatch, tmp_path):
         api._settings = old_settings
         api._state.clear()
         api._state.update(old_state)
+
+
+def test_refresh_index_requires_admin_token():
+    old_settings = api._settings
+    try:
+        api._settings = Settings(admin_api_token="secret")
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api.refresh_index())
+
+        assert exc.value.status_code == 403
+        assert exc.value.detail["code"] == "admin_forbidden"
+    finally:
+        api._settings = old_settings
 
 
 def test_refresh_content_response_redacts_target(monkeypatch, tmp_path):
@@ -147,9 +162,17 @@ def test_refresh_content_response_redacts_target(monkeypatch, tmp_path):
 
         monkeypatch.setattr(api, "build_content_index", fake_build_content_index)
 
+        api._settings = Settings(
+            content_index_db_path=str(tmp_path / "content.fts.db"),
+            admin_api_token="secret",
+            smb_host="example.invalid",
+            smb_share_name="sensitive-share",
+        )
+
         resp = asyncio.run(
             api.refresh_content_index(
-                RefreshContentRequest(path="A", host="example.invalid", share_name="sensitive-share")
+                RefreshContentRequest(path="A", host="example.invalid", share_name="sensitive-share"),
+                x_admin_token="secret",
             )
         )
 
@@ -161,6 +184,91 @@ def test_refresh_content_response_redacts_target(monkeypatch, tmp_path):
         assert "example.invalid" not in resp.model_dump_json()
         assert "sensitive-share" not in resp.model_dump_json()
         assert resp.db_path == "content.fts.db"
+    finally:
+        content_index.close()
+        api._settings = old_settings
+        api._state.clear()
+        api._state.update(old_state)
+
+
+def test_refresh_content_requires_admin_token():
+    old_settings = api._settings
+    try:
+        api._settings = Settings(admin_api_token="secret")
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api.refresh_content_index(RefreshContentRequest(path="A")))
+
+        assert exc.value.status_code == 403
+        assert exc.value.detail["code"] == "admin_forbidden"
+    finally:
+        api._settings = old_settings
+
+
+def test_refresh_content_rejects_disallowed_smb_override(monkeypatch, tmp_path):
+    old_settings = api._settings
+    old_state = dict(api._state)
+    content_index = ContentIndex(str(tmp_path / "content.fts.db"))
+    called = False
+    try:
+        api._settings = Settings(
+            content_index_db_path=str(tmp_path / "content.fts.db"),
+            admin_api_token="secret",
+            smb_host="configured-host",
+            smb_share_name="configured-share",
+        )
+        api._state.clear()
+        api._state["content_index"] = content_index
+
+        def fake_build_content_index(settings, subpath="", host="", share_name=""):
+            nonlocal called
+            called = True
+            return {}
+
+        monkeypatch.setattr(api, "build_content_index", fake_build_content_index)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                api.refresh_content_index(
+                    RefreshContentRequest(path="A", host="attacker.example", share_name="configured-share"),
+                    x_admin_token="secret",
+                )
+            )
+
+        assert exc.value.status_code == 403
+        assert exc.value.detail["code"] == "smb_host_not_allowed"
+        assert called is False
+    finally:
+        content_index.close()
+        api._settings = old_settings
+        api._state.clear()
+        api._state.update(old_state)
+
+
+def test_refresh_content_reports_busy(monkeypatch, tmp_path):
+    old_settings = api._settings
+    old_state = dict(api._state)
+    content_index = ContentIndex(str(tmp_path / "content.fts.db"))
+    try:
+        api._settings = Settings(
+            content_index_db_path=str(tmp_path / "content.fts.db"),
+            admin_api_token="secret",
+            smb_host="configured-host",
+            smb_share_name="configured-share",
+        )
+        api._state.clear()
+        api._state["content_index"] = content_index
+
+        def fake_build_content_index(settings, subpath="", host="", share_name=""):
+            raise RuntimeError("content index build already running")
+
+        monkeypatch.setattr(api, "build_content_index", fake_build_content_index)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(api.refresh_content_index(RefreshContentRequest(path="A"), x_admin_token="secret"))
+
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "content_index_busy"
     finally:
         content_index.close()
         api._settings = old_settings
@@ -200,7 +308,12 @@ def test_admin_content_job_create_and_get(monkeypatch):
     old_settings = api._settings
     old_jobs = api._content_jobs
     try:
-        api._settings = Settings(admin_api_token="secret", content_index_job_retention=10)
+        api._settings = Settings(
+            admin_api_token="secret",
+            content_index_job_retention=10,
+            smb_host="example.invalid",
+            smb_share_name="labshare",
+        )
         api._content_jobs = api.ContentIndexJobStore(retention=10)
 
         def fake_add_task(func, *args, **kwargs):

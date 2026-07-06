@@ -110,11 +110,8 @@ def search_content(query: str) -> str:
     terms = " ".join(data.get("terms", []))
     lines = [f"'{terms}' 내용 검색({len(hits)}건, {data.get('elapsed_ms', '?')}ms):"]
     for i, h in enumerate(hits):
-        snip = (h.get("snippet") or "").replace("\n", " ").strip()
-        line = f"{i + 1}. {h['name']} - {h['path']}"
-        if snip:
-            line += f"\n    {snip}"
-        lines.append(line)
+        ext = h.get("ext", "")
+        lines.append(f"{i + 1}. {h['name']} ({ext}) - 경로/본문 미리보기는 보안상 표시하지 않음")
     return "\n".join(lines)
 
 

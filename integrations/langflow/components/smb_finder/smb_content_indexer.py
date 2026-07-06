@@ -16,11 +16,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 import httpx
 from lfx.custom.custom_component.component import Component
 from lfx.io import IntInput, MessageTextInput, Output
 from lfx.schema.message import Message
+
+try:
+    from integrations.langflow.flow_builder.models import is_internal_http_url
+except ModuleNotFoundError:  # Langflow Docker에서는 /app/flow_builder로 마운트된다.
+    from flow_builder.models import is_internal_http_url
 
 
 class SMBContentIndexerComponent(Component):
@@ -40,21 +46,6 @@ class SMBContentIndexerComponent(Component):
             tool_mode=True,  # 에이전트 도구로도 노출
             required=False,
         ),
-        # SMB 접속 대상(선택). 비밀번호·아이디는 보안상 여기서 받지 않는다 — 항상 서버 .env에서만.
-        MessageTextInput(
-            name="host",
-            display_name="SMB 호스트(IP)",
-            info="접속할 SMB 서버 IP. 비우면 서버 .env의 SMB_HOST 사용. (※ 내부망 정보라 플로우에 저장됨)",
-            value="",
-            required=False,
-        ),
-        MessageTextInput(
-            name="share_name",
-            display_name="공유폴더 이름",
-            info="접속할 공유폴더명. 비우면 서버 .env의 SMB_SHARE_NAME 사용.",
-            value="",
-            required=False,
-        ),
         MessageTextInput(
             name="service_url",
             display_name="smb-finder 주소",
@@ -63,10 +54,10 @@ class SMBContentIndexerComponent(Component):
             advanced=True,
         ),
         MessageTextInput(
-            name="admin_api_token",
-            display_name="관리자 API 토큰",
-            info="/admin/content-index-jobs 호출용 토큰. 실제 값은 Langflow secret/env에서 주입하고 저장소에 남기지 않는다.",
-            value="",
+            name="admin_api_token_env",
+            display_name="관리자 API 토큰 환경변수",
+            info="실제 토큰 값이 아니라 환경변수 이름만 입력한다. 예: ADMIN_API_TOKEN.",
+            value="ADMIN_API_TOKEN",
             advanced=True,
         ),
         IntInput(
@@ -97,7 +88,8 @@ class SMBContentIndexerComponent(Component):
     ]
 
     def _admin_headers(self) -> dict[str, str]:
-        token = (self.admin_api_token or "").strip()
+        env_name = (self.admin_api_token_env or "ADMIN_API_TOKEN").strip()
+        token = os.getenv(env_name, "").strip()
         return {"X-Admin-Token": token} if token else {}
 
     def _format_job_status(self, stats: dict, scope: str) -> str:
@@ -143,10 +135,14 @@ class SMBContentIndexerComponent(Component):
         path = (self.path or "").strip()
         base_url = str(self.service_url).rstrip("/")
         timeout_s = max(0.1, int(self.timeout_ms) / 1000)
-        payload = {"path": path, "host": (self.host or "").strip(), "share_name": (self.share_name or "").strip()}
+        payload = {"path": path}
         scope = path or "(공유 전체)"
-        if not (self.admin_api_token or "").strip():
-            msg = "ADMIN_API_TOKEN이 필요합니다. 내용 DB화는 /admin/content-index-jobs job API로만 실행합니다."
+        if not is_internal_http_url(base_url):
+            msg = "smb-finder 주소가 사내/로컬 URL이 아닙니다."
+            self.status = msg
+            return Message(text=msg)
+        if not self._admin_headers():
+            msg = "ADMIN_API_TOKEN 환경변수가 필요합니다. 실제 토큰 값은 Langflow 입력에 저장하지 않습니다."
             self.status = msg
             return Message(text=msg)
 

@@ -72,18 +72,18 @@ class ContentSearchRequest(BaseModel):
 
 
 class RefreshContentRequest(BaseModel):
-    """내용 인덱스 빌드 요청 — 인덱싱할 폴더 경로와 (선택) 접속 대상.
+    """내용 인덱스 빌드 요청 — 인덱싱할 폴더 경로와 관리자용 접속 대상 override.
 
     보안: 자격증명(아이디/비밀번호)은 절대 요청으로 받지 않는다 — 항상 서버 .env에서만 온다.
-    host/share_name만 선택적으로 덮어써 다른 공유폴더를 가리킬 수 있다(비우면 .env 기본값).
+    host/share_name override는 관리자 API에서만 사용하며 서버 allowlist를 통과해야 한다.
     """
 
     path: str = Field(
         default="",
         description="DB화할 폴더(공유 루트 기준 상대 경로, 예 '검사결과/2026/OO검사'). 비우면 공유 전체.",
     )
-    host: str = Field(default="", description="SMB 호스트(IP). 비우면 .env의 SMB_HOST 사용.")
-    share_name: str = Field(default="", description="공유폴더 이름. 비우면 .env의 SMB_SHARE_NAME 사용.")
+    host: str = Field(default="", description="관리자용 SMB 호스트 override. 비우면 .env의 SMB_HOST 사용.")
+    share_name: str = Field(default="", description="관리자용 공유폴더명 override. 비우면 .env의 SMB_SHARE_NAME 사용.")
 
     @field_validator("path")
     @classmethod

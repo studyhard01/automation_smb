@@ -61,6 +61,23 @@ def _mask_sensitive_text(text: str) -> str:
     return masked
 
 
+def _workflow_intent_summary(text: str) -> str:
+    """LLM에는 원문 대신 템플릿 판별에 필요한 비민감 feature만 보낸다."""
+    normalized = text.lower()
+    matched_folder_hints = sorted({hint for hint in _FOLDER_SEARCH_HINTS if hint in normalized})
+    matched_unsupported_hints = sorted({hint for hint in _UNSUPPORTED_TEMPLATE_HINTS if hint in normalized})
+    return json.dumps(
+        {
+            "has_folder_search_hint": bool(matched_folder_hints),
+            "has_unsupported_template_hint": bool(matched_unsupported_hints),
+            "matched_folder_hints": matched_folder_hints,
+            "matched_unsupported_hints": matched_unsupported_hints,
+            "char_len": min(len(text), 500),
+        },
+        ensure_ascii=False,
+    )
+
+
 class WorkflowPlanner:
     """규칙 기반을 기본으로, 설정된 경우에만 LLM으로 템플릿 선택을 보조한다."""
 
@@ -188,7 +205,7 @@ class WorkflowPlanner:
     ) -> WorkflowSpec:
         try:
             llm_result = self._call_openai_compatible_chat(
-                instruction=_mask_sensitive_text(instruction),
+                instruction=_workflow_intent_summary(instruction),
                 base_url=base_url,
                 model=model,
                 api_key=api_key,

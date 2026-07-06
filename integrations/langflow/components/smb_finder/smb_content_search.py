@@ -21,6 +21,11 @@ from lfx.schema.data import Data
 from lfx.schema.dataframe import DataFrame
 from lfx.schema.message import Message
 
+try:
+    from integrations.langflow.flow_builder.models import is_internal_http_url
+except ModuleNotFoundError:  # Langflow Docker에서는 /app/flow_builder로 마운트된다.
+    from flow_builder.models import is_internal_http_url
+
 
 class SMBContentSearchComponent(Component):
     """파일 본문 키워드/내용으로 사내 SMB 파일을 찾는다 (smb-finder 서비스 래퍼)."""
@@ -80,7 +85,12 @@ class SMBContentSearchComponent(Component):
         if self._cache is not None and self._cache.get("_key") == cache_key:
             return self._cache
 
-        url = f"{str(self.service_url).rstrip('/')}/search-content"
+        service_url = str(self.service_url).rstrip("/")
+        if not is_internal_http_url(service_url):
+            self.status = "smb-finder 주소가 사내/로컬 URL이 아닙니다."
+            return {"hits": [], "terms": [], "elapsed_ms": 0, "indexed_files": 0, "error": "invalid_service_url"}
+
+        url = f"{service_url}/search-content"
         payload = {"query": query, "limit": int(self.limit)}
         timeout_s = max(0.1, int(self.timeout_ms) / 1000)
 
@@ -113,17 +123,15 @@ class SMBContentSearchComponent(Component):
 
     # ── 출력 1: 표(DataFrame) — 시각 워크플로/표시용 ────────────────
     async def search_content(self) -> DataFrame:
-        """검색된 파일을 표로 반환한다 (path/name/ext/size/score/snippet)."""
+        """검색된 파일을 표로 반환한다. 경로/본문 snippet은 LLM 연결 위험 때문에 기본 출력에서 제외한다."""
         result = await self._call_service()
         hits = result.get("hits", [])
         rows = [
             Data(data={
-                "path": h["path"],
                 "name": h["name"],
                 "ext": h.get("ext", ""),
                 "size": h.get("size", 0),
                 "score": h.get("score", 0),
-                "snippet": h.get("snippet", ""),
             })
             for h in hits
         ]
@@ -131,7 +139,7 @@ class SMBContentSearchComponent(Component):
 
     # ── 출력 2: 메시지 — 챗봇/에이전트 도구용 요약 텍스트 ──────────
     async def as_message(self) -> Message:
-        """검색 결과를 사람이 읽기 좋은 목록 텍스트(파일명 — 경로 + 스니펫)로 반환한다."""
+        """검색 결과를 사람이 읽기 좋은 목록 텍스트로 반환한다. 경로/본문 snippet은 숨긴다."""
         result = await self._call_service()
         hits = result.get("hits", [])
         if not hits:
@@ -141,9 +149,6 @@ class SMBContentSearchComponent(Component):
         terms = " ".join(result.get("terms", []))
         lines = [f"'{terms}' 내용 검색 결과 ({len(hits)}건):"]
         for i, h in enumerate(hits):
-            snip = (h.get("snippet") or "").replace("\n", " ").strip()
-            line = f"{i + 1}. {h['name']}  —  {h['path']}"
-            if snip:
-                line += f"\n    …{snip}…"
-            lines.append(line)
+            ext = h.get("ext", "")
+            lines.append(f"{i + 1}. {h['name']} ({ext}) — 경로/본문 미리보기는 보안상 표시하지 않음")
         return Message(text="\n".join(lines))

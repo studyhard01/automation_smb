@@ -223,3 +223,50 @@ def test_content_indexer_skips_unchanged_and_removes_stale(monkeypatch, tmp_path
     assert names == {"new.txt"}
     assert idx.search(["stale"], limit=10) == []
     idx.close()
+
+
+def test_content_indexer_preserves_old_row_when_read_fails(monkeypatch, tmp_path):
+    class FakeSMBClient:
+        def __init__(self, *args, **kwargs):
+            self.files = [
+                FileEntry(
+                    path="A/keep.txt",
+                    name="keep.txt",
+                    ext=".txt",
+                    size=5,
+                    mtime=20.0,
+                    abs_path="keep",
+                )
+            ]
+
+        def connect(self):
+            return True
+
+        def disconnect(self):
+            return None
+
+        def walk_files(self, **kwargs):
+            return iter(self.files)
+
+        def read_bytes(self, abs_path, max_bytes):
+            raise OSError("temporary read failure")
+
+    idx = ContentIndex(str(tmp_path / "content.fts.db"))
+    idx.add(path="A/keep.txt", name="keep.txt", content="old searchable text", ext=".txt", size=4, mtime=10.0)
+    idx.commit()
+    idx.close()
+
+    monkeypatch.setattr(content_indexer, "SMBClient", FakeSMBClient)
+    settings = Settings(
+        smb_host="configured-host",
+        smb_share_name="configured-share",
+        content_index_db_path=str(tmp_path / "content.fts.db"),
+    )
+
+    stats = content_indexer.build_content_index(settings, subpath="A")
+
+    assert stats["errors"] == 1
+    idx = ContentIndex(str(tmp_path / "content.fts.db"))
+    names = {h.name for h in idx.search(["searchable"], limit=10)}
+    assert names == {"keep.txt"}
+    idx.close()
