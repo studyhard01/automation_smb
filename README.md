@@ -82,10 +82,13 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 - tool 목록: `GET /api/playground/tools`
 - 채팅 실행: `POST /api/playground/chat`
 - Tool Lab 초안: `POST /api/playground/tool-draft`
+- local LLM 확인: `POST /api/playground/llm-status`
 
 첫 버전은 local/on-prem OpenAI 호환 LLM만 사용한다. `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`,
 `LLM_TIMEOUT_MS` 환경변수를 사용하며, SMB tool 결과를 외부 OpenAI로 재전송하지 않는다. LLM 모델이 비어 있으면
 UI는 tool을 실행하지 않고 설정 필요 메시지를 반환한다.
+화면에서 Base URL과 모델명을 임시 입력해 `.env` 수정 없이 Ollama/LM Studio/llama.cpp 같은 로컬 서버를 확인할 수 있다.
+예: `http://127.0.0.1:11434/v1`, `qwen2.5-coder:7b`.
 
 ## 설치 · 실행
 

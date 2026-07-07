@@ -33,10 +33,17 @@
               </select>
             </label>
             <label>
-              Model
-              <input id="model" type="text" placeholder="LLM_MODEL 또는 모델명" autocomplete="off" />
+              Base URL
+              <input id="baseUrl" type="url" placeholder="http://127.0.0.1:11434/v1" autocomplete="off" />
             </label>
+            <label>
+              Model
+              <input id="model" type="text" placeholder="qwen2.5-coder:7b" autocomplete="off" list="modelOptions" />
+              <datalist id="modelOptions"></datalist>
+            </label>
+            <button id="checkLlm" class="secondary-button" type="button">연결 확인</button>
           </div>
+          <div id="llmStatus" class="status-line" aria-live="polite">local LLM 미확인</div>
         </header>
 
         <div id="chatView" class="view active">

@@ -14,7 +14,16 @@ import httpx
 
 from smb_finder.config import Settings
 
-from .models import ChatRequest, ChatResponse, PlannedToolCall, ToolCallTrace, ToolDraftRequest, ToolDraftResponse
+from .models import (
+    ChatRequest,
+    ChatResponse,
+    LlmStatusRequest,
+    LlmStatusResponse,
+    PlannedToolCall,
+    ToolCallTrace,
+    ToolDraftRequest,
+    ToolDraftResponse,
+)
 from .tools import ToolHandler
 
 
@@ -58,6 +67,7 @@ class PlaygroundAgent:
         started = time.perf_counter()
         session_id = request.session_id or f"pg-{uuid.uuid4()}"
         model = (request.model or self.settings.llm_model).strip()
+        base_url = self._local_base_url(request.local_base_url)
         warnings: list[str] = []
 
         if request.provider != "local":
@@ -76,7 +86,7 @@ class PlaygroundAgent:
                 "local_llm_not_configured",
                 "로컬 LLM 모델이 설정되지 않았습니다. LLM_MODEL 또는 화면의 모델명을 입력하세요.",
             )
-        if not _is_internal_http_url(self.settings.llm_base_url):
+        if not _is_internal_http_url(base_url):
             return self._error_response(
                 session_id,
                 started,
@@ -95,7 +105,7 @@ class PlaygroundAgent:
             warnings.append(f"disabled_tools_ignored:{','.join(disabled)}")
 
         try:
-            planned = self._plan_tool_calls(request.message, handlers, model)
+            planned = self._plan_tool_calls(request.message, handlers, model, base_url)
         except Exception:  # noqa: BLE001 - UI에는 안전한 오류 코드만 반환한다.
             return self._error_response(
                 session_id,
@@ -136,7 +146,7 @@ class PlaygroundAgent:
                 )
             )
 
-        assistant_message = self._compose_answer(request.message, traces, model, warnings)
+        assistant_message = self._compose_answer(request.message, traces, model, base_url, warnings)
         return ChatResponse(
             session_id=session_id,
             provider_used="local",
@@ -149,6 +159,7 @@ class PlaygroundAgent:
 
     def draft_tool(self, request: ToolDraftRequest) -> ToolDraftResponse:
         model = (request.model or self.settings.llm_model).strip()
+        base_url = self._local_base_url(request.local_base_url)
         if request.provider != "local":
             return ToolDraftResponse(
                 model_used=model,
@@ -161,6 +172,12 @@ class PlaygroundAgent:
                 error_code="local_llm_not_configured",
                 message="로컬 LLM 모델이 설정되지 않았습니다.",
             )
+        if not _is_internal_http_url(base_url):
+            return ToolDraftResponse(
+                model_used=model,
+                error_code="local_llm_url_not_internal",
+                message="로컬 LLM 주소는 localhost 또는 사내망 주소만 허용됩니다.",
+            )
         prompt = (
             "Create a safe tool manifest draft for automation_smb. "
             "Return only JSON with keys: id, display_name, description, permission, inputs, safety_notes. "
@@ -171,7 +188,7 @@ class PlaygroundAgent:
             data = self._chat_json([
                 {"role": "system", "content": "Return only compact JSON."},
                 {"role": "user", "content": prompt},
-            ], model=model, max_tokens=500)
+            ], model=model, base_url=base_url, max_tokens=500)
         except Exception:  # noqa: BLE001
             return ToolDraftResponse(
                 model_used=model,
@@ -184,11 +201,87 @@ class PlaygroundAgent:
             message="초안이 생성되었습니다. 아직 저장되거나 활성화되지 않았습니다.",
         )
 
+    def check_llm(self, request: LlmStatusRequest) -> LlmStatusResponse:
+        """local LLM의 모델 목록과 JSON 응답 가능 여부를 확인한다."""
+        started = time.perf_counter()
+        model = (request.model or self.settings.llm_model).strip()
+        base_url = self._local_base_url(request.local_base_url)
+        if request.provider != "local":
+            return LlmStatusResponse(
+                base_url_used=base_url,
+                model_used=model,
+                error_code="unsupported_provider",
+                message="Playground 1차 버전은 local/on-prem LLM만 지원합니다.",
+            )
+        if not _is_internal_http_url(base_url):
+            return LlmStatusResponse(
+                base_url_used=base_url,
+                model_used=model,
+                error_code="local_llm_url_not_internal",
+                message="로컬 LLM 주소는 localhost 또는 사내망 주소만 허용됩니다.",
+            )
+
+        available_models: list[str] = []
+        try:
+            available_models = self._list_models(base_url)
+        except Exception:  # noqa: BLE001
+            return LlmStatusResponse(
+                base_url_used=base_url,
+                model_used=model,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                error_code="local_llm_models_failed",
+                message="로컬 LLM 모델 목록을 가져오지 못했습니다.",
+            )
+
+        if not model:
+            return LlmStatusResponse(
+                base_url_used=base_url,
+                available_models=available_models,
+                models_ok=True,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                error_code="local_llm_model_missing",
+                message="모델 목록은 확인했지만 사용할 모델명이 비어 있습니다.",
+            )
+
+        try:
+            data = self._chat_json(
+                [
+                    {"role": "system", "content": "Return only JSON."},
+                    {"role": "user", "content": "Return {\"ok\": true}."},
+                ],
+                model=model,
+                base_url=base_url,
+                max_tokens=40,
+            )
+        except Exception:  # noqa: BLE001
+            return LlmStatusResponse(
+                base_url_used=base_url,
+                model_used=model,
+                available_models=available_models,
+                models_ok=True,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                error_code="local_llm_chat_failed",
+                message="모델 목록은 확인했지만 chat completions 호출에 실패했습니다.",
+            )
+
+        chat_ok = data.get("ok") is True
+        return LlmStatusResponse(
+            base_url_used=base_url,
+            model_used=model,
+            available_models=available_models,
+            models_ok=True,
+            chat_ok=chat_ok,
+            elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+            message="로컬 LLM 연결이 정상입니다." if chat_ok else "응답은 받았지만 JSON 확인값이 예상과 다릅니다.",
+            error_code="" if chat_ok else "local_llm_unexpected_response",
+        )
+
     def _plan_tool_calls(
         self,
         message: str,
         handlers: dict[str, ToolHandler],
         model: str,
+        base_url: str,
     ) -> list[PlannedToolCall]:
         tool_specs = [
             {
@@ -220,6 +313,7 @@ class PlaygroundAgent:
                 },
             ],
             model=model,
+            base_url=base_url,
             max_tokens=300,
         )
         calls = data.get("tool_calls", [])
@@ -242,6 +336,7 @@ class PlaygroundAgent:
         message: str,
         traces: list[ToolCallTrace],
         model: str,
+        base_url: str,
         warnings: list[str],
     ) -> str:
         if not traces:
@@ -258,6 +353,7 @@ class PlaygroundAgent:
                         {"role": "user", "content": message[:1000]},
                     ],
                     model=model,
+                    base_url=base_url,
                     max_tokens=300,
                 )
                 answer = str(data.get("answer", "")).strip()
@@ -294,6 +390,7 @@ class PlaygroundAgent:
                     },
                 ],
                 model=model,
+                base_url=base_url,
                 max_tokens=500,
             )
             answer = str(data.get("answer", "")).strip()
@@ -303,12 +400,17 @@ class PlaygroundAgent:
             warnings.append("answer_llm_failed")
         return "\n\n".join(trace.result_text for trace in traces if trace.result_text)
 
-    def _chat_json(self, messages: list[dict[str, str]], *, model: str, max_tokens: int) -> dict[str, Any]:
-        base_url = self.settings.llm_base_url.rstrip("/")
+    def _chat_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        base_url: str,
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        base_url = base_url.rstrip("/")
         url = f"{base_url}/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        if self.settings.llm_api_key:
-            headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
+        headers = self._headers_for(base_url)
         payload = {
             "model": model,
             "messages": messages,
@@ -321,6 +423,27 @@ class PlaygroundAgent:
             response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
         return _json_from_text(content)
+
+    def _list_models(self, base_url: str) -> list[str]:
+        url = f"{base_url.rstrip('/')}/models"
+        headers = self._headers_for(base_url)
+        timeout_s = max(0.1, self.settings.llm_timeout_ms / 1000)
+        with httpx.Client(timeout=timeout_s) as client:
+            response = client.get(url, headers=headers)
+            response.raise_for_status()
+        data = response.json()
+        models = data.get("data", [])
+        return [str(item.get("id", "")).strip() for item in models if isinstance(item, dict) and item.get("id")]
+
+    def _local_base_url(self, override: str = "") -> str:
+        return (override or self.settings.llm_base_url).strip().rstrip("/")
+
+    def _headers_for(self, base_url: str) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        configured_base_url = self.settings.llm_base_url.strip().rstrip("/")
+        if self.settings.llm_api_key and base_url.rstrip("/") == configured_base_url:
+            headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
+        return headers
 
     def _error_response(
         self,

@@ -137,7 +137,8 @@ p {
 }
 
 .chat-header {
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 18px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
@@ -183,6 +184,36 @@ p {
   background: #fff;
   padding: 8px 10px;
   color: var(--text);
+}
+
+.model-row #baseUrl {
+  width: 240px;
+}
+
+.secondary-button {
+  align-self: end;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.status-line {
+  grid-column: 2;
+  justify-self: end;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-line.ok {
+  color: var(--accent);
+}
+
+.status-line.error {
+  color: var(--danger);
 }
 
 .view {
@@ -311,9 +342,15 @@ p {
 
   .chat-header {
     align-items: stretch;
+    grid-template-columns: 1fr;
   }
 
   .model-row {
     justify-content: flex-start;
+  }
+
+  .status-line {
+    grid-column: 1;
+    justify-self: start;
   }
 }

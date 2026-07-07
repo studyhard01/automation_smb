@@ -8,7 +8,15 @@ from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 from .agent import PlaygroundAgent
-from .models import ChatRequest, ChatResponse, ToolDefinition, ToolDraftRequest, ToolDraftResponse
+from .models import (
+    ChatRequest,
+    ChatResponse,
+    LlmStatusRequest,
+    LlmStatusResponse,
+    ToolDefinition,
+    ToolDraftRequest,
+    ToolDraftResponse,
+)
 from .tools import PlaygroundRuntime, build_tool_registry
 
 
@@ -52,5 +60,16 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         runtime = runtime_getter()
         agent = PlaygroundAgent(runtime.settings)
         return await run_in_threadpool(agent.draft_tool, request)
+
+    @router.post(
+        "/api/playground/llm-status",
+        response_model=LlmStatusResponse,
+        operation_id="check_playground_llm",
+        summary="Playground local LLM 연결 확인",
+    )
+    async def check_playground_llm(request: LlmStatusRequest) -> LlmStatusResponse:
+        runtime = runtime_getter()
+        agent = PlaygroundAgent(runtime.settings)
+        return await run_in_threadpool(agent.check_llm, request)
 
     return router

@@ -39,6 +39,7 @@ class ChatRequest(BaseModel):
     session_id: str = ""
     history: list[ChatMessage] = Field(default_factory=list)
     provider: Literal["local"] = "local"
+    local_base_url: str = ""
     model: str = ""
 
 
@@ -88,6 +89,7 @@ class ToolDraftRequest(BaseModel):
 
     instruction: str = Field(min_length=1, max_length=2000)
     provider: Literal["local"] = "local"
+    local_base_url: str = ""
     model: str = ""
 
 
@@ -99,4 +101,26 @@ class ToolDraftResponse(BaseModel):
     draft: dict[str, Any] = Field(default_factory=dict)
     message: str = ""
     warnings: list[str] = Field(default_factory=list)
+    error_code: str = ""
+
+
+class LlmStatusRequest(BaseModel):
+    """local LLM 연결 확인 요청."""
+
+    provider: Literal["local"] = "local"
+    local_base_url: str = ""
+    model: str = ""
+
+
+class LlmStatusResponse(BaseModel):
+    """local LLM 연결 확인 응답."""
+
+    provider_used: str = "local"
+    base_url_used: str = ""
+    model_used: str = ""
+    available_models: list[str] = Field(default_factory=list)
+    models_ok: bool = False
+    chat_ok: bool = False
+    elapsed_ms: float = 0.0
+    message: str = ""
     error_code: str = ""

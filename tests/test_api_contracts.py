@@ -36,6 +36,7 @@ def test_openapi_operation_ids_are_stable():
     assert operations["/api/playground/tools"]["get"]["operationId"] == "list_playground_tools"
     assert operations["/api/playground/chat"]["post"]["operationId"] == "run_playground_chat"
     assert operations["/api/playground/tool-draft"]["post"]["operationId"] == "draft_playground_tool"
+    assert operations["/api/playground/llm-status"]["post"]["operationId"] == "check_playground_llm"
     assert "ApiErrorResponse" in schema["components"]["schemas"]
 
 

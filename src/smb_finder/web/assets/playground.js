@@ -8,7 +8,11 @@ const messages = document.querySelector("#messages");
 const chatForm = document.querySelector("#chatForm");
 const messageInput = document.querySelector("#messageInput");
 const providerInput = document.querySelector("#provider");
+const baseUrlInput = document.querySelector("#baseUrl");
 const modelInput = document.querySelector("#model");
+const modelOptions = document.querySelector("#modelOptions");
+const checkLlmButton = document.querySelector("#checkLlm");
+const llmStatus = document.querySelector("#llmStatus");
 const reloadTools = document.querySelector("#reloadTools");
 const toolLabForm = document.querySelector("#toolLabForm");
 const toolInstruction = document.querySelector("#toolInstruction");
@@ -81,6 +85,7 @@ async function sendChat(message) {
     selected_tool_ids: selectedToolIds(),
     session_id: state.sessionId,
     provider: providerInput.value,
+    local_base_url: baseUrlInput.value.trim(),
     model: modelInput.value.trim(),
   };
   const response = await fetch("/api/playground/chat", {
@@ -127,6 +132,7 @@ toolLabForm.addEventListener("submit", async (event) => {
     body: JSON.stringify({
       instruction,
       provider: providerInput.value,
+      local_base_url: baseUrlInput.value.trim(),
       model: modelInput.value.trim(),
     }),
   });
@@ -144,5 +150,40 @@ document.querySelectorAll(".tab").forEach((tab) => {
   });
 });
 
+function setLlmStatus(text, status = "") {
+  llmStatus.textContent = text;
+  llmStatus.className = `status-line ${status}`.trim();
+}
+
+async function checkLlm() {
+  setLlmStatus("local LLM 확인 중...");
+  const response = await fetch("/api/playground/llm-status", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      provider: providerInput.value,
+      local_base_url: baseUrlInput.value.trim(),
+      model: modelInput.value.trim(),
+    }),
+  });
+  const data = await response.json();
+  modelOptions.innerHTML = "";
+  for (const modelName of data.available_models || []) {
+    const option = document.createElement("option");
+    option.value = modelName;
+    modelOptions.appendChild(option);
+  }
+  if (!modelInput.value.trim() && data.available_models?.length) {
+    modelInput.value = data.available_models[0];
+  }
+  if (data.chat_ok) {
+    setLlmStatus(`${data.model_used} 연결 정상 (${data.elapsed_ms}ms)`, "ok");
+    return;
+  }
+  const message = data.message || data.error_code || `HTTP ${response.status}`;
+  setLlmStatus(message, "error");
+}
+
+checkLlmButton.addEventListener("click", checkLlm);
 reloadTools.addEventListener("click", loadTools);
 loadTools();
