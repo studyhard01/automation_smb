@@ -13,7 +13,8 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import load_settings
 from .content_index import open_index
@@ -35,6 +36,8 @@ from .models import (
     RefreshContentResponse,
     RefreshIndexResponse,
 )
+from .playground.api import create_playground_router
+from .playground.tools import PlaygroundRuntime
 
 logging.basicConfig(level=logging.INFO)
 _logger = logging.getLogger(__name__)
@@ -137,6 +140,31 @@ app = FastAPI(
     lifespan=lifespan,
     responses={500: {"model": ApiErrorResponse, "description": "공통 서버 오류"}},
 )
+
+_WEB_DIR = Path(__file__).resolve().parent / "web"
+app.mount(
+    "/playground/assets",
+    StaticFiles(directory=str(_WEB_DIR / "assets")),
+    name="playground-assets",
+)
+
+
+def _playground_runtime() -> PlaygroundRuntime:
+    """현재 FastAPI 상태를 Playground tool 실행 런타임으로 노출한다."""
+    return PlaygroundRuntime(
+        settings=_settings,
+        finder=_state.get("finder"),
+        content_searcher=_state.get("content_searcher"),
+    )
+
+
+app.include_router(create_playground_router(_playground_runtime))
+
+
+@app.get("/playground", include_in_schema=False)
+async def playground_page() -> FileResponse:
+    """자체 챗봇/tool Playground 화면을 반환한다."""
+    return FileResponse(_WEB_DIR / "index.html")
 
 
 @app.exception_handler(Exception)

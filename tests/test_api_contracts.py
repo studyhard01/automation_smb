@@ -21,6 +21,7 @@ def test_openapi_operation_ids_are_stable():
         path: methods
         for path, methods in schema["paths"].items()
         if path in {"/find", "/search-content", "/refresh", "/refresh-content", "/health"}
+        or path.startswith("/api/playground")
         or path.startswith("/admin/content-index-jobs")
     }
 
@@ -32,6 +33,9 @@ def test_openapi_operation_ids_are_stable():
     assert operations["/admin/content-index-jobs"]["post"]["operationId"] == "create_content_index_job"
     assert operations["/admin/content-index-jobs"]["get"]["operationId"] == "list_content_index_jobs"
     assert operations["/admin/content-index-jobs/{job_id}"]["get"]["operationId"] == "get_content_index_job"
+    assert operations["/api/playground/tools"]["get"]["operationId"] == "list_playground_tools"
+    assert operations["/api/playground/chat"]["post"]["operationId"] == "run_playground_chat"
+    assert operations["/api/playground/tool-draft"]["post"]["operationId"] == "draft_playground_tool"
     assert "ApiErrorResponse" in schema["components"]["schemas"]
 
 

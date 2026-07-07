@@ -133,7 +133,121 @@ def test_installer_creates_flow_via_langflow_api():
 
     assert result.action == "created"
     assert result.flow_url.endswith("/flow/11111111-1111-1111-1111-111111111111")
-    assert [request.method for request in requests] == ["GET", "POST"]
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/all"),
+        ("GET", "/api/v1/flows/"),
+        ("POST", "/api/v1/flows/"),
+    ]
+
+
+def test_installer_sends_langflow_api_key_as_x_api_key(monkeypatch):
+    monkeypatch.setenv("LANGFLOW_API_KEY", "test-langflow-key")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "test-langflow-key"
+        assert "authorization" not in request.headers
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            201,
+            json={"id": "55555555-5555-5555-5555-555555555555", "name": "SMB 공유폴더 찾기"},
+        )
+
+    spec = WorkflowPlanner().plan("공유폴더 찾기 workflow", llm_provider="rule")
+    flow = render_langflow_flow(spec).flow
+    installer = LangflowFlowInstaller(transport=httpx.MockTransport(handler))
+
+    result = installer.install(flow)
+
+    assert result.action == "created"
+
+
+def test_installer_hydrates_nodes_from_langflow_registry():
+    registry = {
+        "input_output": {
+            "ChatInput": {
+                "display_name": "Chat Input",
+                "description": "",
+                "icon": "MessagesSquare",
+                "field_order": ["input_value"],
+                "template": {
+                    "input_value": {"type": "str", "value": "", "input_types": ["Message", "str"]},
+                },
+                "outputs": [{"name": "message", "types": ["Message"], "selected": "Message"}],
+            },
+            "ChatOutput": {
+                "display_name": "Chat Output",
+                "description": "",
+                "icon": "MessageSquare",
+                "field_order": ["input_value"],
+                "template": {
+                    "input_value": {"type": "str", "value": "", "input_types": ["Message", "str"]},
+                },
+                "outputs": [{"name": "message", "types": ["Message"], "selected": "Message"}],
+            },
+        },
+        "smb_finder": {
+            "ext:smb_finder:SMBFolderFinderComponent@extra": {
+                "display_name": "SMB 공유폴더 찾기",
+                "description": "사내 smb-finder 호출",
+                "icon": "folder-search",
+                "field_order": ["query", "service_url", "limit", "timeout_ms"],
+                "template": {
+                    "query": {"type": "str", "value": "", "input_types": ["Message", "str"]},
+                    "service_url": {"type": "str", "value": ""},
+                    "limit": {"type": "int", "value": 0},
+                    "timeout_ms": {"type": "int", "value": 0},
+                },
+                "outputs": [
+                    {"name": "folders", "types": ["Table"], "selected": "Table"},
+                    {"name": "message", "types": ["Message"], "selected": "Message"},
+                ],
+            }
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/all":
+            return httpx.Response(200, json=registry)
+        if request.method == "GET":
+            return httpx.Response(200, json=[])
+        payload = json.loads(request.content.decode("utf-8"))
+        nodes = payload["data"]["nodes"]
+        edges = payload["data"]["edges"]
+        assert nodes[0]["data"]["node"]["field_order"] == ["input_value"]
+        assert nodes[1]["data"]["type"] == "ext:smb_finder:SMBFolderFinderComponent@extra"
+        assert nodes[1]["data"]["node"]["template"]["service_url"]["value"] == "http://localhost:8010"
+        assert nodes[1]["positionAbsolute"] == nodes[1]["position"]
+        assert edges[0]["sourceHandle"].startswith("{œdataTypeœ:œChatInputœ")
+        assert " " not in edges[0]["sourceHandle"]
+        assert json.loads(edges[0]["sourceHandle"].replace("œ", '"'))["dataType"] == "ChatInput"
+        assert edges[0]["data"]["targetHandle"]["fieldName"] == "query"
+        return httpx.Response(
+            201,
+            json={"id": "66666666-6666-6666-6666-666666666666", "name": payload["name"]},
+        )
+
+    spec = WorkflowPlanner().plan("공유폴더 찾기 workflow", llm_provider="rule")
+    flow = render_langflow_flow(spec).flow
+    installer = LangflowFlowInstaller(transport=httpx.MockTransport(handler))
+
+    result = installer.install(flow)
+
+    assert result.action == "created"
+
+
+def test_installer_reports_missing_api_key_for_forbidden(monkeypatch):
+    monkeypatch.delenv("LANGFLOW_API_KEY", raising=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001
+        return httpx.Response(403, json={"detail": "Forbidden"})
+
+    spec = WorkflowPlanner().plan("공유폴더 찾기 workflow", llm_provider="rule")
+    flow = render_langflow_flow(spec).flow
+    installer = LangflowFlowInstaller(transport=httpx.MockTransport(handler))
+
+    with pytest.raises(PermissionError, match="LANGFLOW_API_KEY"):
+        installer.install(flow, update_existing=False)
 
 
 def test_installer_updates_existing_flow():
@@ -154,12 +268,21 @@ def test_installer_updates_existing_flow():
     result = installer.install(flow)
 
     assert result.action == "updated"
-    assert [request.method for request in requests] == ["GET", "PATCH"]
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/all"),
+        ("GET", "/api/v1/flows/"),
+        ("PATCH", f"/api/v1/flows/{flow_id}"),
+    ]
 
 
 def test_installer_rejects_public_langflow_url():
     with pytest.raises(ValueError):
         LangflowFlowInstaller(langflow_url="https://langflow.example")
+
+
+def test_installer_rejects_api_key_value_as_env_name():
+    with pytest.raises(ValueError, match="환경변수 이름"):
+        LangflowFlowInstaller(api_key_env="sk-test-secret-value")
 
 
 def test_installer_sends_folder_id_in_payload():

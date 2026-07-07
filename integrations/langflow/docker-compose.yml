@@ -19,6 +19,11 @@ services:
       # 흐름/세션을 파일 DB에 영속화(사내 디스크). 외부 DB 불필요.
       LANGFLOW_DATABASE_URL: sqlite:////app/langflow_data/langflow.db
       LANGFLOW_CONFIG_DIR: /app/langflow_data
+      # 로컬 개발 중 브라우저 세션이 만료되면 flow 페이지가 빈 "Untitled Flow"로 보일 수 있다.
+      # localhost 바인딩 전제의 편의 설정이며, 운영/공용 배포에서는 더 짧게 override한다.
+      LANGFLOW_AUTO_LOGIN: ${LANGFLOW_AUTO_LOGIN:-true}
+      LANGFLOW_ACCESS_TOKEN_EXPIRE_SECONDS: ${LANGFLOW_ACCESS_TOKEN_EXPIRE_SECONDS:-43200}
+      LANGFLOW_REFRESH_TOKEN_EXPIRE_SECONDS: ${LANGFLOW_REFRESH_TOKEN_EXPIRE_SECONDS:-604800}
       # 워크플로우 자동 생성기: 로컬 LLM 기본, OpenAI는 allow 플래그와 API key가 있을 때만 사용.
       LANGFLOW_COMPOSER_LOCAL_BASE_URL: ${LANGFLOW_COMPOSER_LOCAL_BASE_URL:-}
       LANGFLOW_COMPOSER_LOCAL_MODEL: ${LANGFLOW_COMPOSER_LOCAL_MODEL:-}

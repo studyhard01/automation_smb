@@ -58,6 +58,8 @@ Pydantic 응답 모델을 사용해 OpenAPI 도구 계약을 고정한다.
 | `src/smb_finder/content_indexer.py` | SMB 파일 순회→추출→FTS5 적재 (관리/백그라운드) |
 | `src/smb_finder/content_search.py` | 내용 검색 오케스트레이터 (토큰화→검색, 시간 측정) |
 | `src/smb_finder/api.py` | FastAPI 앱 — `POST /find`·`/search-content`·`/refresh*` (OpenAPI 도구) |
+| `src/smb_finder/playground/` | 자체 챗봇 Playground — 선택한 tool만 호출하는 local LLM 기반 채팅 API |
+| `src/smb_finder/web/` | `/playground` 정적 UI — tool 선택, 채팅, Tool Lab 초안 화면 |
 | `integrations/langflow/` | 노코드 외피 — Langflow 컴포넌트 + `folder_search` 워크플로우 자동 생성기 ([README](integrations/langflow/README.md)) |
 | `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
 
@@ -71,6 +73,19 @@ Pydantic 응답 모델을 사용해 OpenAPI 도구 계약을 고정한다.
 첫 자동 생성 템플릿은 `folder_search`다. 자연어 요구사항을 입력하면 기존 `SMBFolderFinder`
 컴포넌트를 재사용하는 Langflow flow를 생성하고, Langflow API에 바로 등록할 수 있다. 기본은
 규칙/로컬 LLM이며, OpenAI는 명시 설정이 있을 때만 사용한다.
+
+## 자체 챗봇 Playground
+
+Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한다.
+
+- 화면: `GET /playground`
+- tool 목록: `GET /api/playground/tools`
+- 채팅 실행: `POST /api/playground/chat`
+- Tool Lab 초안: `POST /api/playground/tool-draft`
+
+첫 버전은 local/on-prem OpenAI 호환 LLM만 사용한다. `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`,
+`LLM_TIMEOUT_MS` 환경변수를 사용하며, SMB tool 결과를 외부 OpenAI로 재전송하지 않는다. LLM 모델이 비어 있으면
+UI는 tool을 실행하지 않고 설정 필요 메시지를 반환한다.
 
 ## 설치 · 실행
 

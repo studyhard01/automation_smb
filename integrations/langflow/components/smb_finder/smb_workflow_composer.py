@@ -7,21 +7,23 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from lfx.custom.custom_component.component import Component
 from lfx.io import DropdownInput, IntInput, MessageTextInput, Output
 from lfx.schema.data import Data
 from lfx.schema.message import Message
 
-try:
-    from integrations.langflow.flow_builder import (
-        DEFAULT_SERVICE_URL,
-        LangflowFlowInstaller,
-        WorkflowPlanner,
-        render_langflow_flow,
-    )
-except ModuleNotFoundError:  # Langflow Docker에서는 integrations/ 없이 /app/flow_builder로 마운트된다.
-    from flow_builder import DEFAULT_SERVICE_URL, LangflowFlowInstaller, WorkflowPlanner, render_langflow_flow
+DEFAULT_SERVICE_URL = "http://localhost:8010"
+
+
+def _load_flow_builder() -> tuple[Any, Any, Any]:
+    """Langflow 로더가 컴포넌트를 누락하지 않도록 생성 모듈은 실행 시점에 불러온다."""
+    try:
+        from integrations.langflow.flow_builder import LangflowFlowInstaller, WorkflowPlanner, render_langflow_flow
+    except ModuleNotFoundError:  # Langflow Docker에서는 integrations/ 없이 /app/flow_builder로 마운트된다.
+        from flow_builder import LangflowFlowInstaller, WorkflowPlanner, render_langflow_flow
+    return LangflowFlowInstaller, WorkflowPlanner, render_langflow_flow
 
 
 class SMBWorkflowComposerComponent(Component):
@@ -86,8 +88,8 @@ class SMBWorkflowComposerComponent(Component):
         ),
         MessageTextInput(
             name="langflow_api_key_env",
-            display_name="Langflow API key 환경변수",
-            info="인증이 켜진 Langflow에서만 사용. 실제 key가 아니라 환경변수 이름만 입력한다.",
+            display_name="Langflow API key 환경변수명",
+            info="실제 key 값이 아니라 환경변수 이름만 입력한다. 예: LANGFLOW_API_KEY. sk-... 값은 여기에 넣지 않는다.",
             value="LANGFLOW_API_KEY",
             advanced=True,
         ),
@@ -158,6 +160,7 @@ class SMBWorkflowComposerComponent(Component):
             return self._cache
 
         try:
+            _, WorkflowPlanner, render_langflow_flow = _load_flow_builder()
             spec = WorkflowPlanner().plan(
                 instruction,
                 service_url=str(self.service_url),
@@ -198,6 +201,7 @@ class SMBWorkflowComposerComponent(Component):
             return Data(data=self._install_cache)
 
         try:
+            LangflowFlowInstaller, _, _ = _load_flow_builder()
             installer = LangflowFlowInstaller(
                 langflow_url=str(self.langflow_url),
                 api_key_env=str(self.langflow_api_key_env or "LANGFLOW_API_KEY"),

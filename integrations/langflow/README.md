@@ -74,8 +74,25 @@ PYTHONPATH="$(pwd)" LANGFLOW_COMPONENTS_PATH="$(pwd)/components" langflow run --
 5. 생성된 flow의 **SMB 공유폴더 찾기** 컴포넌트에서 `smb-finder 주소`를 Docker 사용 시
    `http://host.docker.internal:8010`으로 맞춘 뒤 실행한다.
 
-원클릭 등록은 Langflow API의 `POST /api/v1/flows/`와 `PATCH /api/v1/flows/{id}`를 사용한다. 인증이 켜진 Langflow라면
-실제 token을 컴포넌트 입력에 쓰지 말고 `LANGFLOW_API_KEY` 같은 환경변수로만 주입한다.
+`flow_url`을 열었는데 상단이 **Untitled Flow**이고 캔버스가 비어 있으면, 먼저 브라우저 로그인 세션을 의심한다.
+Langflow 1.10.1은 만료된 `access_token_lf` 쿠키가 남아 있으면 `/api/v1/session`에서 토큰 만료 오류가 나고,
+flow 데이터가 정상 저장되어 있어도 화면이 비어 보일 수 있다. Chrome에서 아래 중 하나로 세션을 새로 만든 뒤
+같은 `flow_url`을 다시 연다.
+
+```text
+http://127.0.0.1:7860/api/v1/auto_login
+```
+
+또는 Chrome 주소창 왼쪽 사이트 정보 아이콘에서 `127.0.0.1` 사이트 데이터를 삭제한 뒤 `http://127.0.0.1:7860`을
+다시 연다. 이 복구 절차는 Langflow 브라우저 쿠키만 갱신하며, 저장된 flow 데이터나 SMB 인덱스는 지우지 않는다.
+
+원클릭 등록은 Langflow API의 `POST /api/v1/flows/`와 `PATCH /api/v1/flows/{id}`를 사용한다. Langflow 1.10.1 기준
+API key는 `x-api-key` 헤더로 전송된다. 브라우저 로그인 세션은 서버에서 실행되는 커스텀 컴포넌트의 API 호출에
+자동 전달되지 않으므로, 인증이 켜진 Langflow라면 실제 token을 컴포넌트 입력에 쓰지 말고 `LANGFLOW_API_KEY`
+같은 환경변수로만 주입한다.
+
+`Langflow 등록 실패: 403 Forbidden`이 뜨면 등록용 API key가 없거나 권한이 부족한 상태다. Langflow UI에서 API key를
+발급한 뒤, 커밋하지 않는 `docker-compose.override.yml` 또는 실행 환경에만 넣고 컨테이너를 재시작한다.
 
 CLI로도 같은 JSON을 만들 수 있다:
 
