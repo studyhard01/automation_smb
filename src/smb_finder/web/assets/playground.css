@@ -226,7 +226,24 @@ p {
 }
 
 #chatView {
-  grid-template-rows: 1fr auto;
+  grid-template-rows: auto 1fr auto;
+}
+
+.debug-controls {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfd;
+  padding: 10px 20px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.debug-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .messages {
@@ -265,6 +282,64 @@ p {
 
 .trace strong {
   color: var(--text);
+}
+
+.agent-trace,
+.raw-debug {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.trace-title {
+  margin-bottom: 8px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.agent-step {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fafbfc;
+  padding: 8px;
+}
+
+.agent-step + .agent-step {
+  margin-top: 8px;
+}
+
+.agent-step-heading {
+  color: var(--text);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.agent-step pre,
+.raw-debug pre {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.raw-debug summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.raw-debug pre {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111827;
+  color: #d1fae5;
+  padding: 10px;
 }
 
 .composer {

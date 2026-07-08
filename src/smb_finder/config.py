@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(default="", description="LLM API 키 (llama.cpp는 빈 값 가능)")
     llm_timeout_ms: int = Field(default=800, description="LLM 호출 timeout(ms)")
 
+    # ── Playground 제한형 agent/debug ──
+    playground_agent_max_steps: int = Field(default=3, description="Playground agent 최대 판단 단계 수")
+    playground_agent_max_tool_calls: int = Field(default=2, description="Playground agent 요청당 최대 tool 호출 수")
+    playground_agent_budget_ms: int = Field(default=10000, description="Playground agent 전체 시간 예산(ms)")
+    playground_agent_context_messages: int = Field(default=6, description="Playground agent에 전달할 최근 대화 수")
+    playground_agent_result_chars: int = Field(default=2000, description="LLM observation에 전달할 tool 결과 최대 글자 수")
+    playground_debug_raw_llm: bool = Field(default=False, description="테스트용 raw LLM debug 반환 허용")
+    playground_debug_preview_chars: int = Field(default=4000, description="raw LLM debug preview 최대 글자 수")
+
     @property
     def smb_root(self) -> str:
         r"""공유 루트 UNC 경로 (\\host\share)."""

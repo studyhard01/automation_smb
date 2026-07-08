@@ -1,6 +1,7 @@
 const state = {
   tools: [],
   sessionId: "",
+  history: [],
 };
 
 const toolList = document.querySelector("#toolList");
@@ -17,30 +18,11 @@ const reloadTools = document.querySelector("#reloadTools");
 const toolLabForm = document.querySelector("#toolLabForm");
 const toolInstruction = document.querySelector("#toolInstruction");
 const toolDraft = document.querySelector("#toolDraft");
+const debugTraceInput = document.querySelector("#debugTrace");
+const debugRawLlmInput = document.querySelector("#debugRawLlm");
 
 function selectedToolIds() {
   return [...document.querySelectorAll("[data-tool-id]:checked")].map((item) => item.value);
-}
-
-function addMessage(role, text, options = {}) {
-  const el = document.createElement("article");
-  el.className = `message ${role}${options.error ? " error" : ""}`;
-  el.textContent = text;
-  if (options.traces?.length) {
-    const traceBox = document.createElement("div");
-    traceBox.className = "trace";
-    traceBox.innerHTML = options.traces
-      .map((trace) => {
-        const status = trace.error_code ? `${trace.status} / ${trace.error_code}` : trace.status;
-        return `<div><strong>${trace.tool_name}</strong> ${status}, ${trace.elapsed_ms}ms<br>${escapeHtml(
-          trace.result_text || ""
-        )}</div>`;
-      })
-      .join("");
-    el.appendChild(traceBox);
-  }
-  messages.appendChild(el);
-  messages.scrollTop = messages.scrollHeight;
 }
 
 function escapeHtml(value) {
@@ -49,6 +31,101 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function limitText(value, limit = 1200) {
+  const text = String(value || "");
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit)}...[truncated ${text.length - limit} chars]`;
+}
+
+function compactHistory() {
+  return state.history.slice(-8).map((item) => ({
+    role: item.role,
+    content: limitText(item.content, 1000),
+  }));
+}
+
+function addMessage(role, text, options = {}) {
+  const el = document.createElement("article");
+  el.className = `message ${role}${options.error ? " error" : ""}`;
+  el.textContent = text;
+
+  if (options.traces?.length) {
+    el.appendChild(renderToolTrace(options.traces));
+  }
+  if (options.agentSteps?.length) {
+    el.appendChild(renderAgentTrace(options.agentSteps));
+  }
+  if (options.debug?.llm_calls?.length) {
+    el.appendChild(renderRawDebug(options.debug.llm_calls));
+  }
+
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+  return el;
+}
+
+function renderToolTrace(traces) {
+  const traceBox = document.createElement("div");
+  traceBox.className = "trace";
+  traceBox.innerHTML = traces
+    .map((trace) => {
+      const status = trace.error_code ? `${trace.status} / ${trace.error_code}` : trace.status;
+      return `<div><strong>${escapeHtml(trace.tool_name)}</strong> ${escapeHtml(status)}, ${escapeHtml(
+        trace.elapsed_ms
+      )}ms<br>${escapeHtml(trace.result_text || "")}</div>`;
+    })
+    .join("");
+  return traceBox;
+}
+
+function renderAgentTrace(steps) {
+  const box = document.createElement("div");
+  box.className = "agent-trace";
+  const title = document.createElement("div");
+  title.className = "trace-title";
+  title.textContent = "Agent trace";
+  box.appendChild(title);
+
+  for (const step of steps) {
+    const item = document.createElement("div");
+    item.className = `agent-step ${step.kind || ""}`;
+    const heading = document.createElement("div");
+    heading.className = "agent-step-heading";
+    heading.textContent = `#${step.step} ${step.title || step.kind || "step"}${
+      step.elapsed_ms ? ` · ${step.elapsed_ms}ms` : ""
+    }`;
+    const detail = document.createElement("pre");
+    detail.textContent = limitText(
+      [
+        step.action ? `action: ${step.action}` : "",
+        step.tool_name || step.tool_id ? `tool: ${step.tool_name || step.tool_id}` : "",
+        step.status ? `status: ${step.status}` : "",
+        step.error_code ? `error: ${step.error_code}` : "",
+        step.detail || "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      2000
+    );
+    item.appendChild(heading);
+    item.appendChild(detail);
+    box.appendChild(item);
+  }
+  return box;
+}
+
+function renderRawDebug(calls) {
+  const details = document.createElement("details");
+  details.className = "raw-debug";
+  const summary = document.createElement("summary");
+  summary.textContent = `Raw LLM debug (${calls.length})`;
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify(calls, null, 2);
+  details.appendChild(summary);
+  details.appendChild(pre);
+  return details;
 }
 
 async function loadTools() {
@@ -84,9 +161,12 @@ async function sendChat(message) {
     message,
     selected_tool_ids: selectedToolIds(),
     session_id: state.sessionId,
+    history: compactHistory(),
     provider: providerInput.value,
     local_base_url: baseUrlInput.value.trim(),
     model: modelInput.value.trim(),
+    debug_trace: debugTraceInput.checked,
+    debug_raw_llm: debugRawLlmInput.checked,
   };
   const response = await fetch("/api/playground/chat", {
     method: "POST",
@@ -100,10 +180,16 @@ async function sendChat(message) {
   }
   state.sessionId = data.session_id || state.sessionId;
   const warnings = data.warnings?.length ? `\n\n주의: ${data.warnings.join(", ")}` : "";
-  addMessage("assistant", `${data.assistant_message}${warnings}`, {
+  const budget = data.over_budget ? "\n\n주의: agent 시간 예산을 초과했습니다." : "";
+  addMessage("assistant", `${data.assistant_message}${warnings}${budget}`, {
     traces: data.tool_calls,
+    agentSteps: data.agent_steps,
+    debug: data.debug,
     error: Boolean(data.error_code),
   });
+  state.history.push({ role: "user", content: message });
+  state.history.push({ role: "assistant", content: data.assistant_message || "" });
+  state.history = state.history.slice(-12);
 }
 
 chatForm.addEventListener("submit", async (event) => {
@@ -112,8 +198,7 @@ chatForm.addEventListener("submit", async (event) => {
   if (!message) return;
   messageInput.value = "";
   addMessage("user", message);
-  addMessage("assistant", "처리 중...");
-  const pending = messages.lastElementChild;
+  const pending = addMessage("assistant", "처리 중...");
   try {
     await sendChat(message);
   } finally {

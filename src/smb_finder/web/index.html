@@ -47,6 +47,16 @@
         </header>
 
         <div id="chatView" class="view active">
+          <div class="debug-controls">
+            <label>
+              <input id="debugTrace" type="checkbox" />
+              Agent trace 보기
+            </label>
+            <label>
+              <input id="debugRawLlm" type="checkbox" />
+              Raw LLM debug 보기
+            </label>
+          </div>
           <div id="messages" class="messages" aria-live="polite"></div>
           <form id="chatForm" class="composer">
             <textarea id="messageInput" rows="2" placeholder="예: BRCA 결과 폴더 찾아줘"></textarea>

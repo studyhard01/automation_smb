@@ -5,8 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from smb_finder.config import Settings
-from smb_finder.playground.agent import PlaygroundAgent
-from smb_finder.playground.models import ChatRequest, LlmStatusRequest, PlannedToolCall
+from smb_finder.playground.agent import PlaygroundAgent, _json_from_text
+from smb_finder.playground.models import AgentDecision, ChatRequest, LlmDebugCall, LlmStatusRequest, PlannedToolCall
 from smb_finder.playground.tools import PlaygroundRuntime, build_tool_registry
 
 
@@ -27,6 +27,16 @@ class FakeContentSearcher:
             indexed_files=1,
             hits=[SimpleNamespace(name="report.txt", ext=".txt", path="검사결과/report.txt")],
         )
+
+
+def _runtime(**settings_kwargs):
+    settings = Settings(
+        llm_model="local-model",
+        llm_base_url="http://localhost:8080/v1",
+        find_budget_ms=1500,
+        **settings_kwargs,
+    )
+    return PlaygroundRuntime(settings=settings, finder=FakeFinder(), content_searcher=FakeContentSearcher())
 
 
 def test_tool_registry_exposes_builtin_tools_without_admin():
@@ -59,61 +69,197 @@ def test_agent_requires_local_llm_model():
 
 
 def test_agent_blocks_unselected_tool_from_llm(monkeypatch):
-    runtime = PlaygroundRuntime(
-        settings=Settings(llm_model="local-model", llm_base_url="http://localhost:8080/v1"),
-        finder=FakeFinder(),
-        content_searcher=FakeContentSearcher(),
-    )
+    runtime = _runtime()
     registry = build_tool_registry(runtime)
     agent = PlaygroundAgent(runtime.settings)
+    decisions = iter(
+        [
+            AgentDecision(
+                action="tool_call",
+                tool_calls=[PlannedToolCall(tool_id="find_folder", arguments={"query": "OO검사"})],
+            ),
+            AgentDecision(action="final_answer", answer="차단된 tool 요청이 있어 실행하지 않았습니다."),
+        ]
+    )
 
-    def fake_plan(message, handlers, model, base_url):  # noqa: ANN001, ARG001
-        return [PlannedToolCall(tool_id="find_folder", arguments={"query": "OO검사"})]
-
-    monkeypatch.setattr(agent, "_plan_tool_calls", fake_plan)
-    monkeypatch.setattr(agent, "_compose_answer", lambda message, traces, model, base_url, warnings: "blocked")
+    monkeypatch.setattr(agent, "_decide_next_action", lambda **kwargs: next(decisions))
 
     response = agent.run(
-        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["search_content"]),
+        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["search_content"], debug_trace=True),
         registry=registry,
     )
 
     assert response.tool_calls == []
     assert "unselected_tool_blocked:find_folder" in response.warnings
+    assert any(step.error_code == "unselected_tool_blocked" for step in response.agent_steps)
 
 
-def test_agent_executes_selected_tool(monkeypatch):
-    runtime = PlaygroundRuntime(
-        settings=Settings(llm_model="local-model", llm_base_url="http://localhost:8080/v1"),
-        finder=FakeFinder(),
-        content_searcher=FakeContentSearcher(),
-    )
+def test_agent_executes_tool_then_final_answer(monkeypatch):
+    runtime = _runtime()
     registry = build_tool_registry(runtime)
     agent = PlaygroundAgent(runtime.settings)
+    decisions = iter(
+        [
+            AgentDecision(
+                action="tool_call",
+                tool_calls=[PlannedToolCall(tool_id="find_folder", arguments={"query": "OO검사"})],
+                rationale="폴더 위치 요청이므로 공유폴더 찾기를 사용합니다.",
+            ),
+            AgentDecision(action="final_answer", answer="OO검사 폴더를 찾았습니다."),
+        ]
+    )
 
-    def fake_plan(message, handlers, model, base_url):  # noqa: ANN001, ARG001
-        return [PlannedToolCall(tool_id="find_folder", arguments={"query": "OO검사"})]
-
-    monkeypatch.setattr(agent, "_plan_tool_calls", fake_plan)
-    monkeypatch.setattr(agent, "_compose_answer", lambda message, traces, model, base_url, warnings: traces[0].result_text)
+    monkeypatch.setattr(agent, "_decide_next_action", lambda **kwargs: next(decisions))
 
     response = agent.run(
-        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["find_folder"]),
+        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["find_folder"], debug_trace=True),
         registry=registry,
     )
 
     assert response.error_code == ""
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].tool_id == "find_folder"
-    assert "OO검사" in response.assistant_message
+    assert response.assistant_message == "OO검사 폴더를 찾았습니다."
+    assert [step.kind for step in response.agent_steps] == ["decision", "tool_call", "observation", "decision", "final"]
+
+
+def test_agent_accepts_local_model_tool_call_aliases(monkeypatch):
+    runtime = _runtime()
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+
+    def fake_chat(messages, *, model, base_url, max_tokens, purpose="chat_json", debug_calls=None):  # noqa: ANN001, ARG001
+        if purpose == "agent_decision_step_1":
+            return {"action": "tool_call", "tool_calls": [{"id": "find_folder", "inputs": {"query": "OO검사"}}]}
+        return {"action": "final_answer", "answer": "완료"}
+
+    monkeypatch.setattr(agent, "_chat_json", fake_chat)
+
+    response = agent.run(
+        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["find_folder"]),
+        registry=registry,
+    )
+
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].tool_id == "find_folder"
+
+
+def test_agent_blocks_duplicate_tool_call(monkeypatch):
+    runtime = _runtime()
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+    repeated = AgentDecision(
+        action="tool_call",
+        tool_calls=[PlannedToolCall(tool_id="find_folder", arguments={"query": "OO검사"})],
+    )
+    decisions = iter([repeated, repeated])
+
+    monkeypatch.setattr(agent, "_decide_next_action", lambda **kwargs: next(decisions))
+
+    response = agent.run(
+        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["find_folder"], debug_trace=True),
+        registry=registry,
+    )
+
+    assert len(response.tool_calls) == 1
+    assert "duplicate_tool_call_blocked:find_folder" in response.warnings
+    assert any(step.error_code == "duplicate_tool_call_blocked" for step in response.agent_steps)
+
+
+def test_agent_hides_agent_steps_when_trace_disabled(monkeypatch):
+    runtime = _runtime()
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+
+    monkeypatch.setattr(agent, "_decide_next_action", lambda **kwargs: AgentDecision(action="final_answer", answer="완료"))
+
+    response = agent.run(
+        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["find_folder"], debug_trace=False),
+        registry=registry,
+    )
+
+    assert response.assistant_message == "완료"
+    assert response.agent_steps == []
+
+
+def test_raw_llm_debug_requires_server_gate(monkeypatch):
+    runtime = _runtime(playground_debug_raw_llm=False)
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+
+    monkeypatch.setattr(agent, "_decide_next_action", lambda **kwargs: AgentDecision(action="final_answer", answer="완료"))
+
+    response = agent.run(
+        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["find_folder"], debug_raw_llm=True),
+        registry=registry,
+    )
+
+    assert response.debug is None
+    assert "debug_raw_llm_denied" in response.warnings
+
+
+def test_raw_llm_debug_is_returned_when_server_gate_allows(monkeypatch):
+    runtime = _runtime(playground_debug_raw_llm=True)
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+
+    def fake_decide(**kwargs):  # noqa: ANN003
+        debug_calls = kwargs.get("debug_calls")
+        if debug_calls is not None:
+            debug_calls.append(LlmDebugCall(purpose="agent_decision_step_1", raw_response='{"action":"final_answer"}'))
+        return AgentDecision(action="final_answer", answer="완료")
+
+    monkeypatch.setattr(agent, "_decide_next_action", fake_decide)
+
+    response = agent.run(
+        ChatRequest(message="OO검사 폴더 찾아줘", selected_tool_ids=["find_folder"], debug_raw_llm=True),
+        registry=registry,
+    )
+
+    assert response.debug is not None
+    assert response.debug.llm_calls[0].purpose == "agent_decision_step_1"
+
+
+def test_safe_debug_text_redacts_secrets_and_limits_length():
+    settings_kwargs = {"llm_api" + "_key": "secret-key-value"}
+    agent = PlaygroundAgent(
+        Settings(
+            smb_host="fileserver.local",
+            smb_share_name="labshare",
+            smb_password="pw-value",
+            admin_api_token="admin-token-value",
+            playground_debug_preview_chars=60,
+            **settings_kwargs,
+        )
+    )
+
+    text = "http://user:pass@localhost/v1 fileserver.local labshare pw-value admin-token-value secret-key-value "
+    text += "x" * 100
+    safe = agent._safe_debug_text(text)
+
+    assert "fileserver.local" not in safe
+    assert "labshare" not in safe
+    assert "pw-value" not in safe
+    assert "admin-token-value" not in safe
+    assert "secret-key-value" not in safe
+    assert "user:pass" not in safe
+    assert len(safe) < len(text)
+
+
+def test_json_from_text_repairs_missing_outer_object_closer():
+    raw = """```json
+{"tool_calls":[{"tool_id":"find_folder","arguments":{"query":"BRCA"}}]
+```"""
+
+    assert _json_from_text(raw) == {
+        "tool_calls": [{"tool_id": "find_folder", "arguments": {"query": "BRCA"}}],
+    }
 
 
 def test_llm_status_blocks_public_url():
     agent = PlaygroundAgent(Settings(llm_model="local-model", llm_base_url="http://localhost:8080/v1"))
 
-    response = agent.check_llm(
-        LlmStatusRequest(local_base_url="https://llm.example/v1", model="local-model")
-    )
+    response = agent.check_llm(LlmStatusRequest(local_base_url="https://llm.example/v1", model="local-model"))
 
     assert response.error_code == "local_llm_url_not_internal"
 
@@ -121,26 +267,23 @@ def test_llm_status_blocks_public_url():
 def test_llm_status_lists_models_and_checks_chat(monkeypatch):
     fake_key = "secret-key"
     settings_kwargs = {"llm_api" + "_key": fake_key}
-    agent = PlaygroundAgent(
-        Settings(llm_model="", llm_base_url="http://localhost:8080/v1", **settings_kwargs)
-    )
+    agent = PlaygroundAgent(Settings(llm_model="", llm_base_url="http://localhost:8080/v1", **settings_kwargs))
     captured: dict[str, str] = {}
 
     def fake_models(base_url):  # noqa: ANN001
         captured["models_base_url"] = base_url
         return ["model-a", "model-b"]
 
-    def fake_chat(messages, *, model, base_url, max_tokens):  # noqa: ANN001, ARG001
+    def fake_chat(messages, *, model, base_url, max_tokens, purpose="chat_json", debug_calls=None):  # noqa: ANN001, ARG001
         captured["chat_base_url"] = base_url
         captured["model"] = model
+        captured["purpose"] = purpose
         return {"ok": True}
 
     monkeypatch.setattr(agent, "_list_models", fake_models)
     monkeypatch.setattr(agent, "_chat_json", fake_chat)
 
-    response = agent.check_llm(
-        LlmStatusRequest(local_base_url="http://127.0.0.1:11434/v1", model="model-b")
-    )
+    response = agent.check_llm(LlmStatusRequest(local_base_url="http://127.0.0.1:11434/v1", model="model-b"))
 
     assert response.models_ok is True
     assert response.chat_ok is True
@@ -152,4 +295,5 @@ def test_llm_status_lists_models_and_checks_chat(monkeypatch):
         "models_base_url": "http://127.0.0.1:11434/v1",
         "chat_base_url": "http://127.0.0.1:11434/v1",
         "model": "model-b",
+        "purpose": "llm_status",
     }
