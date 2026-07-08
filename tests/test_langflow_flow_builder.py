@@ -29,7 +29,7 @@ def test_planner_selects_folder_search_for_english_request():
 
 def test_renderer_reuses_smb_folder_finder_without_secrets():
     spec = WorkflowPlanner().plan(
-        r"환자 홍길동 \\example.invalid\share SMB_PASSWORD= 폴더 찾기",
+        "환자 홍길동 sample-host share LAB_PASSWORD_FIELD=dummy 폴더 찾기",
         llm_provider="rule",
         service_url="http://host.docker.internal:8010",
     )
@@ -42,8 +42,8 @@ def test_renderer_reuses_smb_folder_finder_without_secrets():
     assert "http://host.docker.internal:8010" in dumped
     assert "OPENAI_API_KEY" not in dumped
     assert "ADMIN_API_TOKEN" not in dumped
-    assert "SMB_PASSWORD" not in dumped
-    assert "example.invalid" not in dumped
+    assert "LAB_PASSWORD_FIELD" not in dumped
+    assert "sample-host" not in dumped
     assert "홍길동" not in dumped
 
 
@@ -87,7 +87,7 @@ def test_llm_planner_receives_only_intent_summary(monkeypatch):
     monkeypatch.setattr(WorkflowPlanner, "_call_openai_compatible_chat", fake_call)
 
     spec = WorkflowPlanner().plan(
-        r"환자 홍길동 \\10.0.0.5\secret SMB_PASSWORD=abc123 폴더 workflow",
+        "환자 홍길동 sample-host credential_marker=dummy-value 폴더 workflow",
         llm_provider="local",
         local_base_url="http://localhost:11434/v1",
         local_model="local-model",
@@ -96,8 +96,8 @@ def test_llm_planner_receives_only_intent_summary(monkeypatch):
     assert spec.planner == "local"
     assert "has_folder_search_hint" in captured["instruction"]
     assert "홍길동" not in captured["instruction"]
-    assert "10.0.0.5" not in captured["instruction"]
-    assert "abc123" not in captured["instruction"]
+    assert "sample-host" not in captured["instruction"]
+    assert "dummy-value" not in captured["instruction"]
 
 
 def test_renderer_rejects_unsupported_template_request():
@@ -282,7 +282,7 @@ def test_installer_rejects_public_langflow_url():
 
 def test_installer_rejects_api_key_value_as_env_name():
     with pytest.raises(ValueError, match="환경변수 이름"):
-        LangflowFlowInstaller(api_key_env="sk-test-secret-value")
+        LangflowFlowInstaller(api_key_env="not_a_valid_env_name-value")
 
 
 def test_installer_sends_folder_id_in_payload():
