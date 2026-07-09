@@ -36,14 +36,15 @@ class Finder:
         over_budget = elapsed_ms > self._settings.find_budget_ms
         if over_budget:
             _logger.warning(
-                "시간 예산 초과: %.1fms > %dms (query=%r)",
-                elapsed_ms, self._settings.find_budget_ms, request.query,
+                "시간 예산 초과: %.1fms > %dms (query_len=%d, hits=%d)",
+                elapsed_ms, self._settings.find_budget_ms, len(request.query), len(hits),
             )
 
         return FindResponse(
             query=request.query,
             normalized_query=normalized,
             hits=hits,
+            result_count=len(hits),
             elapsed_ms=round(elapsed_ms, 1),
             source="index",
             over_budget=over_budget,

@@ -45,12 +45,39 @@ class Settings(BaseSettings):
     content_search_budget_ms: int = Field(default=1500, description="내용 검색 시간 예산(ms)")
     content_default_limit: int = Field(default=10, description="기본 반환 파일 수")
 
+    # ── 관리자 API (무거운 인덱싱 작업) ──
+    admin_api_token: str = Field(
+        default="",
+        description="관리자 전용 API 토큰. 비어 있으면 /admin/* 엔드포인트는 비활성화",
+    )
+    content_index_job_retention: int = Field(default=50, description="메모리에 보관할 최근 내용 인덱싱 job 수")
+    smb_allowed_hosts: str = Field(
+        default="",
+        description="관리자 인덱싱에서 host override를 허용할 SMB 호스트 목록(쉼표 구분). 비우면 SMB_HOST만 허용",
+    )
+    smb_allowed_shares: str = Field(
+        default="",
+        description="관리자 인덱싱에서 share_name override를 허용할 공유명 목록(쉼표 구분). 비우면 SMB_SHARE_NAME만 허용",
+    )
+
     # ── L2 의도 해석 LLM (OpenAI 호환) ──
     llm_intent_enabled: bool = Field(default=False, description="모호한 질의를 LLM으로 정규화할지")
     llm_base_url: str = Field(default="http://localhost:8080", description="OpenAI 호환 LLM base_url")
     llm_model: str = Field(default="", description="LLM 모델명 (llama.cpp는 빈 값 가능)")
     llm_api_key: str = Field(default="", description="LLM API 키 (llama.cpp는 빈 값 가능)")
-    llm_timeout_ms: int = Field(default=800, description="LLM 호출 timeout(ms)")
+    llm_timeout_ms: int = Field(default=10000, description="LLM 호출 timeout(ms)")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", description="OpenAI API base_url")
+    openai_model: str = Field(default="gpt-4.1-mini", description="Playground OpenAI 기본 모델명")
+    openai_api_key: str = Field(default="", description="OpenAI API 키. UI 요청 값이 우선")
+
+    # ── Playground 제한형 agent/debug ──
+    playground_agent_max_steps: int = Field(default=3, description="Playground agent 최대 판단 단계 수")
+    playground_agent_max_tool_calls: int = Field(default=2, description="Playground agent 요청당 최대 tool 호출 수")
+    playground_agent_budget_ms: int = Field(default=10000, description="Playground agent 전체 시간 예산(ms)")
+    playground_agent_context_messages: int = Field(default=6, description="Playground agent에 전달할 최근 대화 수")
+    playground_agent_result_chars: int = Field(default=2000, description="LLM observation에 전달할 tool 결과 최대 글자 수")
+    playground_debug_raw_llm: bool = Field(default=False, description="테스트용 raw LLM debug 반환 허용")
+    playground_debug_preview_chars: int = Field(default=4000, description="raw LLM debug preview 최대 글자 수")
 
     @property
     def smb_root(self) -> str:
@@ -66,6 +93,20 @@ class Settings(BaseSettings):
     def content_ext_set(self) -> set[str]:
         """내용 인덱싱 대상 확장자 집합 (소문자, 점 포함)."""
         return {x.strip().lower() for x in self.content_extensions.split(",") if x.strip()}
+
+    @property
+    def smb_allowed_host_set(self) -> set[str]:
+        """관리자 override 허용 SMB 호스트 집합."""
+        configured = {self.smb_host.strip().lower()} if self.smb_host.strip() else set()
+        extra = {x.strip().lower() for x in self.smb_allowed_hosts.split(",") if x.strip()}
+        return configured | extra
+
+    @property
+    def smb_allowed_share_set(self) -> set[str]:
+        """관리자 override 허용 SMB 공유명 집합."""
+        configured = {self.smb_share_name.strip().lower()} if self.smb_share_name.strip() else set()
+        extra = {x.strip().lower() for x in self.smb_allowed_shares.split(",") if x.strip()}
+        return configured | extra
 
     @property
     def content_max_file_bytes(self) -> int:

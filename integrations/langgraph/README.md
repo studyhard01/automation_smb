@@ -8,7 +8,7 @@ Langflow flow(`smbtest-*`)가 하던 "Agent + SMB 도구 + Chat" 구성을 LangG
 [LangGraph Studio]  ──붙음──▶  [langgraph dev (로컬 서버)]  ──그래프──▶  [에이전트 LLM ⇄ 도구]
                                                                               │ HTTP
                                                                               ▼
-                                          POST /find · /search-content · /refresh-content
+                                          POST /find · /search-content · /admin/content-index-jobs
                                                               │
                                                               ▼
                                           [smb-finder 서비스]  (localhost:8010, 사내망)
@@ -83,6 +83,7 @@ langgraph dev
 - 좌측에서 `smb_agent` 그래프 선택 → 채팅 입력에 "OO검사 결과 폴더 찾아줘" / "BRCA1 변이 보고서
   내용 검색" 입력 → 에이전트가 도구를 골라 smb-finder를 호출하는 과정을 노드 단위로 본다.
 - 내용 검색이 "인덱스 비어 있음"이면 "검사결과/2026/OO검사 폴더 DB화해줘"로 `refresh_content` 먼저.
+  `ADMIN_API_TOKEN`이 설정된 운영 환경에서는 admin job 생성 후 상태를 짧게 polling한다.
 
 ## 버전 메모
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Security Reviewer"
+  short_description: "Checks service and API flows for sensitive data leakage."
+  default_prompt: "Use $security-reviewer to review this service for sensitive data leakage risks."

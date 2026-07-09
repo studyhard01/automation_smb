@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Push"
+  short_description: "Push a branch, open a PR, and report the PR to Slack."
+  default_prompt: "Use $push to push the current branch, create a PR, and report it to Slack."

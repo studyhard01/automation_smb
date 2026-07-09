@@ -30,7 +30,7 @@ line-length = 120
 src = ["src", "tests"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 markers = [
     "integration: 실제 SMB/LLM 서버가 필요한 테스트",
 ]

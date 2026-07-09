@@ -70,10 +70,10 @@ class SMBClient:
                 connection_timeout=connection_timeout,
             )
             self._connected = True
-            _logger.info("SMB 연결 성공: %s", self.host)
+            _logger.info("SMB 연결 성공")
             return True
         except Exception as e:  # noqa: BLE001 — 연결 실패는 단일 지점에서 처리
-            _logger.error("SMB 연결 실패: %s", e)
+            _logger.error("SMB 연결 실패: %s", type(e).__name__)
             return False
 
     def disconnect(self) -> None:
@@ -115,7 +115,7 @@ class SMBClient:
         try:
             entries = list(smbclient.scandir(abs_path))  # 지연 이터레이터 → list로 접근 강제(에러 포착)
         except Exception as e:  # noqa: BLE001 — 접근 불가 폴더는 건너뛴다
-            _logger.debug("scandir 실패 (skip): %s (%s)", abs_path, e)
+            _logger.debug("scandir 실패(skip): %s", type(e).__name__)
             return
 
         for entry in entries:
@@ -185,7 +185,7 @@ class SMBClient:
             # list()로 try 안에서 강제해, 잘못된/접근 불가 경로를 여기서 잡는다.
             entries = list(smbclient.scandir(abs_path))
         except Exception as e:  # noqa: BLE001 — 접근 불가/없는 폴더는 건너뛴다(상위는 0건 처리)
-            _logger.debug("scandir 실패 (skip): %s (%s)", abs_path, e)
+            _logger.debug("scandir 실패(skip): %s", type(e).__name__)
             return
 
         for entry in entries:

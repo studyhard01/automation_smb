@@ -21,6 +21,11 @@ from lfx.schema.data import Data
 from lfx.schema.dataframe import DataFrame
 from lfx.schema.message import Message
 
+try:
+    from integrations.langflow.flow_builder.models import is_internal_http_url
+except ModuleNotFoundError:  # Langflow Docker에서는 /app/flow_builder로 마운트된다.
+    from flow_builder.models import is_internal_http_url
+
 
 class SMBFolderFinderComponent(Component):
     """자연어 명령으로 사내 SMB 공유폴더를 찾는다 (smb-finder 서비스 래퍼)."""
@@ -80,7 +85,12 @@ class SMBFolderFinderComponent(Component):
         if self._cache is not None and self._cache.get("_key") == cache_key:
             return self._cache
 
-        url = f"{str(self.service_url).rstrip('/')}/find"
+        service_url = str(self.service_url).rstrip("/")
+        if not is_internal_http_url(service_url):
+            self.status = "smb-finder 주소가 사내/로컬 URL이 아닙니다."
+            return {"hits": [], "normalized_query": query, "elapsed_ms": 0, "error": "invalid_service_url"}
+
+        url = f"{service_url}/find"
         payload = {"query": query, "limit": int(self.limit)}
         timeout_s = max(0.1, int(self.timeout_ms) / 1000)
 

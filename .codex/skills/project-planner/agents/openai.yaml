@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Planner"
+  short_description: "Plans structure, scope, handoffs, and user decisions."
+  default_prompt: "Use $project-planner to plan the development direction and split work for frontend and backend developers."

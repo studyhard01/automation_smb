@@ -7,7 +7,9 @@ fast-path(규칙 기반)가 기본. 모호한 질의만 LLM으로 보낸다(설�
 from __future__ import annotations
 
 import logging
+import ipaddress
 import re
+from urllib.parse import urlparse
 
 import httpx
 
@@ -22,6 +24,23 @@ _FILLER = {
     "그", "저", "이", "의", "결과", "관련", "관련된",
 }
 _TOKEN = re.compile(r"[0-9A-Za-z가-힣]+")
+
+
+def _is_internal_http_url(value: str) -> bool:
+    """LLM endpoint는 localhost/사설망만 허용한다."""
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False
+    if parsed.username or parsed.password:
+        return False
+    host = parsed.hostname.strip().lower()
+    if host in {"localhost", "host.docker.internal"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host
+    return ip.is_private or ip.is_loopback or ip.is_link_local
 
 
 def normalize_rule(query: str) -> str:
@@ -66,6 +85,9 @@ def _refine_with_llm(query: str, settings: Settings) -> str | None:
         headers["Authorization"] = f"Bearer {settings.llm_api_key}"
 
     url = settings.llm_base_url.rstrip("/")
+    if not _is_internal_http_url(url):
+        _logger.warning("LLM 의도 해석 비활성화: 내부망 URL이 아님")
+        return None
     if not url.endswith("/v1"):
         url += "/v1"
     url += "/chat/completions"
@@ -76,5 +98,5 @@ def _refine_with_llm(query: str, settings: Settings) -> str | None:
         content = resp.json()["choices"][0]["message"]["content"].strip()
         return content.splitlines()[0].strip() if content else None
     except Exception as e:  # noqa: BLE001 — 지연 사수: LLM 실패는 폴백으로 흡수
-        _logger.warning("LLM 의도 해석 실패 (규칙 폴백): %s", e)
+        _logger.warning("LLM 의도 해석 실패 (규칙 폴백): %s", type(e).__name__)
         return None

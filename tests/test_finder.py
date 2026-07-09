@@ -41,6 +41,7 @@ def test_find_returns_relevant_folder():
     assert resp.normalized_query == "OO검사"
     assert resp.hits, "결과가 비어 있으면 안 된다"
     assert resp.hits[0].name == "OO검사"
+    assert resp.result_count == len(resp.hits)
     assert resp.source == "index"
 
 
@@ -56,3 +57,15 @@ def test_empty_query_returns_no_hits():
     resp = finder.find(FindRequest(query="폴더 찾아줘"))  # 군더더기만 → 키워드 없음
     # 군더더기만 남으면 원문으로 폴백하되, 매칭은 없을 수 있다
     assert isinstance(resp.hits, list)
+
+
+def test_find_budget_warning_does_not_log_raw_query(caplog):
+    finder = Finder(_sample_index(), Settings(llm_intent_enabled=False, find_budget_ms=-1))
+    sensitive_query = "SECRET_PATIENT_123 폴더 찾아줘"
+
+    with caplog.at_level("WARNING", logger="smb_finder.finder"):
+        resp = finder.find(FindRequest(query=sensitive_query))
+
+    assert resp.over_budget
+    assert sensitive_query not in caplog.text
+    assert "query_len=" in caplog.text

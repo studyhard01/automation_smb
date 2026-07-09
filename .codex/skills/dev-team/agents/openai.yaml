@@ -1,0 +1,4 @@
+interface:
+  display_name: "Development Team"
+  short_description: "Coordinates planner, frontend, and backend developers."
+  default_prompt: "Use $dev-team to plan and implement this feature with planner, frontend, and backend subagents."

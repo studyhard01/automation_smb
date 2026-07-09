@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Reviewer"
+  short_description: "Read-only review for security, errors, performance, and naming."
+  default_prompt: "Use $code-reviewer to review the current git changes without editing files."

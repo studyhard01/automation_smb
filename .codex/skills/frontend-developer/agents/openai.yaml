@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frontend Developer"
+  short_description: "Builds UI/UX and reports product or API blockers."
+  default_prompt: "Use $frontend-developer to implement the assigned UI/UX work and report blockers to the planner."

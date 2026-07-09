@@ -1,0 +1,4 @@
+interface:
+  display_name: "Service Review Orchestrator"
+  short_description: "Runs code, security, and service reviews together."
+  default_prompt: "Use $review to run code, security, and service reviews and synthesize the results."
