@@ -10,6 +10,7 @@ ToolPermission = Literal["read", "admin"]
 ToolStatus = Literal["ok", "error", "skipped"]
 AgentAction = Literal["tool_call", "final_answer", "clarify"]
 AgentStepKind = Literal["decision", "tool_call", "observation", "final", "blocked", "error"]
+LlmProvider = Literal["local", "openai"]
 
 
 class ToolDefinition(BaseModel):
@@ -47,7 +48,7 @@ class ChatRequest(BaseModel):
     selected_tool_ids: list[str] = Field(default_factory=list)
     session_id: str = ""
     history: list[ChatMessage] = Field(default_factory=list)
-    provider: Literal["local"] = "local"
+    provider: LlmProvider = "local"
     local_base_url: str = ""
     model: str = ""
     debug_trace: bool = False
@@ -138,7 +139,7 @@ class ToolDraftRequest(BaseModel):
     """Tool Lab 초안 생성 요청."""
 
     instruction: str = Field(min_length=1, max_length=2000)
-    provider: Literal["local"] = "local"
+    provider: LlmProvider = "local"
     local_base_url: str = ""
     model: str = ""
 
@@ -157,7 +158,7 @@ class ToolDraftResponse(BaseModel):
 class LlmStatusRequest(BaseModel):
     """local LLM 연결 확인 요청."""
 
-    provider: Literal["local"] = "local"
+    provider: LlmProvider = "local"
     local_base_url: str = ""
     model: str = ""
 

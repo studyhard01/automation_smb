@@ -1,5 +1,18 @@
 # Playground constrained agentic loop implementation plan
 
+## 2026-07-09 provider update
+
+Playground provider scope changed from local-only to `local` plus `openai`.
+
+- `local` remains the default and keeps the internal URL guard.
+- `openai` uses `OPENAI_BASE_URL` on the server, defaulting to `https://api.openai.com/v1`.
+- The browser Settings button accepts an OpenAI API key for the current tab only.
+- The UI sends that key through `X-Playground-OpenAI-Key`; it is not stored in localStorage, sessionStorage, cookies, repo files, responses, warnings, or debug payloads.
+- The server may still use `OPENAI_API_KEY` as an operator fallback, but UI users are asked to provide a key through Settings.
+- Agent/tool orchestration is shared by both providers. Only the LLM connection resolver changes by provider.
+- When `openai` is selected, the user's message, selected tool specs, and selected tool observations may be sent to OpenAI. SMB credentials, admin tokens, and raw debug secrets remain redacted.
+- OpenAI is not allowed to choose unselected, disabled, unknown, or duplicate tool calls; the existing server-side allowlist remains authoritative.
+
 ## 목표
 
 `automation_smb` 자체 Playground에만 적용되는 제한형 agent loop를 만든다. 현재

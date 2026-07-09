@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import re
 import time
@@ -32,6 +33,19 @@ from .models import (
 from .tools import ToolHandler
 
 
+@dataclass(frozen=True)
+class LlmConnection:
+    """Provider별 LLM 접속 정보."""
+
+    provider: str
+    base_url: str
+    model: str
+    api_key: str = ""
+    external: bool = False
+    error_code: str = ""
+    error_message: str = ""
+
+
 def _is_internal_http_url(value: str) -> bool:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
@@ -46,6 +60,11 @@ def _is_internal_http_url(value: str) -> bool:
     except ValueError:
         return "." not in host
     return ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def _is_https_url_without_userinfo(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username and not parsed.password
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
@@ -145,11 +164,104 @@ class PlaygroundAgent:
     def __init__(self, settings: Settings):
         self.settings = settings
 
-    def run(self, request: ChatRequest, registry: dict[str, ToolHandler]) -> ChatResponse:
+    def _resolve_llm_connection(
+        self,
+        *,
+        provider: str,
+        local_base_url: str,
+        model: str,
+        openai_api_key: str = "",
+    ) -> LlmConnection:
+        """요청 provider를 실제 LLM 접속 정보로 변환한다."""
+        if provider == "local":
+            resolved_model = (model or self.settings.llm_model).strip()
+            base_url = self._local_base_url(local_base_url)
+            if not resolved_model:
+                return LlmConnection(
+                    provider="local",
+                    base_url=base_url,
+                    model=resolved_model,
+                    error_code="local_llm_not_configured",
+                    error_message="로컬 LLM 모델명이 설정되지 않았습니다. 화면에서 모델명을 입력하세요.",
+                )
+            if not _is_internal_http_url(base_url):
+                return LlmConnection(
+                    provider="local",
+                    base_url=base_url,
+                    model=resolved_model,
+                    error_code="local_llm_url_not_internal",
+                    error_message="로컬 LLM 주소는 localhost 또는 사내망 주소만 허용합니다.",
+                )
+            return LlmConnection(
+                provider="local",
+                base_url=base_url,
+                model=resolved_model,
+                api_key=self._local_api_key(base_url),
+            )
+
+        if provider == "openai":
+            resolved_model = (model or self.settings.openai_model).strip()
+            base_url = self.settings.openai_base_url.strip().rstrip("/")
+            api_key = (openai_api_key or self.settings.openai_api_key).strip()
+            if not resolved_model:
+                return LlmConnection(
+                    provider="openai",
+                    base_url=base_url,
+                    model=resolved_model,
+                    external=True,
+                    error_code="openai_model_not_configured",
+                    error_message="OpenAI 모델명이 설정되지 않았습니다.",
+                )
+            if not api_key:
+                return LlmConnection(
+                    provider="openai",
+                    base_url=base_url,
+                    model=resolved_model,
+                    external=True,
+                    error_code="openai_api_key_missing",
+                    error_message="Settings에서 OpenAI API key를 입력하세요.",
+                )
+            if not _is_https_url_without_userinfo(base_url):
+                return LlmConnection(
+                    provider="openai",
+                    base_url=base_url,
+                    model=resolved_model,
+                    external=True,
+                    error_code="openai_base_url_invalid",
+                    error_message="OpenAI API base URL은 HTTPS 주소여야 합니다.",
+                )
+            return LlmConnection(
+                provider="openai",
+                base_url=base_url,
+                model=resolved_model,
+                api_key=api_key,
+                external=True,
+            )
+
+        return LlmConnection(
+            provider=provider,
+            base_url="",
+            model=model.strip(),
+            error_code="unsupported_provider",
+            error_message="지원하지 않는 LLM provider입니다.",
+        )
+
+    def run(
+        self,
+        request: ChatRequest,
+        registry: dict[str, ToolHandler],
+        openai_api_key: str = "",
+    ) -> ChatResponse:
         started = time.perf_counter()
         session_id = request.session_id or f"pg-{uuid.uuid4()}"
-        model = (request.model or self.settings.llm_model).strip()
-        base_url = self._local_base_url(request.local_base_url)
+        connection = self._resolve_llm_connection(
+            provider=request.provider,
+            local_base_url=request.local_base_url,
+            model=request.model,
+            openai_api_key=openai_api_key,
+        )
+        model = connection.model
+        base_url = connection.base_url
         warnings: list[str] = []
         all_steps: list[AgentStepTrace] = []
         traces: list[ToolCallTrace] = []
@@ -157,8 +269,21 @@ class PlaygroundAgent:
         debug_allowed = request.debug_raw_llm and self.settings.playground_debug_raw_llm
         if request.debug_raw_llm and not self.settings.playground_debug_raw_llm:
             warnings.append("debug_raw_llm_denied")
+        if connection.external:
+            warnings.append("external_llm_provider:openai")
 
-        if request.provider != "local":
+        if connection.error_code:
+            return self._error_response(
+                session_id,
+                started,
+                model,
+                connection.error_code,
+                connection.error_message,
+                warnings=warnings,
+                provider=connection.provider,
+            )
+
+        if request.provider not in {"local", "openai"}:
             return self._error_response(
                 session_id,
                 started,
@@ -176,7 +301,7 @@ class PlaygroundAgent:
                 "로컬 LLM 모델이 설정되지 않았습니다. LLM_MODEL 또는 화면의 모델명을 입력하세요.",
                 warnings=warnings,
             )
-        if not _is_internal_http_url(base_url):
+        if connection.provider == "local" and not _is_internal_http_url(base_url):
             return self._error_response(
                 session_id,
                 started,
@@ -216,6 +341,7 @@ class PlaygroundAgent:
                     observations=observations,
                     model=model,
                     base_url=base_url,
+                    api_key=connection.api_key,
                     step=step,
                     debug_calls=debug_calls if debug_allowed else None,
                 )
@@ -229,6 +355,7 @@ class PlaygroundAgent:
                     warnings=warnings,
                     agent_steps=all_steps if request.debug_trace else [],
                     debug_calls=debug_calls if debug_allowed else [],
+                    provider=connection.provider,
                 )
 
             all_steps.append(
@@ -431,7 +558,7 @@ class PlaygroundAgent:
 
         return ChatResponse(
             session_id=session_id,
-            provider_used="local",
+            provider_used=connection.provider,
             model_used=model,
             assistant_message=final_answer,
             tool_calls=traces,
@@ -442,10 +569,24 @@ class PlaygroundAgent:
             debug=PlaygroundDebug(llm_calls=debug_calls) if debug_allowed else None,
         )
 
-    def draft_tool(self, request: ToolDraftRequest) -> ToolDraftResponse:
-        model = (request.model or self.settings.llm_model).strip()
-        base_url = self._local_base_url(request.local_base_url)
-        if request.provider != "local":
+    def draft_tool(self, request: ToolDraftRequest, openai_api_key: str = "") -> ToolDraftResponse:
+        connection = self._resolve_llm_connection(
+            provider=request.provider,
+            local_base_url=request.local_base_url,
+            model=request.model,
+            openai_api_key=openai_api_key,
+        )
+        model = connection.model
+        base_url = connection.base_url
+        if connection.error_code:
+            return ToolDraftResponse(
+                provider_used=connection.provider,
+                model_used=model,
+                error_code=connection.error_code,
+                message=connection.error_message,
+                warnings=["external_llm_provider:openai"] if connection.external else [],
+            )
+        if request.provider not in {"local", "openai"}:
             return ToolDraftResponse(
                 model_used=model,
                 error_code="unsupported_provider",
@@ -457,7 +598,7 @@ class PlaygroundAgent:
                 error_code="local_llm_not_configured",
                 message="로컬 LLM 모델이 설정되지 않았습니다.",
             )
-        if not _is_internal_http_url(base_url):
+        if connection.provider == "local" and not _is_internal_http_url(base_url):
             return ToolDraftResponse(
                 model_used=model,
                 error_code="local_llm_url_not_internal",
@@ -477,35 +618,57 @@ class PlaygroundAgent:
                 ],
                 model=model,
                 base_url=base_url,
+                api_key=connection.api_key,
                 max_tokens=500,
                 purpose="tool_draft",
             )
         except Exception:  # noqa: BLE001
             return ToolDraftResponse(
+                provider_used=connection.provider,
                 model_used=model,
                 error_code="local_llm_failed",
+                warnings=["external_llm_provider:openai"] if connection.external else [],
                 message="로컬 LLM 호출에 실패했습니다.",
             )
         return ToolDraftResponse(
+            provider_used=connection.provider,
             model_used=model,
             draft=data,
+            warnings=["external_llm_provider:openai"] if connection.external else [],
             message="초안이 생성되었습니다. 아직 저장되거나 활성화되지 않습니다.",
         )
 
-    def check_llm(self, request: LlmStatusRequest) -> LlmStatusResponse:
+    def check_llm(self, request: LlmStatusRequest, openai_api_key: str = "") -> LlmStatusResponse:
         """local LLM의 모델 목록과 JSON 응답 가능 여부를 확인한다."""
         started = time.perf_counter()
-        model = (request.model or self.settings.llm_model).strip()
-        base_url = self._local_base_url(request.local_base_url)
-        if request.provider != "local":
+        connection = self._resolve_llm_connection(
+            provider=request.provider,
+            local_base_url=request.local_base_url,
+            model=request.model,
+            openai_api_key=openai_api_key,
+        )
+        model = connection.model
+        base_url = connection.base_url
+        if connection.error_code:
             return LlmStatusResponse(
+                provider_used=connection.provider,
+                base_url_used=base_url,
+                model_used=model,
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                error_code=connection.error_code,
+                message=connection.error_message,
+            )
+        if request.provider not in {"local", "openai"}:
+            return LlmStatusResponse(
+                provider_used=connection.provider,
                 base_url_used=base_url,
                 model_used=model,
                 error_code="unsupported_provider",
                 message="Playground 1차 버전은 local/on-prem LLM만 지원합니다.",
             )
-        if not _is_internal_http_url(base_url):
+        if connection.provider == "local" and not _is_internal_http_url(base_url):
             return LlmStatusResponse(
+                provider_used=connection.provider,
                 base_url_used=base_url,
                 model_used=model,
                 error_code="local_llm_url_not_internal",
@@ -514,9 +677,10 @@ class PlaygroundAgent:
 
         available_models: list[str] = []
         try:
-            available_models = self._list_models(base_url)
+            available_models = self._list_models(base_url, api_key=connection.api_key)
         except Exception:  # noqa: BLE001
             return LlmStatusResponse(
+                provider_used=connection.provider,
                 base_url_used=base_url,
                 model_used=model,
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
@@ -526,6 +690,7 @@ class PlaygroundAgent:
 
         if not model:
             return LlmStatusResponse(
+                provider_used=connection.provider,
                 base_url_used=base_url,
                 available_models=available_models,
                 models_ok=True,
@@ -537,16 +702,21 @@ class PlaygroundAgent:
         try:
             data = self._chat_json(
                 [
-                    {"role": "system", "content": "Return only JSON."},
+                    {
+                        "role": "system",
+                        "content": "Return only JSON. Do not include reasoning or step-by-step explanation.",
+                    },
                     {"role": "user", "content": "Return {\"ok\": true}."},
                 ],
                 model=model,
                 base_url=base_url,
-                max_tokens=40,
+                api_key=connection.api_key,
+                max_tokens=512,
                 purpose="llm_status",
             )
         except Exception:  # noqa: BLE001
             return LlmStatusResponse(
+                provider_used=connection.provider,
                 base_url_used=base_url,
                 model_used=model,
                 available_models=available_models,
@@ -558,6 +728,7 @@ class PlaygroundAgent:
 
         chat_ok = data.get("ok") is True
         return LlmStatusResponse(
+            provider_used=connection.provider,
             base_url_used=base_url,
             model_used=model,
             available_models=available_models,
@@ -576,6 +747,7 @@ class PlaygroundAgent:
         observations: list[dict[str, str]],
         model: str,
         base_url: str,
+        api_key: str,
         step: int,
         debug_calls: list[LlmDebugCall] | None = None,
     ) -> AgentDecision:
@@ -618,6 +790,7 @@ class PlaygroundAgent:
             ],
             model=model,
             base_url=base_url,
+            api_key=api_key,
             max_tokens=500,
             purpose=f"agent_decision_step_{step}",
             debug_calls=debug_calls,
@@ -685,12 +858,13 @@ class PlaygroundAgent:
         model: str,
         base_url: str,
         max_tokens: int,
+        api_key: str = "",
         purpose: str = "chat_json",
         debug_calls: list[LlmDebugCall] | None = None,
     ) -> dict[str, Any]:
         base_url = base_url.rstrip("/")
         url = f"{base_url}/chat/completions"
-        headers = self._headers_for(base_url)
+        headers = self._headers_for(base_url, api_key=api_key)
         payload = {
             "model": model,
             "messages": messages,
@@ -732,9 +906,9 @@ class PlaygroundAgent:
                 )
             raise
 
-    def _list_models(self, base_url: str) -> list[str]:
+    def _list_models(self, base_url: str, api_key: str = "") -> list[str]:
         url = f"{base_url.rstrip('/')}/models"
-        headers = self._headers_for(base_url)
+        headers = self._headers_for(base_url, api_key=api_key)
         timeout_s = max(0.1, self.settings.llm_timeout_ms / 1000)
         with httpx.Client(timeout=timeout_s) as client:
             response = client.get(url, headers=headers)
@@ -746,11 +920,16 @@ class PlaygroundAgent:
     def _local_base_url(self, override: str = "") -> str:
         return (override or self.settings.llm_base_url).strip().rstrip("/")
 
-    def _headers_for(self, base_url: str) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+    def _local_api_key(self, base_url: str) -> str:
         configured_base_url = self.settings.llm_base_url.strip().rstrip("/")
         if self.settings.llm_api_key and base_url.rstrip("/") == configured_base_url:
-            headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
+            return self.settings.llm_api_key
+        return ""
+
+    def _headers_for(self, base_url: str, api_key: str = "") -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
     def _safe_debug_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -779,6 +958,7 @@ class PlaygroundAgent:
         secret_values = [
             self.settings.smb_password,
             self.settings.llm_api_key,
+            self.settings.openai_api_key,
             self.settings.admin_api_token,
         ]
         for secret in secret_values:
@@ -808,10 +988,11 @@ class PlaygroundAgent:
         warnings: list[str] | None = None,
         agent_steps: list[AgentStepTrace] | None = None,
         debug_calls: list[LlmDebugCall] | None = None,
+        provider: str = "local",
     ) -> ChatResponse:
         return ChatResponse(
             session_id=session_id,
-            provider_used="local",
+            provider_used=provider,
             model_used=model,
             assistant_message=message,
             elapsed_ms=round((time.perf_counter() - started) * 1000, 1),

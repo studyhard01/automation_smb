@@ -30,6 +30,7 @@
               Provider
               <select id="provider">
                 <option value="local">local</option>
+                <option value="openai">OpenAI API</option>
               </select>
             </label>
             <label>
@@ -41,6 +42,7 @@
               <input id="model" type="text" placeholder="qwen2.5-coder:7b" autocomplete="off" list="modelOptions" />
               <datalist id="modelOptions"></datalist>
             </label>
+            <button id="settingsButton" class="secondary-button" type="button">Settings</button>
             <button id="checkLlm" class="secondary-button" type="button">연결 확인</button>
           </div>
           <div id="llmStatus" class="status-line" aria-live="polite">local LLM 미확인</div>

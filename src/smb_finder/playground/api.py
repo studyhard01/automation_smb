@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 from .agent import PlaygroundAgent
@@ -41,14 +41,17 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         operation_id="run_playground_chat",
         summary="선택한 tool로 Playground 채팅 실행",
     )
-    async def run_playground_chat(request: ChatRequest) -> ChatResponse:
+    async def run_playground_chat(
+        request: ChatRequest,
+        x_playground_openai_key: str = Header(default="", alias="X-Playground-OpenAI-Key"),
+    ) -> ChatResponse:
         runtime = runtime_getter()
         registry = build_tool_registry(runtime)
         unknown = sorted(set(request.selected_tool_ids) - set(registry))
         if unknown:
             raise HTTPException(status_code=400, detail={"code": "unknown_tool", "tools": unknown})
         agent = PlaygroundAgent(runtime.settings)
-        return await run_in_threadpool(agent.run, request, registry)
+        return await run_in_threadpool(agent.run, request, registry, x_playground_openai_key)
 
     @router.post(
         "/api/playground/tool-draft",
@@ -56,10 +59,13 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         operation_id="draft_playground_tool",
         summary="Tool Lab tool manifest 초안 생성",
     )
-    async def draft_playground_tool(request: ToolDraftRequest) -> ToolDraftResponse:
+    async def draft_playground_tool(
+        request: ToolDraftRequest,
+        x_playground_openai_key: str = Header(default="", alias="X-Playground-OpenAI-Key"),
+    ) -> ToolDraftResponse:
         runtime = runtime_getter()
         agent = PlaygroundAgent(runtime.settings)
-        return await run_in_threadpool(agent.draft_tool, request)
+        return await run_in_threadpool(agent.draft_tool, request, x_playground_openai_key)
 
     @router.post(
         "/api/playground/llm-status",
@@ -67,9 +73,12 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         operation_id="check_playground_llm",
         summary="Playground local LLM 연결 확인",
     )
-    async def check_playground_llm(request: LlmStatusRequest) -> LlmStatusResponse:
+    async def check_playground_llm(
+        request: LlmStatusRequest,
+        x_playground_openai_key: str = Header(default="", alias="X-Playground-OpenAI-Key"),
+    ) -> LlmStatusResponse:
         runtime = runtime_getter()
         agent = PlaygroundAgent(runtime.settings)
-        return await run_in_threadpool(agent.check_llm, request)
+        return await run_in_threadpool(agent.check_llm, request, x_playground_openai_key)
 
     return router

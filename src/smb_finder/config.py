@@ -65,7 +65,10 @@ class Settings(BaseSettings):
     llm_base_url: str = Field(default="http://localhost:8080", description="OpenAI 호환 LLM base_url")
     llm_model: str = Field(default="", description="LLM 모델명 (llama.cpp는 빈 값 가능)")
     llm_api_key: str = Field(default="", description="LLM API 키 (llama.cpp는 빈 값 가능)")
-    llm_timeout_ms: int = Field(default=800, description="LLM 호출 timeout(ms)")
+    llm_timeout_ms: int = Field(default=10000, description="LLM 호출 timeout(ms)")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", description="OpenAI API base_url")
+    openai_model: str = Field(default="gpt-4.1-mini", description="Playground OpenAI 기본 모델명")
+    openai_api_key: str = Field(default="", description="OpenAI API 키. UI 요청 값이 우선")
 
     # ── Playground 제한형 agent/debug ──
     playground_agent_max_steps: int = Field(default=3, description="Playground agent 최대 판단 단계 수")

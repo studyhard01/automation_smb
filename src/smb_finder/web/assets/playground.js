@@ -2,6 +2,7 @@ const state = {
   tools: [],
   sessionId: "",
   history: [],
+  openaiApiKey: "",
 };
 
 const toolList = document.querySelector("#toolList");
@@ -13,6 +14,7 @@ const baseUrlInput = document.querySelector("#baseUrl");
 const modelInput = document.querySelector("#model");
 const modelOptions = document.querySelector("#modelOptions");
 const checkLlmButton = document.querySelector("#checkLlm");
+const settingsButton = document.querySelector("#settingsButton");
 const llmStatus = document.querySelector("#llmStatus");
 const reloadTools = document.querySelector("#reloadTools");
 const toolLabForm = document.querySelector("#toolLabForm");
@@ -20,6 +22,53 @@ const toolInstruction = document.querySelector("#toolInstruction");
 const toolDraft = document.querySelector("#toolDraft");
 const debugTraceInput = document.querySelector("#debugTrace");
 const debugRawLlmInput = document.querySelector("#debugRawLlm");
+const providerNotice = ensureProviderNotice();
+const settingsDialog = ensureSettingsDialog();
+const openaiApiKeyInput = settingsDialog.querySelector("#openaiApiKey");
+const saveSettingsButton = settingsDialog.querySelector("#saveSettings");
+const clearOpenaiKeyButton = settingsDialog.querySelector("#clearOpenaiKey");
+
+function ensureProviderNotice() {
+  let notice = document.querySelector("#providerNotice");
+  if (!notice) {
+    notice = document.createElement("div");
+    notice.id = "providerNotice";
+    notice.className = "provider-notice";
+    llmStatus.insertAdjacentElement("afterend", notice);
+  }
+  return notice;
+}
+
+function ensureSettingsDialog() {
+  let dialog = document.querySelector("#settingsDialog");
+  if (dialog) return dialog;
+
+  dialog = document.createElement("dialog");
+  dialog.id = "settingsDialog";
+  dialog.className = "settings-dialog";
+  dialog.innerHTML = `
+    <form method="dialog" class="settings-form">
+      <header>
+        <h2>Provider Settings</h2>
+        <button class="icon-button" type="submit" aria-label="close">x</button>
+      </header>
+      <label>
+        OpenAI API key
+        <input id="openaiApiKey" type="password" autocomplete="off" placeholder="sk-..." />
+      </label>
+      <p>
+        OpenAI provider를 사용하면 대화, 선택한 tool 설명, tool 실행 결과가 OpenAI API로 전송될 수 있습니다.
+        API key는 이 브라우저 탭의 메모리에만 유지하고 저장하지 않습니다.
+      </p>
+      <footer>
+        <button id="clearOpenaiKey" class="secondary-button" type="button">Clear</button>
+        <button id="saveSettings" class="secondary-button" type="button">Apply</button>
+      </footer>
+    </form>
+  `;
+  document.body.appendChild(dialog);
+  return dialog;
+}
 
 function selectedToolIds() {
   return [...document.querySelectorAll("[data-tool-id]:checked")].map((item) => item.value);
@@ -44,6 +93,71 @@ function compactHistory() {
     role: item.role,
     content: limitText(item.content, 1000),
   }));
+}
+
+function apiHeaders() {
+  const headers = { "Content-Type": "application/json" };
+  if (providerInput.value === "openai" && state.openaiApiKey) {
+    headers["X-Playground-OpenAI-Key"] = state.openaiApiKey;
+  }
+  return headers;
+}
+
+function openSettings() {
+  openaiApiKeyInput.value = state.openaiApiKey;
+  settingsDialog.showModal();
+}
+
+function saveSettings() {
+  state.openaiApiKey = openaiApiKeyInput.value.trim();
+  settingsDialog.close();
+  applyProviderMode();
+  if (providerInput.value === "openai") {
+    setLlmStatus(state.openaiApiKey ? "OpenAI API key가 이 탭에 설정되었습니다." : "OpenAI API key가 필요합니다.", state.openaiApiKey ? "ok" : "error");
+  }
+}
+
+function clearOpenaiKey() {
+  state.openaiApiKey = "";
+  openaiApiKeyInput.value = "";
+  applyProviderMode();
+  setLlmStatus("OpenAI API key를 지웠습니다.", "error");
+}
+
+function setModelOptions(values) {
+  modelOptions.innerHTML = "";
+  for (const modelName of values || []) {
+    const option = document.createElement("option");
+    option.value = modelName;
+    modelOptions.appendChild(option);
+  }
+}
+
+function applyProviderMode() {
+  if (providerInput.value === "openai") {
+    baseUrlInput.value = "https://api.openai.com/v1";
+    baseUrlInput.disabled = true;
+    baseUrlInput.title = "OpenAI provider는 서버 설정의 OpenAI base URL을 사용합니다.";
+    if (!modelInput.value.trim() || modelInput.value.includes(":")) {
+      modelInput.value = "gpt-4.1-mini";
+    }
+    setModelOptions(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"]);
+    providerNotice.textContent =
+      "OpenAI provider는 대화와 선택한 tool 결과를 외부 OpenAI API로 보낼 수 있습니다.";
+    providerNotice.className = "provider-notice warning";
+    return;
+  }
+
+  baseUrlInput.disabled = false;
+  baseUrlInput.title = "";
+  if (baseUrlInput.value === "https://api.openai.com/v1") {
+    baseUrlInput.value = "http://127.0.0.1:11434/v1";
+  }
+  if (modelInput.value.startsWith("gpt-")) {
+    modelInput.value = "";
+  }
+  providerNotice.textContent = "";
+  providerNotice.className = "provider-notice";
 }
 
 function addMessage(role, text, options = {}) {
@@ -157,6 +271,11 @@ async function loadTools() {
 }
 
 async function sendChat(message) {
+  if (providerInput.value === "openai" && !state.openaiApiKey) {
+    addMessage("assistant", "OpenAI API key를 Settings에서 입력하세요.", { error: true });
+    openSettings();
+    return;
+  }
   const payload = {
     message,
     selected_tool_ids: selectedToolIds(),
@@ -170,7 +289,7 @@ async function sendChat(message) {
   };
   const response = await fetch("/api/playground/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: apiHeaders(),
     body: JSON.stringify(payload),
   });
   const data = await response.json();
@@ -210,10 +329,15 @@ toolLabForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const instruction = toolInstruction.value.trim();
   if (!instruction) return;
+  if (providerInput.value === "openai" && !state.openaiApiKey) {
+    toolDraft.textContent = "OpenAI API key를 Settings에서 입력하세요.";
+    openSettings();
+    return;
+  }
   toolDraft.textContent = "초안 생성 중...";
   const response = await fetch("/api/playground/tool-draft", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: apiHeaders(),
     body: JSON.stringify({
       instruction,
       provider: providerInput.value,
@@ -241,10 +365,15 @@ function setLlmStatus(text, status = "") {
 }
 
 async function checkLlm() {
+  if (providerInput.value === "openai" && !state.openaiApiKey) {
+    setLlmStatus("OpenAI API key를 Settings에서 입력하세요.", "error");
+    openSettings();
+    return;
+  }
   setLlmStatus("local LLM 확인 중...");
   const response = await fetch("/api/playground/llm-status", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: apiHeaders(),
     body: JSON.stringify({
       provider: providerInput.value,
       local_base_url: baseUrlInput.value.trim(),
@@ -252,11 +381,10 @@ async function checkLlm() {
     }),
   });
   const data = await response.json();
-  modelOptions.innerHTML = "";
-  for (const modelName of data.available_models || []) {
-    const option = document.createElement("option");
-    option.value = modelName;
-    modelOptions.appendChild(option);
+  if (providerInput.value === "openai") {
+    setModelOptions(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"]);
+  } else {
+    setModelOptions(data.available_models || []);
   }
   if (!modelInput.value.trim() && data.available_models?.length) {
     modelInput.value = data.available_models[0];
@@ -271,4 +399,9 @@ async function checkLlm() {
 
 checkLlmButton.addEventListener("click", checkLlm);
 reloadTools.addEventListener("click", loadTools);
+providerInput.addEventListener("change", applyProviderMode);
+settingsButton?.addEventListener("click", openSettings);
+saveSettingsButton.addEventListener("click", saveSettings);
+clearOpenaiKeyButton.addEventListener("click", clearOpenaiKey);
+applyProviderMode();
 loadTools();

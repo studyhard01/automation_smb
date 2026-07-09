@@ -128,7 +128,9 @@ def test_agent_accepts_local_model_tool_call_aliases(monkeypatch):
     registry = build_tool_registry(runtime)
     agent = PlaygroundAgent(runtime.settings)
 
-    def fake_chat(messages, *, model, base_url, max_tokens, purpose="chat_json", debug_calls=None):  # noqa: ANN001, ARG001
+    def fake_chat(
+        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None
+    ):  # noqa: ANN001, ARG001
         if purpose == "agent_decision_step_1":
             return {"action": "tool_call", "tool_calls": [{"id": "find_folder", "inputs": {"query": "OO검사"}}]}
         return {"action": "final_answer", "answer": "완료"}
@@ -270,14 +272,17 @@ def test_llm_status_lists_models_and_checks_chat(monkeypatch):
     agent = PlaygroundAgent(Settings(llm_model="", llm_base_url="http://localhost:8080/v1", **settings_kwargs))
     captured: dict[str, str] = {}
 
-    def fake_models(base_url):  # noqa: ANN001
+    def fake_models(base_url, api_key=""):  # noqa: ANN001, ARG001
         captured["models_base_url"] = base_url
         return ["model-a", "model-b"]
 
-    def fake_chat(messages, *, model, base_url, max_tokens, purpose="chat_json", debug_calls=None):  # noqa: ANN001, ARG001
+    def fake_chat(
+        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None
+    ):  # noqa: ANN001, ARG001
         captured["chat_base_url"] = base_url
         captured["model"] = model
         captured["purpose"] = purpose
+        captured["api_key"] = api_key
         return {"ok": True}
 
     monkeypatch.setattr(agent, "_list_models", fake_models)
@@ -296,4 +301,78 @@ def test_llm_status_lists_models_and_checks_chat(monkeypatch):
         "chat_base_url": "http://127.0.0.1:11434/v1",
         "model": "model-b",
         "purpose": "llm_status",
+        "api_key": "",
     }
+
+
+def test_openai_status_requires_transient_key():
+    agent = PlaygroundAgent(Settings(openai_model="gpt-test", openai_api_key=""))
+
+    response = agent.check_llm(LlmStatusRequest(provider="openai", model="gpt-test"))
+
+    assert response.provider_used == "openai"
+    assert response.error_code == "openai_api_key_missing"
+
+
+def test_openai_status_uses_header_key_and_does_not_echo_it(monkeypatch):
+    agent = PlaygroundAgent(Settings(openai_model="gpt-test", openai_api_key=""))
+    captured: dict[str, str] = {}
+
+    def fake_models(base_url, api_key=""):  # noqa: ANN001
+        captured["models_base_url"] = base_url
+        captured["models_api_key"] = api_key
+        return ["gpt-test"]
+
+    def fake_chat(
+        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None
+    ):  # noqa: ANN001, ARG001
+        captured["chat_base_url"] = base_url
+        captured["chat_api_key"] = api_key
+        captured["model"] = model
+        return {"ok": True}
+
+    monkeypatch.setattr(agent, "_list_models", fake_models)
+    monkeypatch.setattr(agent, "_chat_json", fake_chat)
+
+    response = agent.check_llm(LlmStatusRequest(provider="openai", model="gpt-test"), "provider-token")
+
+    assert response.provider_used == "openai"
+    assert response.base_url_used == "https://api.openai.com/v1"
+    assert response.chat_ok is True
+    assert response.model_dump_json().find("provider-token") == -1
+    assert captured == {
+        "models_base_url": "https://api.openai.com/v1",
+        "models_api_key": "provider-token",
+        "chat_base_url": "https://api.openai.com/v1",
+        "chat_api_key": "provider-token",
+        "model": "gpt-test",
+    }
+
+
+def test_openai_provider_uses_same_tool_loop(monkeypatch):
+    runtime = _runtime()
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+    decisions = iter(
+        [
+            AgentDecision(
+                action="tool_call",
+                tool_calls=[PlannedToolCall(tool_id="find_folder", arguments={"query": "OO검사"})],
+            ),
+            AgentDecision(action="final_answer", answer="OpenAI provider에서도 tool 결과를 사용했습니다."),
+        ]
+    )
+
+    monkeypatch.setattr(agent, "_decide_next_action", lambda **kwargs: next(decisions))
+
+    response = agent.run(
+        ChatRequest(provider="openai", model="gpt-test", message="OO검사 폴더 찾아줘", selected_tool_ids=["find_folder"]),
+        registry,
+        "provider-token",
+    )
+
+    assert response.provider_used == "openai"
+    assert response.error_code == ""
+    assert response.tool_calls[0].tool_id == "find_folder"
+    assert "external_llm_provider:openai" in response.warnings
+    assert response.model_dump_json().find("provider-token") == -1
