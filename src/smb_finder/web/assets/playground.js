@@ -168,6 +168,9 @@ function addMessage(role, text, options = {}) {
   if (options.traces?.length) {
     el.appendChild(renderToolTrace(options.traces));
   }
+  if (options.tokenUsage) {
+    el.appendChild(renderTokenUsage(options.tokenUsage));
+  }
   if (options.agentSteps?.length) {
     el.appendChild(renderAgentTrace(options.agentSteps));
   }
@@ -178,6 +181,23 @@ function addMessage(role, text, options = {}) {
   messages.appendChild(el);
   messages.scrollTop = messages.scrollHeight;
   return el;
+}
+
+function formatTokenUsage(usage) {
+  if (!usage) return "";
+  const total = Number(usage.total_tokens || 0);
+  const prompt = Number(usage.prompt_tokens || 0);
+  const completion = Number(usage.completion_tokens || 0);
+  const calls = Number(usage.calls || 0);
+  if (!total && !prompt && !completion) return "";
+  return `${usage.provider || "llm"} / ${usage.model || "model"} · input ${prompt} · output ${completion} · total ${total} · calls ${calls}`;
+}
+
+function renderTokenUsage(usage) {
+  const box = document.createElement("div");
+  box.className = "token-usage";
+  box.textContent = `Token usage: ${formatTokenUsage(usage)}`;
+  return box;
 }
 
 function renderToolTrace(traces) {
@@ -302,6 +322,7 @@ async function sendChat(message) {
   const budget = data.over_budget ? "\n\n주의: agent 시간 예산을 초과했습니다." : "";
   addMessage("assistant", `${data.assistant_message}${warnings}${budget}`, {
     traces: data.tool_calls,
+    tokenUsage: data.token_usage,
     agentSteps: data.agent_steps,
     debug: data.debug,
     error: Boolean(data.error_code),
@@ -390,7 +411,8 @@ async function checkLlm() {
     modelInput.value = data.available_models[0];
   }
   if (data.chat_ok) {
-    setLlmStatus(`${data.model_used} 연결 정상 (${data.elapsed_ms}ms)`, "ok");
+    const usage = formatTokenUsage(data.token_usage);
+    setLlmStatus(`${data.model_used} 연결 정상 (${data.elapsed_ms}ms)${usage ? ` · ${usage}` : ""}`, "ok");
     return;
   }
   const message = data.message || data.error_code || `HTTP ${response.status}`;

@@ -72,6 +72,8 @@ pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pyt
 # uv pip install --native-tls -r requirements.txt
 
 # 로컬 Studio 서버 — 외부로 노출하지 않음
+$env:PYTHONIOENCODING="utf-8"   # Windows cp949 인코딩 오류 방지
+$env:PYTHONUTF8="1"
 langgraph dev
 ```
 - 콘솔에 뜨는 Studio URL(`https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024` 형태)로
@@ -90,3 +92,26 @@ langgraph dev
 - 검증 기준: `create_react_agent`의 `prompt=` 인자(LangGraph 0.2.x+). 더 낮은 버전은
   `state_modifier=`일 수 있다 — 그땐 `graph.py`의 해당 인자만 바꾼다.
 - `langgraph dev`는 `langgraph-cli[inmem]`이 있어야 동작한다(requirements에 포함).
+
+## LangSmith token usage 확인
+
+Playground의 OpenAI provider 호출은 루트 서비스에서 `usage`를 추출해 응답의 `token_usage`에 포함한다.
+이 호출 trace는 LangGraph Studio 실행 목록이 아니라 LangSmith의 Tracing Projects에서
+`automation-smb-playground` project로 확인한다. LangGraph Studio URL은 `smb_agent` 그래프를 직접 실행할 때의
+디버깅 화면이다.
+
+LangSmith에 모델별 token/cost 로그까지 남기려면 아래처럼 명시적으로 opt-in한다.
+
+```bash
+# 루트 서비스 또는 integrations/langgraph/.env
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=<LangSmith API key>
+LANGSMITH_PROJECT=automation-smb-playground
+LANGSMITH_HIDE_INPUTS=true
+LANGSMITH_HIDE_OUTPUTS=true
+```
+
+trace에는 `ls_provider=openai`, `ls_model_name=<model>`, `usage_metadata.input_tokens`,
+`usage_metadata.output_tokens`, `usage_metadata.total_tokens`가 들어가므로 LangSmith trace tree/project stats에서
+모델별 사용량을 볼 수 있다. raw prompt, tool 결과, SMB 경로/본문은 숨긴다. 실제 환자/검사 데이터로 cloud
+LangSmith를 켜지 말고, 필요한 경우 self-hosted `LANGSMITH_ENDPOINT`를 사용한다.

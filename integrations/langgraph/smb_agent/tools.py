@@ -11,7 +11,7 @@ import time
 import httpx
 from langchain_core.tools import tool
 
-from .config import load_settings
+from smb_agent.config import load_settings
 
 _settings = load_settings()
 _client = httpx.Client(base_url=_settings.smb_finder_url.rstrip("/"))

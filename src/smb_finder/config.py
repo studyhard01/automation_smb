@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4.1-mini", description="Playground OpenAI 기본 모델명")
     openai_api_key: str = Field(default="", description="OpenAI API 키. UI 요청 값이 우선")
 
+    # ── LangSmith 관측성 (기본 OFF, OpenAI provider 호출만 추적) ──
+    langsmith_tracing: bool = Field(default=False, description="LangSmith tracing 활성화 여부")
+    langsmith_api_key: str = Field(default="", description="LangSmith API key. .env에만 저장")
+    langsmith_project: str = Field(default="automation-smb-playground", description="LangSmith project 이름")
+    langsmith_endpoint: str = Field(default="", description="self-hosted LangSmith endpoint. 비우면 LangSmith Cloud")
+
     # ── Playground 제한형 agent/debug ──
     playground_agent_max_steps: int = Field(default=3, description="Playground agent 최대 판단 단계 수")
     playground_agent_max_tool_calls: int = Field(default=2, description="Playground agent 요청당 최대 tool 호출 수")

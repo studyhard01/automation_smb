@@ -22,6 +22,7 @@ build/
 # 로컬 Docker/LLM override에는 API key가 들어갈 수 있으므로 커밋 금지
 integrations/langflow/docker-compose.override.yml
 integrations/langflow/.langflow-data/
+integrations/langgraph/.langgraph_api/
 
 # Local tool state
 .claude/settings.local.json

@@ -339,6 +339,14 @@ p {
   color: var(--text);
 }
 
+.token-usage {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .agent-trace,
 .raw-debug {
   margin-top: 10px;

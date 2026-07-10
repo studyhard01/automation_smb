@@ -88,6 +88,7 @@ class LlmDebugCall(BaseModel):
     request_messages: list[dict[str, str]] = Field(default_factory=list)
     raw_response: str = ""
     parsed_json: dict[str, Any] = Field(default_factory=dict)
+    token_usage: "TokenUsage | None" = None
     json_repaired: bool = False
     error_code: str = ""
 
@@ -110,6 +111,17 @@ class ToolCallTrace(BaseModel):
     error_code: str = ""
 
 
+class TokenUsage(BaseModel):
+    """LLM 호출에서 반환된 토큰 사용량 요약."""
+
+    provider: str = ""
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    calls: int = 0
+
+
 class ChatResponse(BaseModel):
     """Playground 채팅 실행 응답."""
 
@@ -124,6 +136,7 @@ class ChatResponse(BaseModel):
     error_code: str = ""
     over_budget: bool = False
     debug: PlaygroundDebug | None = None
+    token_usage: TokenUsage | None = None
 
 
 class ToolExecutionResult(BaseModel):
@@ -153,6 +166,7 @@ class ToolDraftResponse(BaseModel):
     message: str = ""
     warnings: list[str] = Field(default_factory=list)
     error_code: str = ""
+    token_usage: TokenUsage | None = None
 
 
 class LlmStatusRequest(BaseModel):
@@ -175,3 +189,4 @@ class LlmStatusResponse(BaseModel):
     elapsed_ms: float = 0.0
     message: str = ""
     error_code: str = ""
+    token_usage: TokenUsage | None = None

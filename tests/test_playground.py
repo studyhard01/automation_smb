@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from smb_finder.config import Settings
 from smb_finder.playground.agent import PlaygroundAgent, _json_from_text
 from smb_finder.playground.models import AgentDecision, ChatRequest, LlmDebugCall, LlmStatusRequest, PlannedToolCall
+from smb_finder.playground.tracing import _hide_langsmith_outputs_preserve_usage, is_langsmith_tracing_enabled
 from smb_finder.playground.tools import PlaygroundRuntime, build_tool_registry
 
 
@@ -129,7 +130,7 @@ def test_agent_accepts_local_model_tool_call_aliases(monkeypatch):
     agent = PlaygroundAgent(runtime.settings)
 
     def fake_chat(
-        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None
+        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None, **kwargs
     ):  # noqa: ANN001, ARG001
         if purpose == "agent_decision_step_1":
             return {"action": "tool_call", "tool_calls": [{"id": "find_folder", "inputs": {"query": "OO검사"}}]}
@@ -277,7 +278,7 @@ def test_llm_status_lists_models_and_checks_chat(monkeypatch):
         return ["model-a", "model-b"]
 
     def fake_chat(
-        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None
+        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None, **kwargs
     ):  # noqa: ANN001, ARG001
         captured["chat_base_url"] = base_url
         captured["model"] = model
@@ -324,7 +325,7 @@ def test_openai_status_uses_header_key_and_does_not_echo_it(monkeypatch):
         return ["gpt-test"]
 
     def fake_chat(
-        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None
+        messages, *, model, base_url, max_tokens, api_key="", purpose="chat_json", debug_calls=None, **kwargs
     ):  # noqa: ANN001, ARG001
         captured["chat_base_url"] = base_url
         captured["chat_api_key"] = api_key
@@ -376,3 +377,83 @@ def test_openai_provider_uses_same_tool_loop(monkeypatch):
     assert response.tool_calls[0].tool_id == "find_folder"
     assert "external_llm_provider:openai" in response.warnings
     assert response.model_dump_json().find("provider-token") == -1
+
+
+def test_openai_chat_response_exposes_token_usage(monkeypatch):
+    agent = PlaygroundAgent(Settings(openai_model="gpt-test", openai_api_key="", langsmith_tracing=False))
+
+    class FakeResponse:
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"action":"final_answer","answer":"token usage ok"}',
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 4, "total_tokens": 15},
+            }
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            pass
+
+        def __enter__(self):  # noqa: ANN201
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002, ANN201
+            return False
+
+        def post(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            return FakeResponse()
+
+    monkeypatch.setattr("smb_finder.playground.agent.httpx.Client", FakeClient)
+
+    response = agent.run(
+        ChatRequest(provider="openai", model="gpt-test", message="synthetic token usage check"),
+        {},
+        "provider-token",
+    )
+
+    assert response.assistant_message == "token usage ok"
+    assert response.token_usage is not None
+    assert response.token_usage.provider == "openai"
+    assert response.token_usage.model == "gpt-test"
+    assert response.token_usage.prompt_tokens == 11
+    assert response.token_usage.completion_tokens == 4
+    assert response.token_usage.total_tokens == 15
+    assert response.token_usage.calls == 1
+    assert response.model_dump_json().find("provider-token") == -1
+
+
+def test_langsmith_tracing_requires_openai_and_key():
+    assert is_langsmith_tracing_enabled(Settings(_env_file=None), "openai") is False
+    assert (
+        is_langsmith_tracing_enabled(
+            Settings(_env_file=None, langsmith_tracing=True, langsmith_api_key="ls-test-key"),
+            "local",
+        )
+        is False
+    )
+    assert (
+        is_langsmith_tracing_enabled(
+            Settings(_env_file=None, langsmith_tracing=True, langsmith_api_key="ls-test-key"),
+            "openai",
+        )
+        is True
+    )
+
+
+def test_langsmith_output_hiding_preserves_usage_metadata_only():
+    hidden = _hide_langsmith_outputs_preserve_usage(
+        {
+            "raw_response": "do not send",
+            "usage_metadata": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11},
+        }
+    )
+
+    assert hidden == {"usage_metadata": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11}}

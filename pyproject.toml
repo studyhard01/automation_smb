@@ -14,6 +14,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["ruff>=0.4", "pytest>=8.0"]
+studio = [
+    "langgraph>=0.2.50",
+    "langgraph-cli[inmem]>=0.1.55",
+    "langchain-openai>=0.2",
+    "langchain-core>=0.3",
+    "langsmith>=0.1.98",
+]
 # 내용 검색의 PDF 본문 추출(선택). 미설치 시 PDF는 unsupported로 건너뛰고 서비스는 계속 동작.
 # txt/csv/json/xml/html/docx/xlsx 추출은 stdlib만으로 동작하므로 추가 설치가 필요 없다.
 pdf = ["pypdf>=4.0"]

@@ -85,11 +85,49 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 - Tool Lab 초안: `POST /api/playground/tool-draft`
 - local LLM 확인: `POST /api/playground/llm-status`
 
-첫 버전은 local/on-prem OpenAI 호환 LLM만 사용한다. `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`,
-`LLM_TIMEOUT_MS` 환경변수를 사용하며, SMB tool 결과를 외부 OpenAI로 재전송하지 않는다. LLM 모델이 비어 있으면
-UI는 tool을 실행하지 않고 설정 필요 메시지를 반환한다.
+Playground는 local/on-prem OpenAI 호환 LLM과 OpenAI API provider를 둘 다 지원한다.
+local provider는 `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT_MS` 환경변수를 사용한다.
+OpenAI provider는 UI의 Settings에 임시 API key를 넣거나 서버 `.env`의 `OPENAI_API_KEY`를 사용한다.
+OpenAI provider를 선택하면 선택한 tool 설명, 사용자 요청, tool 실행 결과가 OpenAI API로 전송될 수 있으므로
+민감 데이터 운영에서는 local provider를 기본으로 둔다. LLM 모델이 비어 있으면 UI는 tool을 실행하지 않고
+설정 필요 메시지를 반환한다.
 화면에서 Base URL과 모델명을 임시 입력해 `.env` 수정 없이 Ollama/LM Studio/llama.cpp 같은 로컬 서버를 확인할 수 있다.
 예: `http://127.0.0.1:11434/v1`, `qwen2.5-coder:7b`.
+OpenAI-compatible 응답에 `usage`가 있으면 채팅 응답과 연결 확인 결과에 `token_usage`가 포함되어
+모델별 input/output/total token과 호출 수를 볼 수 있다.
+
+## LangGraph Studio · LangSmith 로그
+
+LangGraph Studio 외피는 `integrations/langgraph/`에 있다. 공식 `langgraph dev` 흐름으로 로컬 agent server를 띄우고
+Studio에서 tool 호출 흐름을 볼 수 있다. 기본값은 LangSmith tracing OFF다.
+
+```bash
+uv pip install --native-tls -e ".[studio]"
+cd integrations/langgraph
+copy .env.example .env
+$env:PYTHONIOENCODING="utf-8"
+$env:PYTHONUTF8="1"
+langgraph dev
+```
+
+콘솔에 표시되는 LangGraph Studio URL은 보통
+`https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024` 형태다.
+이 화면은 `integrations/langgraph` 그래프를 실행/디버깅하는 곳이다. `/playground` FastAPI 화면에서 OpenAI provider를
+호출한 trace는 LangGraph Studio 실행 목록이 아니라 LangSmith의 Tracing Projects에서
+`automation-smb-playground` project로 확인한다.
+LangSmith에 OpenAI token usage를 남기려면 루트 `.env` 또는 LangGraph `.env`에 아래를 명시적으로 설정한다.
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=<LangSmith API key>
+LANGSMITH_PROJECT=automation-smb-playground
+LANGSMITH_HIDE_INPUTS=true
+LANGSMITH_HIDE_OUTPUTS=true
+```
+
+`LANGSMITH_HIDE_INPUTS/OUTPUTS=true`와 앱 내부 redaction을 유지해 trace에는 raw prompt/tool 결과 본문을 남기지 않고,
+모델명(`ls_model_name`), provider(`ls_provider`), session_id, token usage metadata 중심으로 기록한다.
+실제 환자/검사 데이터로 cloud LangSmith를 켜지 말고, 필요하면 사내 self-hosted `LANGSMITH_ENDPOINT`를 사용한다.
 
 ## 설치 · 실행
 

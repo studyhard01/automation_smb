@@ -20,15 +20,15 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from .config import load_settings
-from .tools import TOOLS
+from smb_agent.config import load_settings
+from smb_agent.tools import TOOLS
 
 _settings = load_settings()
 
 # 온프레미스 OpenAI 호환 LLM (llama.cpp 등). base_url을 외부로 바꾸지 말 것.
 _llm = ChatOpenAI(
     base_url=_settings.llm_base_url,
-    api_key=_settings.llm_api_key,
+    api_key=_settings.llm_api_key or "local-no-key",
     model=_settings.llm_model,
     temperature=_settings.llm_temperature,
     timeout=_settings.llm_timeout_ms / 1000,

@@ -26,10 +26,12 @@ from .models import (
     LlmStatusResponse,
     PlannedToolCall,
     PlaygroundDebug,
+    TokenUsage,
     ToolCallTrace,
     ToolDraftRequest,
     ToolDraftResponse,
 )
+from .tracing import trace_openai_chat_completion
 from .tools import ToolHandler
 
 
@@ -266,6 +268,7 @@ class PlaygroundAgent:
         all_steps: list[AgentStepTrace] = []
         traces: list[ToolCallTrace] = []
         debug_calls: list[LlmDebugCall] = []
+        usage_calls: list[TokenUsage] = []
         debug_allowed = request.debug_raw_llm and self.settings.playground_debug_raw_llm
         if request.debug_raw_llm and not self.settings.playground_debug_raw_llm:
             warnings.append("debug_raw_llm_denied")
@@ -343,6 +346,9 @@ class PlaygroundAgent:
                     base_url=base_url,
                     api_key=connection.api_key,
                     step=step,
+                    provider=connection.provider,
+                    session_id=session_id,
+                    usage_calls=usage_calls,
                     debug_calls=debug_calls if debug_allowed else None,
                 )
             except Exception:  # noqa: BLE001 - UI에는 안전한 오류 코드만 반환한다.
@@ -356,6 +362,7 @@ class PlaygroundAgent:
                     agent_steps=all_steps if request.debug_trace else [],
                     debug_calls=debug_calls if debug_allowed else [],
                     provider=connection.provider,
+                    token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
                 )
 
             all_steps.append(
@@ -567,6 +574,7 @@ class PlaygroundAgent:
             warnings=warnings,
             over_budget=over_budget,
             debug=PlaygroundDebug(llm_calls=debug_calls) if debug_allowed else None,
+            token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
         )
 
     def draft_tool(self, request: ToolDraftRequest, openai_api_key: str = "") -> ToolDraftResponse:
@@ -604,6 +612,7 @@ class PlaygroundAgent:
                 error_code="local_llm_url_not_internal",
                 message="로컬 LLM 주소는 localhost 또는 사내망 주소만 허용합니다.",
             )
+        usage_calls: list[TokenUsage] = []
         prompt = (
             "Create a safe tool manifest draft for automation_smb. "
             "Return only JSON with keys: id, display_name, description, permission, inputs, safety_notes. "
@@ -621,6 +630,9 @@ class PlaygroundAgent:
                 api_key=connection.api_key,
                 max_tokens=500,
                 purpose="tool_draft",
+                provider=connection.provider,
+                session_id=f"tool-draft-{uuid.uuid4()}",
+                usage_calls=usage_calls,
             )
         except Exception:  # noqa: BLE001
             return ToolDraftResponse(
@@ -636,6 +648,7 @@ class PlaygroundAgent:
             draft=data,
             warnings=["external_llm_provider:openai"] if connection.external else [],
             message="초안이 생성되었습니다. 아직 저장되거나 활성화되지 않습니다.",
+            token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
         )
 
     def check_llm(self, request: LlmStatusRequest, openai_api_key: str = "") -> LlmStatusResponse:
@@ -699,6 +712,7 @@ class PlaygroundAgent:
                 message="모델 목록은 확인했지만 사용할 모델명이 비어 있습니다.",
             )
 
+        usage_calls: list[TokenUsage] = []
         try:
             data = self._chat_json(
                 [
@@ -713,6 +727,9 @@ class PlaygroundAgent:
                 api_key=connection.api_key,
                 max_tokens=512,
                 purpose="llm_status",
+                provider=connection.provider,
+                session_id=f"llm-status-{uuid.uuid4()}",
+                usage_calls=usage_calls,
             )
         except Exception:  # noqa: BLE001
             return LlmStatusResponse(
@@ -737,6 +754,7 @@ class PlaygroundAgent:
             elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
             message="로컬 LLM 연결이 정상입니다." if chat_ok else "응답은 받았지만 JSON 확인값이 예상과 다릅니다.",
             error_code="" if chat_ok else "local_llm_unexpected_response",
+            token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
         )
 
     def _decide_next_action(
@@ -749,6 +767,9 @@ class PlaygroundAgent:
         base_url: str,
         api_key: str,
         step: int,
+        provider: str = "local",
+        session_id: str = "",
+        usage_calls: list[TokenUsage] | None = None,
         debug_calls: list[LlmDebugCall] | None = None,
     ) -> AgentDecision:
         tool_specs = [
@@ -793,6 +814,9 @@ class PlaygroundAgent:
             api_key=api_key,
             max_tokens=500,
             purpose=f"agent_decision_step_{step}",
+            provider=provider,
+            session_id=session_id,
+            usage_calls=usage_calls,
             debug_calls=debug_calls,
         )
         return self._decision_from_json(data)
@@ -860,6 +884,9 @@ class PlaygroundAgent:
         max_tokens: int,
         api_key: str = "",
         purpose: str = "chat_json",
+        provider: str = "local",
+        session_id: str = "",
+        usage_calls: list[TokenUsage] | None = None,
         debug_calls: list[LlmDebugCall] | None = None,
     ) -> dict[str, Any]:
         base_url = base_url.rstrip("/")
@@ -874,12 +901,30 @@ class PlaygroundAgent:
         }
         started = time.perf_counter()
         raw_content = ""
-        try:
+        usage: TokenUsage | None = None
+
+        def post_json() -> dict[str, Any]:
             timeout_s = max(0.1, self.settings.llm_timeout_ms / 1000)
             with httpx.Client(timeout=timeout_s) as client:
                 response = client.post(url, headers=headers, json=payload)
                 response.raise_for_status()
-            raw_content = response.json()["choices"][0]["message"]["content"]
+                return response.json()
+
+        try:
+            response_json = trace_openai_chat_completion(
+                settings=self.settings,
+                provider=provider,
+                model=model,
+                purpose=purpose,
+                session_id=session_id,
+                message_count=len(messages),
+                call=post_json,
+                usage_metadata=lambda body: self._langsmith_usage_metadata(body, provider, model),
+            )
+            usage = self._token_usage_from_response(response_json, provider, model)
+            if usage is not None and usage_calls is not None:
+                usage_calls.append(usage)
+            raw_content = response_json["choices"][0]["message"]["content"]
             data, repaired = _json_from_text_with_meta(raw_content)
             if debug_calls is not None:
                 debug_calls.append(
@@ -889,6 +934,7 @@ class PlaygroundAgent:
                         request_messages=self._safe_debug_messages(messages),
                         raw_response=self._safe_debug_text(raw_content),
                         parsed_json=self._safe_debug_json(data),
+                        token_usage=usage,
                         json_repaired=repaired,
                     )
                 )
@@ -905,6 +951,65 @@ class PlaygroundAgent:
                     )
                 )
             raise
+
+    def _token_usage_from_response(self, response_json: dict[str, Any], provider: str, model: str) -> TokenUsage | None:
+        usage = response_json.get("usage")
+        if not isinstance(usage, dict):
+            return None
+
+        prompt_tokens = self._usage_int(usage, "prompt_tokens", "input_tokens")
+        completion_tokens = self._usage_int(usage, "completion_tokens", "output_tokens")
+        total_tokens = self._usage_int(usage, "total_tokens")
+        if total_tokens <= 0:
+            total_tokens = prompt_tokens + completion_tokens
+
+        if prompt_tokens <= 0 and completion_tokens <= 0 and total_tokens <= 0:
+            return None
+        return TokenUsage(
+            provider=provider,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            calls=1,
+        )
+
+    def _langsmith_usage_metadata(self, response_json: dict[str, Any], provider: str, model: str) -> dict[str, int]:
+        usage = self._token_usage_from_response(response_json, provider, model)
+        if usage is None:
+            return {}
+        return {
+            "input_tokens": usage.prompt_tokens,
+            "output_tokens": usage.completion_tokens,
+            "total_tokens": usage.total_tokens,
+        }
+
+    def _aggregate_token_usage(
+        self, usage_calls: list[TokenUsage], provider: str, model: str
+    ) -> TokenUsage | None:
+        if not usage_calls:
+            return None
+        return TokenUsage(
+            provider=provider,
+            model=model,
+            prompt_tokens=sum(item.prompt_tokens for item in usage_calls),
+            completion_tokens=sum(item.completion_tokens for item in usage_calls),
+            total_tokens=sum(item.total_tokens for item in usage_calls),
+            calls=sum(item.calls for item in usage_calls),
+        )
+
+    def _usage_int(self, usage: dict[str, Any], *keys: str) -> int:
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                return max(0, value)
+            if isinstance(value, float):
+                return max(0, int(value))
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+        return 0
 
     def _list_models(self, base_url: str, api_key: str = "") -> list[str]:
         url = f"{base_url.rstrip('/')}/models"
@@ -989,6 +1094,7 @@ class PlaygroundAgent:
         agent_steps: list[AgentStepTrace] | None = None,
         debug_calls: list[LlmDebugCall] | None = None,
         provider: str = "local",
+        token_usage: TokenUsage | None = None,
     ) -> ChatResponse:
         return ChatResponse(
             session_id=session_id,
@@ -1000,4 +1106,5 @@ class PlaygroundAgent:
             error_code=code,
             agent_steps=agent_steps or [],
             debug=PlaygroundDebug(llm_calls=debug_calls) if debug_calls else None,
+            token_usage=token_usage,
         )
