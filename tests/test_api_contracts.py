@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from uuid import UUID
 
+import httpx
 import pytest
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 
 from smb_finder import api
 from smb_finder.config import Settings
 from smb_finder.content_index import ContentIndex
 from smb_finder.index import FolderIndex
 from smb_finder.models import RefreshContentRequest
+from smb_finder.playground.agent import PlaygroundAgent
+from smb_finder.playground.api import create_playground_router
+from smb_finder.playground.models import ChatResponse
+from smb_finder.playground.tools import PlaygroundRuntime
 from smb_finder.smb_client import FolderEntry
 
 
@@ -34,10 +40,164 @@ def test_openapi_operation_ids_are_stable():
     assert operations["/admin/content-index-jobs"]["get"]["operationId"] == "list_content_index_jobs"
     assert operations["/admin/content-index-jobs/{job_id}"]["get"]["operationId"] == "get_content_index_job"
     assert operations["/api/playground/tools"]["get"]["operationId"] == "list_playground_tools"
+    assert (
+        operations["/api/playground/karyotype-summary"]["post"]["operationId"]
+        == "summarize_cytogenetics_karyotype"
+    )
+    assert "403" not in operations["/api/playground/karyotype-summary"]["post"]["responses"]
     assert operations["/api/playground/chat"]["post"]["operationId"] == "run_playground_chat"
     assert operations["/api/playground/tool-draft"]["post"]["operationId"] == "draft_playground_tool"
     assert operations["/api/playground/llm-status"]["post"]["operationId"] == "check_playground_llm"
     assert "ApiErrorResponse" in schema["components"]["schemas"]
+
+
+def _playground_api_app() -> FastAPI:
+    test_app = FastAPI()
+    test_app.include_router(
+        create_playground_router(
+            lambda: PlaygroundRuntime(
+                settings=Settings(
+                    _env_file=None,
+                    llm_model="local-model",
+                    llm_base_url="http://127.0.0.1:8080/v1",
+                ),
+                rag_searcher=object(),
+            )
+        )
+    )
+    return test_app
+
+
+async def _get_playground_tools() -> httpx.Response:
+    transport = httpx.ASGITransport(app=_playground_api_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.get("/api/playground/tools")
+
+
+def test_playground_tools_api_serializes_execution_type():
+    response = asyncio.run(_get_playground_tools())
+
+    assert response.status_code == 200
+    tools = {tool["id"]: tool for tool in response.json()}
+    assert tools["cytogenetics_karyotype_summary"]["execution_type"] == "llm"
+    assert {
+        tool_id for tool_id, tool in tools.items() if tool["execution_type"] == "code"
+    } == {
+        "find_folder",
+        "search_content",
+        "search_rag_chunks",
+        "cytogenetics_report",
+        "ngs_report",
+        "refresh_content",
+    }
+    assert tools["find_folder"]["enabled"] is True
+    assert tools["search_rag_chunks"]["enabled"] is True
+    assert tools["cytogenetics_karyotype_summary"]["enabled"] is True
+    assert tools["refresh_content"]["enabled"] is False
+    assert "provider_availability" not in tools["find_folder"]
+    assert "external_provider_allowed" not in tools["find_folder"]
+    assert tools["find_folder"]["category"] == "smb"
+    assert tools["search_rag_chunks"]["category"] == "database"
+    assert tools["cytogenetics_report"]["category"] == "report"
+
+
+def test_playground_chat_api_generates_request_id(monkeypatch):
+    def fake_run(self, request, registry, openai_api_key="", request_id=""):  # noqa: ANN001, ARG001
+        return ChatResponse(
+            request_id=request_id,
+            session_id="synthetic-session",
+            provider_used=request.provider,
+            model_used="local-model",
+            assistant_message="synthetic ok",
+        )
+
+    monkeypatch.setattr(PlaygroundAgent, "run", fake_run)
+
+    async def post_chat():
+        transport = httpx.ASGITransport(app=_playground_api_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/api/playground/chat",
+                json={
+                    "message": "synthetic request",
+                    "provider": "local",
+                    "selected_tool_ids": ["find_folder"],
+                },
+            )
+
+    response = asyncio.run(post_chat())
+
+    assert response.status_code == 200
+    assert str(UUID(response.json()["request_id"])) == response.json()["request_id"]
+
+
+async def _post_karyotype_summary(payload: dict[str, str]) -> httpx.Response:
+    transport = httpx.ASGITransport(app=_playground_api_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post("/api/playground/karyotype-summary", json=payload)
+
+
+def test_karyotype_summary_api_uses_requested_llm_and_returns_its_summary(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_chat(self, messages, **kwargs):  # noqa: ANN001, ARG001
+        captured["messages"] = messages
+        captured.update(kwargs)
+        return {"karyotype_summary": "핵형분석요약결과: API에서 선택한 LLM의 결과입니다."}
+
+    monkeypatch.setattr(PlaygroundAgent, "_chat_json", fake_chat)
+    raw_iscn = "46,XX,t(9;22)(q34;q11.2)[20]"
+    response = asyncio.run(
+        _post_karyotype_summary(
+            {
+                "iscn": raw_iscn,
+                "provider": "local",
+                "local_base_url": "http://127.0.0.1:18080/v1",
+                "model": "qwen3:30b-a3b",
+            }
+        )
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary_kind"] == "cytogenetics_karyotype_summary"
+    assert payload["karyotype_summary"] == "핵형분석요약결과: API에서 선택한 LLM의 결과입니다."
+    assert "clone_count" not in payload
+    assert "iscn" not in payload
+    assert captured["model"] == "qwen3:30b-a3b"
+    assert captured["base_url"] == "http://127.0.0.1:18080/v1"
+    assert raw_iscn in str(captured["messages"])
+
+
+def test_karyotype_summary_api_sends_unparsed_notation_to_llm(monkeypatch):
+    captured: list[object] = []
+
+    def fake_chat(self, messages, **kwargs):  # noqa: ANN001, ARG001
+        captured.extend(messages)
+        return {"karyotype_summary": "핵형분석요약결과: LLM이 입력을 검토했습니다."}
+
+    monkeypatch.setattr(PlaygroundAgent, "_chat_json", fake_chat)
+    raw_iscn = "46,XX,t(9;22)(q34;q11.2[20]"
+    response = asyncio.run(_post_karyotype_summary({"iscn": raw_iscn}))
+
+    assert response.status_code == 200
+    assert raw_iscn in str(captured)
+
+
+@pytest.mark.parametrize(
+    ("iscn", "status_code", "error_code"),
+    [
+        ("", 400, "empty_iscn"),
+        ("X" * 501, 422, "iscn_too_long"),
+    ],
+)
+def test_karyotype_summary_api_rejects_input_without_echoing_raw_iscn(iscn, status_code, error_code):
+    response = asyncio.run(_post_karyotype_summary({"iscn": iscn}))
+
+    assert response.status_code == status_code
+    assert response.json()["detail"]["code"] == error_code
+    if iscn:
+        assert iscn not in response.text
 
 
 def test_refresh_content_request_normalizes_relative_path():

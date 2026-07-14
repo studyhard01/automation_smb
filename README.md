@@ -1,8 +1,12 @@
 # automation_smb — 공유 폴더 찾기 서비스
 
-텍스트(이후 음성) 명령으로 **온프레미스 SMB 공유폴더를 즉시 찾아주는** 서비스.
+텍스트(이후 음성) 명령으로 **SMB 공유폴더를 즉시 찾아주는 챗봇 서비스**다.
 노코딩 자동화 툴(→ [`OS.md`](./OS.md))의 첫 성공 케이스이자 L4 도구다.
-작업 규칙·보안·지연 요구는 [`CLAUDE.md`](./CLAUDE.md) 참고.
+현재 개발 단계와 작업 규칙·지연 요구는 [`AGENTS.md`](./AGENTS.md) 참고.
+
+> **현재는 합성 데이터 전용 기능 테스트 환경이다.** 실제 의료 환경과 닮지 않은 더미 폴더·파일·문장만 사용해
+> 챗봇 대화, tool 호출, trace, 지연을 검증한다. 의료데이터 입력 탐지나 provider별 합성 데이터 gate는 두지 않으며,
+> 운영용 보안 검토는 기본 기능 테스트 이후 별도 단계에서 진행한다.
 
 ## 핵심 설계 — 지연 최소화
 
@@ -25,8 +29,8 @@
 **외부 의존성이 없다**(온프레미스·SSL프록시 환경에 적합). 3글자 미만 질의는 `LIKE`로 폴백한다.
 `docx`/`xlsx`는 stdlib `zipfile`로, `pdf`는 선택 의존성(`pypdf`)으로 본문을 뽑는다.
 
-> ⚠️ **보안**: 내용 인덱스(`.cache/content.fts.db`)에는 환자/검사 **본문**이 들어간다. 원본 공유폴더와
-> 동급의 민감 데이터다 — 로컬에만 두고(`.cache/` 는 `.gitignore`), 외부 전송·커밋 금지.
+테스트용 내용 인덱스(`.cache/content.fts.db`)에는 합성 fixture 본문만 적재한다. `.cache/`는 실행 중 생성되는
+로컬 캐시이므로 커밋하지 않는다.
 
 ## API 계약 · 관측
 
@@ -39,8 +43,36 @@ Pydantic 응답 모델을 사용해 OpenAPI 도구 계약을 고정한다.
 - `/refresh-content`: 내용 인덱싱 통계와 소요 시간을 반환하되, SMB host/share 실제 값은 노출하지 않는다.
 - `/admin/content-index-jobs`: 내용 인덱싱을 백그라운드 job으로 실행한다. `X-Admin-Token` 필요.
 
-운영 로그에는 원문 질의, SMB 경로, 파일 본문 `snippet`, 내부 host/share 값을 남기지 않는다. 지연 초과 로그는
-질의 길이, 결과 수, 소요 시간처럼 민감도가 낮은 값만 기록한다.
+로그에는 요청 ID, 질의 길이, 결과 수, 소요 시간과 예산 초과 여부를 기록해 기능과 지연을 확인한다.
+
+## MCP 로컬 MVP
+
+기존 FastAPI 프로세스의 검색 runtime을 그대로 사용해 `http://127.0.0.1:8010/mcp`에
+Streamable HTTP MCP를 선택적으로 제공한다. 기본값은 `MCP_ENABLED=false`라 endpoint가 마운트되지 않는다.
+활성화된 MCP가 공개하는 도구는 읽기 전용 검색 두 개뿐이다.
+
+- `find_folder`: 사전 구축된 인메모리 폴더 인덱스 검색
+- `search_content`: 사전 구축된 로컬 FTS5 내용 인덱스 검색
+
+관리자·인덱스 갱신·보고서·핵형요약 도구는 MCP catalog에 등록하지 않는다. 결과에서도 원문 query, 본문
+`snippet`, 절대경로, SMB host/share, 내부 IP와 자격증명을 제외한다. MCP 요청이 SMB를 직접 순회하거나
+인덱스를 갱신하지도 않는다.
+
+로컬 테스트에서만 아래 값을 `.env`에 추가한다. `MCP_API_TOKEN`은 `ADMIN_API_TOKEN`과 다른 임의값을 쓰고,
+서비스는 계속 `--host 127.0.0.1`로 바인딩한다.
+
+```powershell
+MCP_ENABLED=true
+MCP_API_TOKEN=<별도로 생성한 충분히 긴 임의값>
+MCP_ALLOW_REMOTE=false
+MCP_ALLOWED_HOSTS=127.0.0.1,localhost,[::1]
+MCP_ALLOWED_ORIGINS=
+```
+
+Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 client는 `MCP_ALLOWED_ORIGINS`에 정확한 값을
+명시해야 하며 wildcard는 사용하지 않는다. 기본 CORS는 꺼져 있어 브라우저의 직접 교차 출처 연결은 이번 MVP에서
+지원하지 않는다. 요청에는 `Authorization: Bearer <MCP_API_TOKEN>`이 필요하고, 본문은 64KiB로 제한된다.
+사내 다중 사용자 공개와 OAuth/SSO는 이 로컬 MVP의 범위가 아니다.
 
 ## 구조
 
@@ -57,9 +89,18 @@ Pydantic 응답 모델을 사용해 OpenAPI 도구 계약을 고정한다.
 | `src/smb_finder/content_index.py` | 내용 FTS5(trigram) 저장 + 검색 (bm25·snippet) |
 | `src/smb_finder/content_indexer.py` | SMB 파일 순회→추출→FTS5 적재 (관리/백그라운드) |
 | `src/smb_finder/content_search.py` | 내용 검색 오케스트레이터 (토큰화→검색, 시간 측정) |
+| `src/smb_finder/rag_search.py` | 로컬 PostgreSQL 질의 임베딩→pgvector chunk 검색 (단계별 시간 측정) |
+| `src/smb_finder/reports/` | 검사 보고서 업무 보조 tool — LLM 기반 ISCN 요약 + 로컬 후보 문서 검색/체크리스트 |
+| `src/smb_finder/tooling/` | 검색 도구 공통 Pydantic 계약·불변 catalog·timeout/동시 실행/감사 로그 executor |
+| `src/smb_finder/mcp_server.py` | 읽기 전용 MCP 검색 도구 등록과 HTTP transport 설정 |
 | `src/smb_finder/api.py` | FastAPI 앱 — `POST /find`·`/search-content`·`/refresh*` (OpenAPI 도구) |
 | `src/smb_finder/playground/` | 자체 챗봇 Playground — 선택한 tool만 호출하는 local LLM 기반 채팅 API |
+| `src/smb_finder/playground/studio_observer.py` | Playground 실행 메타데이터를 로컬 LangGraph Studio 관찰 graph로 보내는 비동기·fail-open observer |
 | `src/smb_finder/web/` | `/playground` 정적 UI — tool 선택, 채팅, Tool Lab 초안 화면 |
+| `docs/PLAYGROUND_TOOLS.md` | `/playground` 등록 tool별 입력·동작·테스트 계약 |
+| `docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md` | 세포유전 LLM 보고서 프로세스 이관 가이드 |
+| `docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md` | 공통 ToolSpec을 중심으로 REST·Playground·MCP·LangChain을 연결하는 목표 아키텍처와 흐름도 |
+| `docs/MCP_IMPLEMENTATION_PLAN.md` | 검색 도구 2개부터 시작하는 MCP MVP의 작업 순서·테스트·롤백 계획 |
 | `docs/playground_agentic_plan.md` | Playground 제한형 agent loop와 debug 토글 구현 계획 |
 | `integrations/langflow/` | 노코드 외피 — Langflow 컴포넌트 + `folder_search` 워크플로우 자동 생성기 ([README](integrations/langflow/README.md)) |
 | `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
@@ -81,73 +122,93 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 
 - 화면: `GET /playground`
 - tool 목록: `GET /api/playground/tools`
+- ISCN 핵형 요약: `POST /api/playground/karyotype-summary`
 - 채팅 실행: `POST /api/playground/chat`
 - Tool Lab 초안: `POST /api/playground/tool-draft`
 - local LLM 확인: `POST /api/playground/llm-status`
 
+기본 tool은 `find_folder`, `search_content`, `search_rag_chunks`, `cytogenetics_karyotype_summary`,
+`cytogenetics_report`, `ngs_report`, `refresh_content`다. UI는 `SMB 직접 접근`, `DB 접근`, `보고서 관련` 세 분류만
+먼저 표시하고, 분류를 클릭하면 내부 tool 선택지가 열린다.
+
+`search_rag_chunks`는 `rag_db_local_20260713.document_chunks`를 cosine 유사도로 검색한다. DB에 저장된
+`nomic-embed-text-v2-moe`와 동일한 768차원 모델 endpoint가 필요하며, 질의에는 모델 권장
+`search_query: ` prefix를 자동으로 붙인다. 연결은 `.env`의 `RAG_DB_*`, `RAG_EMBEDDING_*`로 바꿀 수 있다.
+찾은 chunk는 agent observation으로 전달되고 선택한 LLM이 근거 기반 최종 답변을 작성한다.
+보고서 tool은 문서를 자동 확정하지 않고, 로컬 내용 인덱스에서 관련 템플릿 후보를 찾은 뒤
+작성 체크리스트와 다음 행동을 제시한다. 결과 trace에는 구조화 payload가 포함되어 UI가 후보 문서와
+체크리스트를 별도 블록으로 표시한다.
+
 Playground는 local/on-prem OpenAI 호환 LLM과 OpenAI API provider를 둘 다 지원한다.
 local provider는 `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT_MS` 환경변수를 사용한다.
 OpenAI provider는 UI의 Settings에 임시 API key를 넣거나 서버 `.env`의 `OPENAI_API_KEY`를 사용한다.
-OpenAI provider를 선택하면 선택한 tool 설명, 사용자 요청, tool 실행 결과가 OpenAI API로 전송될 수 있으므로
-민감 데이터 운영에서는 local provider를 기본으로 둔다. LLM 모델이 비어 있으면 UI는 tool을 실행하지 않고
+현재는 합성 데이터 전용 테스트이므로 활성화된 tool은 local/OpenAI provider에서 같은 방식으로 선택·실행된다.
+별도 합성 데이터 토글이나 provider별 tool 차단은 없다. LLM 모델이 비어 있으면 UI는 tool을 실행하지 않고
 설정 필요 메시지를 반환한다.
 화면에서 Base URL과 모델명을 임시 입력해 `.env` 수정 없이 Ollama/LM Studio/llama.cpp 같은 로컬 서버를 확인할 수 있다.
 예: `http://127.0.0.1:11434/v1`, `qwen2.5-coder:7b`.
+Qwen3 계열은 기본 thinking이 JSON 응답 예산을 소진할 수 있어 Playground의 JSON 전용 호출에 `/no_think`를 자동 적용한다.
 OpenAI-compatible 응답에 `usage`가 있으면 채팅 응답과 연결 확인 결과에 `token_usage`가 포함되어
 모델별 input/output/total token과 호출 수를 볼 수 있다.
 
-## LangGraph Studio · LangSmith 로그
+## LangGraph Studio · LangSmith trace
 
-LangGraph Studio 외피는 `integrations/langgraph/`에 있다. 공식 `langgraph dev` 흐름으로 로컬 agent server를 띄우고
-Studio에서 tool 호출 흐름을 볼 수 있다. 기본값은 LangSmith tracing OFF다.
+LangGraph Studio 연동은 서로 다른 두 graph를 제공한다.
 
-```bash
-uv pip install --native-tls -e ".[studio]"
+- `smb_agent`: Studio에서 직접 질문을 실행하는 기존 Agent graph다. 로컬 LLM과 `smb_finder` REST 도구를 호출한다.
+- `playground_observer`: `/playground`에서 이미 완료된 요청의 실행 메타데이터를 받는 관찰 graph다.
+  LLM·SMB·MCP를 호출하지 않으며 Studio가 꺼져도 Playground 응답에는 영향을 주지 않는다.
+
+observer에는 요청 ID, provider/model 식별자, 선택·실행된 tool ID, 상태·오류 코드, 지연·토큰 수치를 보낸다.
+기본값은 OFF이며, 켜면 Playground 응답과 무관한 fail-open 방식으로 동작한다.
+
+```powershell
+# 1. Studio 의존성 설치
+uv sync --native-tls --extra dev --extra studio
+
+# 2. LangGraph 로컬 Agent Server 실행
+# 최초 실행 시 .env.example을 .env.studio로 복사한다.
 cd integrations/langgraph
-copy .env.example .env
-$env:PYTHONIOENCODING="utf-8"
-$env:PYTHONUTF8="1"
-langgraph dev
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start_local_studio.ps1
 ```
 
-콘솔에 표시되는 LangGraph Studio URL은 보통
-`https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024` 형태다.
-이 화면은 `integrations/langgraph` 그래프를 실행/디버깅하는 곳이다. `/playground` FastAPI 화면에서 OpenAI provider를
-호출한 trace는 LangGraph Studio 실행 목록이 아니라 LangSmith의 Tracing Projects에서
-`automation-smb-playground` project로 확인한다.
-LangSmith에 OpenAI token usage를 남기려면 루트 `.env` 또는 LangGraph `.env`에 아래를 명시적으로 설정한다.
+루트 `.env`에서 observer를 명시적으로 켠 뒤 `smb_finder`를 재시작한다.
 
-```bash
-LANGSMITH_TRACING=true
-LANGSMITH_API_KEY=<LangSmith API key>
-LANGSMITH_PROJECT=automation-smb-playground
-LANGSMITH_HIDE_INPUTS=true
-LANGSMITH_HIDE_OUTPUTS=true
+```dotenv
+LANGGRAPH_STUDIO_OBSERVER_ENABLED=true
+LANGGRAPH_STUDIO_OBSERVER_URL=http://127.0.0.1:2024
+LANGGRAPH_STUDIO_OBSERVER_GRAPH_ID=playground_observer
+LANGGRAPH_STUDIO_OBSERVER_TIMEOUT_MS=300
+LANGGRAPH_STUDIO_OBSERVER_QUEUE_SIZE=100
+LANGSMITH_TRACING=false
 ```
 
-`LANGSMITH_HIDE_INPUTS/OUTPUTS=true`와 앱 내부 redaction을 유지해 trace에는 raw prompt/tool 결과 본문을 남기지 않고,
-모델명(`ls_model_name`), provider(`ls_provider`), session_id, token usage metadata 중심으로 기록한다.
-실제 환자/검사 데이터로 cloud LangSmith를 켜지 말고, 필요하면 사내 self-hosted `LANGSMITH_ENDPOINT`를 사용한다.
+Studio에서 `playground_observer` graph를 선택하면 Playground 응답 하단의 요청 ID와 같은 run을 찾을 수 있다.
+로컬 Agent Server의 in-memory run은 개발 서버 재시작 시 사라진다. LangSmith tracing은 같은 `.env.studio`에서
+표준 환경변수로 선택적으로 켤 수 있으며, 별도 안전 검사나 `synthetic_trace` 프로필 분기는 없다.
 
 ## 설치 · 실행
 
-```bash
-uv venv --python 3.11 --native-tls          # 사내망 SSL: --native-tls
-uv pip install --native-tls -e ".[dev]"
-cp .env.example .env                         # SMB 자격증명 입력 (실제 값은 ../automation/.env)
+```powershell
+# uv.lock 기준으로 Python 3.11 가상환경과 개발 의존성을 한 번에 맞춘다.
+uv sync --python 3.11 --native-tls --extra dev
+Copy-Item .env.example .env                  # SMB 자격증명 입력 (실제 값은 ../automation/.env)
 
 # 서버 실행
-.venv/Scripts/uvicorn smb_finder.api:app --port 8010 --reload
+uv run --no-sync uvicorn smb_finder.api:app --host 127.0.0.1 --port 8010 --reload
+
+# 별도 터미널: DB 적재 때 사용한 동일 GGUF 모델을 embeddings 서버로 실행
+llama-server -m <nomic-embed-text-v2-moe.gguf> --embeddings --port 8081
 
 # 폴더 찾기 요청 (이름·경로)
 curl -s -X POST http://localhost:8010/find \
   -H 'Content-Type: application/json' \
-  -d '{"query": "OO검사 결과 폴더 찾아줘"}'
+  -d '{"query": "demo project alpha 폴더 찾아줘"}'
 
 # 내용 찾기 요청 (파일 본문)
 curl -s -X POST http://localhost:8010/search-content \
   -H 'Content-Type: application/json' \
-  -d '{"query": "BRCA1 변이 보고서"}'
+  -d '{"query": "orange widget revision"}'
 
 # 폴더 인덱스 갱신 (이름 검색용)
 curl -s -X POST http://localhost:8010/refresh
@@ -156,13 +217,13 @@ curl -s -X POST http://localhost:8010/refresh
 curl -s -X POST http://localhost:8010/refresh-content \
   -H 'Content-Type: application/json' \
   -H 'X-Admin-Token: <ADMIN_API_TOKEN>' \
-  -d '{"path": "검사결과/2026/OO검사"}'
+  -d '{"path": "demo/projects/alpha"}'
 
 # 운영 권장: 관리자용 백그라운드 job으로 내용 DB화
 curl -s -X POST http://localhost:8010/admin/content-index-jobs \
   -H 'Content-Type: application/json' \
   -H 'X-Admin-Token: <ADMIN_API_TOKEN>' \
-  -d '{"path": "검사결과/2026/OO검사"}'
+  -d '{"path": "demo/projects/alpha"}'
 
 curl -s http://localhost:8010/admin/content-index-jobs/<job_id> \
   -H 'X-Admin-Token: <ADMIN_API_TOKEN>'

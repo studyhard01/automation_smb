@@ -9,10 +9,7 @@
 호출하므로 검색 로직은 재구현하지 않는다(tools.py 참고). LangGraph Studio는 이 그래프의 messages
 상태를 채팅으로 렌더링하고, 노드 단위로 호출을 시각화·디버깅하게 해준다.
 
-보안 (CLAUDE.md — 항상 우선):
-- LLM은 config의 llm_base_url(**온프레미스, 기본 localhost:8080/v1**)만 쓴다. 외부 API 금지.
-- LangSmith 트레이싱은 환자/검사 데이터를 클라우드로 올리므로 .env에서 꺼 둔다(README 참고).
-- 도구는 read-only(인덱싱은 로컬 인덱스만 갱신). 공유폴더 파일을 쓰지 않는다.
+개발 프로필은 단일 로컬 테스트 흐름을 사용하며, 도구는 smb-finder의 읽기 API를 호출한다.
 """
 
 from __future__ import annotations
@@ -47,8 +44,7 @@ SYSTEM_PROMPT = """SMB 파일에서 사용자 질문에 대한 정확한 파일 
 
 원칙:
 - 도구 결과(경로·파일명)를 지어내지 말고 그대로 전달한다. 결과가 없으면 없다고 말한다.
-- 답변은 짧고 명확하게. 경로는 그대로 보여준다.
-- 보안: 폴더 경로·파일 내용을 외부로 보내지 않는다. 사내 도구만 사용한다."""
+- 답변은 짧고 명확하게. 경로는 그대로 보여준다."""
 
 # Studio가 불러갈 그래프 객체. langgraph.json에서 `graph`로 참조한다.
 graph = create_react_agent(_llm, TOOLS, prompt=SYSTEM_PROMPT)

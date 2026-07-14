@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -37,7 +37,9 @@ from .models import (
     RefreshIndexResponse,
 )
 from .playground.api import create_playground_router
+from .playground.studio_observer import StudioObserver
 from .playground.tools import PlaygroundRuntime
+from .rag_search import RagVectorSearcher
 
 logging.basicConfig(level=logging.INFO)
 _logger = logging.getLogger(__name__)
@@ -45,6 +47,24 @@ _logger = logging.getLogger(__name__)
 _settings = load_settings()
 _state: dict = {}
 _content_jobs = ContentIndexJobStore(_settings.content_index_job_retention)
+_studio_observer = StudioObserver(_settings)
+
+
+def _playground_runtime() -> PlaygroundRuntime:
+    """현재 FastAPI 상태를 검색 도구의 런타임 의존성으로 제공한다."""
+    return PlaygroundRuntime(
+        settings=_settings,
+        finder=_state.get("finder"),
+        content_searcher=_state.get("content_searcher"),
+        rag_searcher=_state.get("rag_searcher"),
+    )
+
+
+_mcp_bundle = None
+if _settings.mcp_enabled:
+    from .mcp_server import McpExactRoute, create_mcp_bundle
+
+    _mcp_bundle = create_mcp_bundle(_playground_runtime, _settings)
 
 
 def _safe_config_path(value: str) -> str:
@@ -118,19 +138,28 @@ async def lifespan(app: FastAPI):
     폴더 인덱스는 가벼워 시작 시 빌드하지만, 내용 인덱스(본문 추출)는 무거우므로
     기존 DB만 열고 비어 있으면 /refresh-content로 명시적으로 빌드한다(시작 지연 방지).
     """
-    index = await run_in_threadpool(load_or_build, _settings)
-    _state["finder"] = Finder(index, _settings)
-    _state["index"] = index
+    async with AsyncExitStack() as stack:
+        stack.callback(_state.clear)
+        index = await run_in_threadpool(load_or_build, _settings)
+        _state["finder"] = Finder(index, _settings)
+        _state["index"] = index
 
-    content_index = await run_in_threadpool(open_index, _settings.content_index_db_path)
-    _state["content_index"] = content_index
-    _state["content_searcher"] = ContentSearcher(content_index, _settings)
-    _logger.info(
-        "서비스 준비 완료 (폴더 %d건, 내용 %d파일)", len(index), content_index.count()
-    )
-    yield
-    content_index.close()
-    _state.clear()
+        content_index = await run_in_threadpool(open_index, _settings.content_index_db_path)
+        stack.callback(content_index.close)
+        _state["content_index"] = content_index
+        _state["content_searcher"] = ContentSearcher(content_index, _settings)
+        if _settings.rag_db_enabled:
+            rag_searcher = RagVectorSearcher(_settings)
+            stack.callback(rag_searcher.close)
+            _state["rag_searcher"] = rag_searcher
+        await _studio_observer.start()
+        stack.push_async_callback(_studio_observer.stop)
+        if _mcp_bundle is not None:
+            await stack.enter_async_context(_mcp_bundle.server.session_manager.run())
+        _logger.info(
+            "서비스 준비 완료 (폴더 %d건, 내용 %d파일)", len(index), content_index.count()
+        )
+        yield
 
 
 app = FastAPI(
@@ -147,18 +176,11 @@ app.mount(
     StaticFiles(directory=str(_WEB_DIR / "assets")),
     name="playground-assets",
 )
+if _mcp_bundle is not None:
+    app.router.routes.append(McpExactRoute("/mcp", _mcp_bundle.app))
 
 
-def _playground_runtime() -> PlaygroundRuntime:
-    """현재 FastAPI 상태를 Playground tool 실행 런타임으로 노출한다."""
-    return PlaygroundRuntime(
-        settings=_settings,
-        finder=_state.get("finder"),
-        content_searcher=_state.get("content_searcher"),
-    )
-
-
-app.include_router(create_playground_router(_playground_runtime))
+app.include_router(create_playground_router(_playground_runtime, _studio_observer))
 
 
 @app.get("/playground", include_in_schema=False)

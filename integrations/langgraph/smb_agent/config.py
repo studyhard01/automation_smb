@@ -1,11 +1,11 @@
-"""LangGraph 외피 설정 로더 — .env 환경변수에서 smb-finder 주소·LLM·예산을 읽는다.
+"""LangGraph 외피 설정 로더 — .env.studio에서 smb-finder 주소·LLM·예산을 읽는다.
 
 smb_finder 서비스의 config.py와 **같은 env 키 이름**(LLM_BASE_URL/LLM_MODEL/LLM_API_KEY)을
 재사용한다. 비밀정보(자격증명·내부 IP·API 키)는 코드에 하드코딩하지 않고 .env에서만 주입한다.
 (CLAUDE.md 보안 규칙)
 
 보안: 이 외피는 **사내 localhost의 smb-finder + 온프레미스 LLM만** 호출하도록 기본값이 잡혀 있다.
-외부 호스트로 바꾸지 말 것. LangSmith 트레이싱(클라우드 업로드)은 .env에서 꺼 둔다.
+외부 호스트로 바꾸지 말 것. LangSmith 트레이싱(클라우드 업로드)은 .env.studio에서 꺼 둔다.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def _is_internal_http_url(value: str) -> bool:
 class AgentSettings(BaseSettings):
     """LangGraph 에이전트 외피 설정 (환경변수 기반)."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env.studio", env_file_encoding="utf-8", extra="ignore")
 
     # ── 사내 smb-finder 서비스 (진짜 검색 로직은 전부 여기) ──
     smb_finder_url: str = Field(

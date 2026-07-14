@@ -3,24 +3,30 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>automation_smb Playground</title>
-    <link rel="stylesheet" href="/playground/assets/playground.css" />
+    <title>Synthetic Chatbot Playground</title>
+    <link rel="stylesheet" href="/playground/assets/playground.css?v=20260714-4" />
   </head>
   <body>
     <main class="app-shell">
       <aside class="tool-panel">
         <div class="panel-header">
           <div>
-            <h1>Tool Playground</h1>
-            <p>챗봇이 사용할 tool을 고릅니다.</p>
+            <p class="eyebrow">CHATBOT TEST LAB</p>
+            <h1>Chatbot Playground</h1>
+            <p>분류를 열고 이번 실행에 사용할 도구를 선택하세요.</p>
           </div>
-          <button id="reloadTools" class="icon-button" title="tool 새로고침">↻</button>
+          <button id="reloadTools" class="icon-button" type="button" title="도구 새로고침" aria-label="도구 새로고침">↻</button>
         </div>
         <div id="toolList" class="tool-list" aria-live="polite"></div>
       </aside>
 
       <section class="chat-panel">
         <header class="chat-header">
+          <div class="environment-banner" role="status">
+            <span class="environment-dot" aria-hidden="true"></span>
+            <strong>합성 데이터 전용 테스트 환경</strong>
+            <span>챗봇 기능과 도구 호출을 빠르게 검증하는 Playground입니다.</span>
+          </div>
           <nav class="tabs" aria-label="Playground modes">
             <button class="tab active" data-tab="chat">Chat</button>
             <button class="tab" data-tab="toolLab">Tool Lab</button>
@@ -48,20 +54,39 @@
           <div id="llmStatus" class="status-line" aria-live="polite">local LLM 미확인</div>
         </header>
 
-        <div id="chatView" class="view active">
+          <div id="chatView" class="view active">
           <div class="debug-controls">
             <label>
               <input id="debugTrace" type="checkbox" />
-              Agent trace 보기
+              Agent trace
             </label>
             <label>
               <input id="debugRawLlm" type="checkbox" />
-              Raw LLM debug 보기
+              Raw LLM debug
             </label>
           </div>
-          <div id="messages" class="messages" aria-live="polite"></div>
+          <div id="messages" class="messages" aria-live="polite">
+            <section id="emptyState" class="empty-state">
+              <span class="empty-state-label">READY</span>
+              <h2>합성 시나리오로 챗봇 동작을 확인하세요</h2>
+              <p>Provider와 도구를 선택한 뒤 메시지를 보내면 응답, 실행 trace, 토큰 사용량과 시간 예산을 함께 확인할 수 있습니다.</p>
+              <div class="example-prompts" aria-label="합성 예시 프롬프트">
+                <button type="button" data-example-prompt="프로젝트 오로라의 디자인 에셋 폴더를 찾아줘">
+                  프로젝트 오로라 에셋 찾기
+                </button>
+                <button type="button" data-example-prompt="로봇 경주 규칙 문서에서 다음 경기 일정을 찾아 요약해줘">
+                  로봇 경주 일정 요약
+                </button>
+              </div>
+            </section>
+          </div>
           <form id="chatForm" class="composer">
-            <textarea id="messageInput" rows="2" placeholder="예: BRCA 결과 폴더 찾아줘"></textarea>
+            <textarea
+              id="messageInput"
+              rows="2"
+              aria-label="챗봇 메시지"
+              placeholder="예: 프로젝트 오로라의 디자인 에셋 폴더를 찾아줘"
+            ></textarea>
             <button type="submit">전송</button>
           </form>
         </div>
@@ -70,9 +95,13 @@
           <div class="lab-layout">
             <section>
               <h2>Tool Lab</h2>
-              <p>만들고 싶은 tool을 설명하면 manifest 초안을 생성합니다. 아직 자동 등록되지는 않습니다.</p>
+              <p>합성 시나리오에 사용할 tool을 설명하면 manifest 초안을 생성합니다. 자동 등록되지는 않습니다.</p>
               <form id="toolLabForm" class="lab-form">
-                <textarea id="toolInstruction" rows="6" placeholder="예: 특정 CSV 파일을 읽어 검사명 후보를 정리하는 tool"></textarea>
+                <textarea
+                  id="toolInstruction"
+                  rows="6"
+                  placeholder="예: products.csv를 읽어 카테고리별 항목 수를 요약하는 tool"
+                ></textarea>
                 <button type="submit">초안 생성</button>
               </form>
             </section>
@@ -81,6 +110,6 @@
         </div>
       </section>
     </main>
-    <script src="/playground/assets/playground.js"></script>
+    <script src="/playground/assets/playground.js?v=20260714-4"></script>
   </body>
 </html>

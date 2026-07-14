@@ -10,10 +10,13 @@ dependencies = [
     "pydantic-settings>=2.2",
     "smbprotocol>=1.12",      # import 이름: smbclient
     "httpx>=0.27",            # LLM(OpenAI 호환) 호출용
+    "psycopg[binary]>=3.2,<4", # 로컬 PostgreSQL/pgvector 검색
+    "mcp>=1.28.1,<2",         # 공식 MCP Python SDK v1 (v2 안정화 전 상한 고정)
 ]
 
 [project.optional-dependencies]
 dev = ["ruff>=0.4", "pytest>=8.0"]
+tracing = ["langsmith>=0.1.98"]
 studio = [
     "langgraph>=0.2.50",
     "langgraph-cli[inmem]>=0.1.55",

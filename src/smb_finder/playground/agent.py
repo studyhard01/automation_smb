@@ -30,9 +30,10 @@ from .models import (
     ToolCallTrace,
     ToolDraftRequest,
     ToolDraftResponse,
+    ToolExecutionResult,
 )
 from .tracing import trace_openai_chat_completion
-from .tools import ToolHandler
+from .tools import ToolExecutionContext, ToolHandler
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,28 @@ class LlmConnection:
     external: bool = False
     error_code: str = ""
     error_message: str = ""
+
+
+class LlmResponseFormatError(RuntimeError):
+    """LLM 응답 본문이 비었거나 agent JSON으로 해석되지 않은 오류."""
+
+
+def _json_request_messages(
+    messages: list[dict[str, str]],
+    *,
+    provider: str,
+    model: str,
+) -> list[dict[str, str]]:
+    """Qwen3 JSON 호출에서 thinking이 응답 예산을 소진하지 않도록 한다."""
+
+    prepared = [dict(message) for message in messages]
+    if provider != "local" or "qwen3" not in model.lower() or not prepared:
+        return prepared
+
+    content = str(prepared[-1].get("content") or "")
+    if "/no_think" not in content:
+        prepared[-1]["content"] = f"{content}\n/no_think"
+    return prepared
 
 
 def _is_internal_http_url(value: str) -> bool:
@@ -248,13 +271,88 @@ class PlaygroundAgent:
             error_message="지원하지 않는 LLM provider입니다.",
         )
 
+    def _tool_execution_context(
+        self,
+        *,
+        connection: LlmConnection,
+        session_id: str,
+        usage_calls: list[TokenUsage] | None = None,
+        debug_calls: list[LlmDebugCall] | None = None,
+    ) -> ToolExecutionContext:
+        """agent와 LLM-backed tool이 같은 provider/model 호출 경로를 쓰게 한다."""
+
+        def invoke_json(messages: list[dict[str, str]], max_tokens: int, purpose: str) -> dict[str, Any]:
+            return self._chat_json(
+                messages,
+                model=connection.model,
+                base_url=connection.base_url,
+                api_key=connection.api_key,
+                max_tokens=max_tokens,
+                purpose=purpose,
+                provider=connection.provider,
+                session_id=session_id,
+                usage_calls=usage_calls,
+                debug_calls=debug_calls,
+            )
+
+        return ToolExecutionContext(
+            provider=connection.provider,
+            model=connection.model,
+            invoke_json=invoke_json,
+        )
+
+    def execute_tool_direct(
+        self,
+        handler: ToolHandler,
+        arguments: dict[str, Any],
+        *,
+        provider: str,
+        local_base_url: str = "",
+        model: str = "",
+        openai_api_key: str = "",
+    ) -> ToolExecutionResult:
+        """agent 판단 단계 없이 API에서 하나의 LLM-backed tool을 직접 실행한다."""
+
+        connection = self._resolve_llm_connection(
+            provider=provider,
+            local_base_url=local_base_url,
+            model=model,
+            openai_api_key=openai_api_key,
+        )
+        if connection.error_code:
+            return ToolExecutionResult(
+                status="error",
+                result_text=connection.error_message,
+                error_code=connection.error_code,
+            )
+        if handler.definition.permission == "admin" or handler.definition.requires_admin:
+            return ToolExecutionResult(
+                status="error",
+                result_text="관리자 전용 tool은 Playground에서 직접 실행할 수 없습니다.",
+                error_code="admin_api_only",
+            )
+        if not handler.definition.enabled:
+            return ToolExecutionResult(
+                status="error",
+                result_text="현재 비활성화된 tool입니다.",
+                error_code="tool_disabled",
+            )
+
+        context = self._tool_execution_context(
+            connection=connection,
+            session_id=f"pg-direct-{uuid.uuid4()}",
+        )
+        return handler.execute(arguments, context=context)
+
     def run(
         self,
         request: ChatRequest,
         registry: dict[str, ToolHandler],
         openai_api_key: str = "",
+        request_id: str = "",
     ) -> ChatResponse:
         started = time.perf_counter()
+        request_id = request_id or str(uuid.uuid4())
         session_id = request.session_id or f"pg-{uuid.uuid4()}"
         connection = self._resolve_llm_connection(
             provider=request.provider,
@@ -269,9 +367,7 @@ class PlaygroundAgent:
         traces: list[ToolCallTrace] = []
         debug_calls: list[LlmDebugCall] = []
         usage_calls: list[TokenUsage] = []
-        debug_allowed = request.debug_raw_llm and self.settings.playground_debug_raw_llm
-        if request.debug_raw_llm and not self.settings.playground_debug_raw_llm:
-            warnings.append("debug_raw_llm_denied")
+        debug_allowed = request.debug_raw_llm
         if connection.external:
             warnings.append("external_llm_provider:openai")
 
@@ -284,6 +380,7 @@ class PlaygroundAgent:
                 connection.error_message,
                 warnings=warnings,
                 provider=connection.provider,
+                request_id=request_id,
             )
 
         if request.provider not in {"local", "openai"}:
@@ -294,6 +391,7 @@ class PlaygroundAgent:
                 "unsupported_provider",
                 "Playground 1차 버전은 local/on-prem LLM만 지원합니다.",
                 warnings=warnings,
+                request_id=request_id,
             )
         if not model:
             return self._error_response(
@@ -303,6 +401,7 @@ class PlaygroundAgent:
                 "local_llm_not_configured",
                 "로컬 LLM 모델이 설정되지 않았습니다. LLM_MODEL 또는 화면의 모델명을 입력하세요.",
                 warnings=warnings,
+                request_id=request_id,
             )
         if connection.provider == "local" and not _is_internal_http_url(base_url):
             return self._error_response(
@@ -312,16 +411,51 @@ class PlaygroundAgent:
                 "local_llm_url_not_internal",
                 "로컬 LLM 주소는 localhost 또는 사내망 주소만 허용합니다.",
                 warnings=warnings,
+                request_id=request_id,
             )
 
         selected = [tool_id for tool_id in request.selected_tool_ids if tool_id in registry]
         unknown = sorted(set(request.selected_tool_ids) - set(registry))
         if unknown:
             warnings.append(f"unknown_tools_ignored:{','.join(unknown)}")
-        handlers = {tool_id: registry[tool_id] for tool_id in selected if registry[tool_id].definition.enabled}
+        admin_only = [
+            tool_id
+            for tool_id in selected
+            if registry[tool_id].definition.permission == "admin" or registry[tool_id].definition.requires_admin
+        ]
+        if admin_only:
+            warnings.append(f"admin_tools_blocked:{','.join(admin_only)}")
+            return self._error_response(
+                session_id,
+                started,
+                model,
+                "admin_api_only",
+                "관리자 전용 tool은 Playground 채팅에서 실행할 수 없습니다.",
+                warnings=warnings,
+                provider=connection.provider,
+                request_id=request_id,
+            )
         disabled = [tool_id for tool_id in selected if not registry[tool_id].definition.enabled]
         if disabled:
-            warnings.append(f"disabled_tools_ignored:{','.join(disabled)}")
+            warnings.append(f"disabled_tools_blocked:{','.join(disabled)}")
+            return self._error_response(
+                session_id,
+                started,
+                model,
+                "tool_disabled",
+                "현재 비활성화된 tool은 실행할 수 없습니다.",
+                warnings=warnings,
+                provider=connection.provider,
+                request_id=request_id,
+            )
+        handlers = {tool_id: registry[tool_id] for tool_id in selected}
+
+        tool_context = self._tool_execution_context(
+            connection=connection,
+            session_id=session_id,
+            usage_calls=usage_calls,
+            debug_calls=debug_calls if debug_allowed else None,
+        )
 
         observations: list[dict[str, str]] = []
         final_answer = ""
@@ -351,6 +485,20 @@ class PlaygroundAgent:
                     usage_calls=usage_calls,
                     debug_calls=debug_calls if debug_allowed else None,
                 )
+            except LlmResponseFormatError:
+                return self._error_response(
+                    session_id,
+                    started,
+                    model,
+                    "llm_response_invalid_json",
+                    "로컬 모델 응답을 agent JSON으로 해석하지 못했습니다. 모델의 JSON mode/thinking 설정을 확인하세요.",
+                    warnings=warnings,
+                    agent_steps=all_steps if request.debug_trace else [],
+                    debug_calls=debug_calls if debug_allowed else [],
+                    provider=connection.provider,
+                    token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
+                    request_id=request_id,
+                )
             except Exception:  # noqa: BLE001 - UI에는 안전한 오류 코드만 반환한다.
                 return self._error_response(
                     session_id,
@@ -363,6 +511,7 @@ class PlaygroundAgent:
                     debug_calls=debug_calls if debug_allowed else [],
                     provider=connection.provider,
                     token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
+                    request_id=request_id,
                 )
 
             all_steps.append(
@@ -494,14 +643,16 @@ class PlaygroundAgent:
                     )
                 )
                 try:
-                    result = handler.run(planned_call.arguments)
+                    result = handler.execute(planned_call.arguments, context=tool_context)
                     status = result.status
                     result_text = result.result_text
+                    result_payload = result.result_payload
                     error_code = result.error_code
                     arguments_summary = result.arguments_summary
                 except Exception:  # noqa: BLE001
                     status = "error"
                     result_text = "tool 실행 중 오류가 발생했습니다."
+                    result_payload = None
                     error_code = "tool_failed"
                     arguments_summary = ""
 
@@ -516,6 +667,7 @@ class PlaygroundAgent:
                         status=status,
                         elapsed_ms=tool_elapsed_ms,
                         result_text=result_text,
+                        result_payload=result_payload,
                         error_code=error_code,
                     )
                 )
@@ -541,6 +693,20 @@ class PlaygroundAgent:
                         error_code=error_code,
                     )
                 )
+                if status == "ok" and handler.returns_final_answer:
+                    final_answer = result_text
+                    all_steps.append(
+                        AgentStepTrace(
+                            step=step,
+                            kind="final",
+                            title="tool 최종 결과",
+                            detail=result_text,
+                            action="final_answer",
+                            tool_id=handler.definition.id,
+                            tool_name=handler.definition.display_name,
+                        )
+                    )
+                    break
 
             if final_answer:
                 break
@@ -564,6 +730,7 @@ class PlaygroundAgent:
             warnings.append("playground_agent_over_budget")
 
         return ChatResponse(
+            request_id=request_id,
             session_id=session_id,
             provider_used=connection.provider,
             model_used=model,
@@ -614,9 +781,8 @@ class PlaygroundAgent:
             )
         usage_calls: list[TokenUsage] = []
         prompt = (
-            "Create a safe tool manifest draft for automation_smb. "
-            "Return only JSON with keys: id, display_name, description, permission, inputs, safety_notes. "
-            "Do not include credentials, internal IPs, patient data, or executable code.\n"
+            "Create a tool manifest draft for the automation_smb synthetic chatbot test environment. "
+            "Return only JSON with keys: id, display_name, description, permission, inputs, test_notes.\n"
             f"Request: {request.instruction[:1000]}"
         )
         try:
@@ -892,13 +1058,16 @@ class PlaygroundAgent:
         base_url = base_url.rstrip("/")
         url = f"{base_url}/chat/completions"
         headers = self._headers_for(base_url, api_key=api_key)
+        request_messages = _json_request_messages(messages, provider=provider, model=model)
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": request_messages,
             "temperature": 0,
             "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
         }
+        if provider == "local" and "qwen3" in model.lower():
+            payload["reasoning_effort"] = "none"
         started = time.perf_counter()
         raw_content = ""
         usage: TokenUsage | None = None
@@ -907,6 +1076,10 @@ class PlaygroundAgent:
             timeout_s = max(0.1, self.settings.llm_timeout_ms / 1000)
             with httpx.Client(timeout=timeout_s) as client:
                 response = client.post(url, headers=headers, json=payload)
+                if "reasoning_effort" in payload and response.status_code in {400, 422}:
+                    fallback_payload = dict(payload)
+                    fallback_payload.pop("reasoning_effort", None)
+                    response = client.post(url, headers=headers, json=fallback_payload)
                 response.raise_for_status()
                 return response.json()
 
@@ -917,21 +1090,28 @@ class PlaygroundAgent:
                 model=model,
                 purpose=purpose,
                 session_id=session_id,
-                message_count=len(messages),
+                message_count=len(request_messages),
+                messages=request_messages,
                 call=post_json,
                 usage_metadata=lambda body: self._langsmith_usage_metadata(body, provider, model),
             )
             usage = self._token_usage_from_response(response_json, provider, model)
             if usage is not None and usage_calls is not None:
                 usage_calls.append(usage)
-            raw_content = response_json["choices"][0]["message"]["content"]
-            data, repaired = _json_from_text_with_meta(raw_content)
+            raw_value = response_json["choices"][0]["message"].get("content")
+            raw_content = raw_value if isinstance(raw_value, str) else ""
+            if not raw_content.strip():
+                raise LlmResponseFormatError("LLM response content is empty")
+            try:
+                data, repaired = _json_from_text_with_meta(raw_content)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise LlmResponseFormatError("LLM response content is not a JSON object") from exc
             if debug_calls is not None:
                 debug_calls.append(
                     LlmDebugCall(
                         purpose=purpose,
                         elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
-                        request_messages=self._safe_debug_messages(messages),
+                        request_messages=self._safe_debug_messages(request_messages),
                         raw_response=self._safe_debug_text(raw_content),
                         parsed_json=self._safe_debug_json(data),
                         token_usage=usage,
@@ -945,8 +1125,9 @@ class PlaygroundAgent:
                     LlmDebugCall(
                         purpose=purpose,
                         elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
-                        request_messages=self._safe_debug_messages(messages),
+                        request_messages=self._safe_debug_messages(request_messages),
                         raw_response=self._safe_debug_text(raw_content),
+                        token_usage=usage,
                         error_code=exc.__class__.__name__,
                     )
                 )
@@ -1095,8 +1276,10 @@ class PlaygroundAgent:
         debug_calls: list[LlmDebugCall] | None = None,
         provider: str = "local",
         token_usage: TokenUsage | None = None,
+        request_id: str = "",
     ) -> ChatResponse:
         return ChatResponse(
+            request_id=request_id or str(uuid.uuid4()),
             session_id=session_id,
             provider_used=provider,
             model_used=model,

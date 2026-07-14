@@ -7,6 +7,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 ToolPermission = Literal["read", "admin"]
+ToolExecutionType = Literal["code", "llm"]
+ToolCategory = Literal["smb", "database", "report"]
 ToolStatus = Literal["ok", "error", "skipped"]
 AgentAction = Literal["tool_call", "final_answer", "clarify"]
 AgentStepKind = Literal["decision", "tool_call", "observation", "final", "blocked", "error"]
@@ -19,7 +21,9 @@ class ToolDefinition(BaseModel):
     id: str
     display_name: str
     description: str
+    category: ToolCategory
     permission: ToolPermission = "read"
+    execution_type: ToolExecutionType
     enabled: bool = True
     default_selected: bool = False
     requires_admin: bool = False
@@ -108,6 +112,7 @@ class ToolCallTrace(BaseModel):
     status: ToolStatus = "ok"
     elapsed_ms: float = 0.0
     result_text: str = ""
+    result_payload: dict[str, Any] | None = None
     error_code: str = ""
 
 
@@ -125,6 +130,7 @@ class TokenUsage(BaseModel):
 class ChatResponse(BaseModel):
     """Playground 채팅 실행 응답."""
 
+    request_id: str
     session_id: str
     provider_used: str = "local"
     model_used: str = ""
@@ -144,6 +150,8 @@ class ToolExecutionResult(BaseModel):
 
     status: ToolStatus = "ok"
     result_text: str
+    observation_text: str = ""
+    result_payload: dict[str, Any] | None = None
     error_code: str = ""
     arguments_summary: str = ""
 

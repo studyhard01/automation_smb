@@ -19,6 +19,30 @@ def _hide_langsmith_outputs_preserve_usage(outputs: dict[str, Any]) -> dict[str,
     return {"usage_metadata": usage} if isinstance(usage, dict) else {}
 
 
+def _langsmith_trace_inputs(
+    settings: Settings,
+    *,
+    model: str,
+    purpose: str,
+    message_count: int,
+    messages: list[dict[str, str]],
+) -> dict[str, Any]:
+    """설정에 따라 LangSmith에 기록할 LLM 입력을 만든다."""
+
+    inputs: dict[str, Any] = {"model": model, "purpose": purpose, "message_count": message_count}
+    if not settings.langsmith_hide_inputs:
+        inputs["messages"] = messages
+    return inputs
+
+
+def _langsmith_trace_outputs(settings: Settings, outputs: dict[str, Any]) -> dict[str, Any]:
+    """설정에 따라 LangSmith에 기록할 LLM 출력을 만든다."""
+
+    if settings.langsmith_hide_outputs:
+        return _hide_langsmith_outputs_preserve_usage(outputs)
+    return outputs
+
+
 def is_langsmith_tracing_enabled(settings: Settings, provider: str) -> bool:
     """OpenAI provider에 대해서만 LangSmith 추적을 opt-in으로 켠다."""
     return provider == "openai" and settings.langsmith_tracing and bool(settings.langsmith_api_key.strip())
@@ -32,13 +56,14 @@ def trace_openai_chat_completion(
     purpose: str,
     session_id: str,
     message_count: int,
+    messages: list[dict[str, str]],
     call: Callable[[], dict[str, Any]],
     usage_metadata: Callable[[dict[str, Any]], dict[str, int]],
 ) -> dict[str, Any]:
     """OpenAI 호환 chat completion 호출을 LangSmith LLM run으로 감싼다.
 
-    입력/출력 본문은 LangSmith client 레벨에서 숨긴다. 모델명, provider, session_id,
-    purpose, token usage만 남겨 모델별 사용량/비용 집계를 가능하게 한다.
+    입력/출력 본문 공개 여부는 LANGSMITH_HIDE_INPUTS/OUTPUTS 설정을 따른다.
+    합성 테스트 기본값은 false라 전체 LLM call을 바로 확인할 수 있다.
     """
     if not is_langsmith_tracing_enabled(settings, provider):
         return call()
@@ -48,10 +73,11 @@ def trace_openai_chat_completion(
     except ImportError:
         return call()
 
-    client_kwargs: dict[str, Any] = {
-        "hide_inputs": _hide_langsmith_inputs,
-        "hide_outputs": _hide_langsmith_outputs_preserve_usage,
-    }
+    client_kwargs: dict[str, Any] = {}
+    if settings.langsmith_hide_inputs:
+        client_kwargs["hide_inputs"] = _hide_langsmith_inputs
+    if settings.langsmith_hide_outputs:
+        client_kwargs["hide_outputs"] = _hide_langsmith_outputs_preserve_usage
     api_key = settings.langsmith_api_key.strip()
     endpoint = settings.langsmith_endpoint.strip()
     if api_key:
@@ -74,10 +100,16 @@ def trace_openai_chat_completion(
     }
 
     def process_inputs(_: dict[str, Any]) -> dict[str, Any]:
-        return {"model": model, "purpose": purpose, "message_count": message_count}
+        return _langsmith_trace_inputs(
+            settings,
+            model=model,
+            purpose=purpose,
+            message_count=message_count,
+            messages=messages,
+        )
 
     def process_outputs(output: dict[str, Any]) -> dict[str, Any]:
-        return {"usage_metadata": output.get("usage_metadata", {})}
+        return _langsmith_trace_outputs(settings, output)
 
     def invoke(_: dict[str, Any]) -> dict[str, Any]:
         response_json = call()
@@ -86,7 +118,10 @@ def trace_openai_chat_completion(
         run = get_current_run_tree()
         if run is not None and usage:
             run.set(usage_metadata=usage)
-        return {"usage_metadata": usage}
+        traced_output: dict[str, Any] = {"usage_metadata": usage}
+        if not settings.langsmith_hide_outputs:
+            traced_output["response"] = response_json
+        return traced_output
 
     trace_options: dict[str, Any] = {
         "name": "playground.openai_chat_completion",
@@ -106,13 +141,13 @@ def trace_openai_chat_completion(
 
     try:
         with tracing_context(enabled=True, project_name=settings.langsmith_project.strip() or None):
-            invoke_traced({"model": model, "purpose": purpose})
+            invoke_traced(process_inputs({}))
     except TypeError:
         if "response" in captured:
             return captured["response"]
         try:
             with tracing_context(enabled=True):
-                invoke_traced({"model": model, "purpose": purpose})
+                invoke_traced(process_inputs({}))
         except Exception:  # noqa: BLE001
             if "response" in captured:
                 return captured["response"]

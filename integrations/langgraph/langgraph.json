@@ -1,7 +1,8 @@
 {
   "dependencies": ["."],
   "graphs": {
-    "smb_agent": "./smb_agent/graph.py:graph"
+    "smb_agent": "./smb_agent/graph.py:graph",
+    "playground_observer": "./smb_agent/observer_graph.py:graph"
   },
-  "env": ".env"
+  "env": ".env.studio"
 }

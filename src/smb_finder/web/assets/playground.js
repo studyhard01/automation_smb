@@ -5,6 +5,24 @@ const state = {
   openaiApiKey: "",
 };
 
+const toolCategories = [
+  {
+    id: "smb",
+    name: "SMB 직접 접근",
+    description: "공유 폴더와 파일 내용을 직접 탐색합니다.",
+  },
+  {
+    id: "database",
+    name: "DB 접근",
+    description: "로컬 PostgreSQL에서 vector 기반 근거 chunk를 찾습니다.",
+  },
+  {
+    id: "report",
+    name: "보고서 관련",
+    description: "핵형 분석과 보고서 작성용 도구를 모아 봅니다.",
+  },
+];
+
 const toolList = document.querySelector("#toolList");
 const messages = document.querySelector("#messages");
 const chatForm = document.querySelector("#chatForm");
@@ -22,22 +40,11 @@ const toolInstruction = document.querySelector("#toolInstruction");
 const toolDraft = document.querySelector("#toolDraft");
 const debugTraceInput = document.querySelector("#debugTrace");
 const debugRawLlmInput = document.querySelector("#debugRawLlm");
-const providerNotice = ensureProviderNotice();
+const emptyState = document.querySelector("#emptyState");
 const settingsDialog = ensureSettingsDialog();
 const openaiApiKeyInput = settingsDialog.querySelector("#openaiApiKey");
 const saveSettingsButton = settingsDialog.querySelector("#saveSettings");
 const clearOpenaiKeyButton = settingsDialog.querySelector("#clearOpenaiKey");
-
-function ensureProviderNotice() {
-  let notice = document.querySelector("#providerNotice");
-  if (!notice) {
-    notice = document.createElement("div");
-    notice.id = "providerNotice";
-    notice.className = "provider-notice";
-    llmStatus.insertAdjacentElement("afterend", notice);
-  }
-  return notice;
-}
 
 function ensureSettingsDialog() {
   let dialog = document.querySelector("#settingsDialog");
@@ -57,8 +64,7 @@ function ensureSettingsDialog() {
         <input id="openaiApiKey" type="password" autocomplete="off" placeholder="sk-..." />
       </label>
       <p>
-        OpenAI provider를 사용하면 대화, 선택한 tool 설명, tool 실행 결과가 OpenAI API로 전송될 수 있습니다.
-        API key는 이 브라우저 탭의 메모리에만 유지하고 저장하지 않습니다.
+        API key는 현재 브라우저 탭의 메모리에만 유지되며 새로고침하면 사라집니다.
       </p>
       <footer>
         <button id="clearOpenaiKey" class="secondary-button" type="button">Clear</button>
@@ -71,7 +77,39 @@ function ensureSettingsDialog() {
 }
 
 function selectedToolIds() {
-  return [...document.querySelectorAll("[data-tool-id]:checked")].map((item) => item.value);
+  return [...document.querySelectorAll("[data-tool-id]:checked:not(:disabled)")].map((item) => item.value);
+}
+
+function executionTypeOf(tool) {
+  return tool.execution_type === "code" || tool.execution_type === "llm" ? tool.execution_type : null;
+}
+
+function applyToolAvailability() {
+  for (const tool of state.tools) {
+    const input = toolList.querySelector(`[data-tool-id="${CSS.escape(tool.id)}"]`);
+    if (!input) continue;
+
+    const item = input.closest(".tool-item");
+    const executionTypeKnown = executionTypeOf(tool) !== null;
+    const selectable = tool.enabled === true && executionTypeKnown;
+
+    input.disabled = !selectable;
+    if (!selectable) input.checked = false;
+    item.classList.toggle("disabled", !selectable);
+  }
+  updateCategorySummaries();
+}
+
+function updateCategorySummaries() {
+  for (const category of toolCategories) {
+    const categoryElement = toolList.querySelector(`[data-tool-category="${category.id}"]`);
+    if (!categoryElement) continue;
+    const allTools = [...categoryElement.querySelectorAll("[data-tool-id]")];
+    const selected = allTools.filter((input) => input.checked && !input.disabled).length;
+    const count = categoryElement.querySelector("[data-category-count]");
+    if (count) count.textContent = selected ? `${selected}/${allTools.length} 선택` : `${allTools.length}개 도구`;
+    categoryElement.classList.toggle("has-selection", selected > 0);
+  }
 }
 
 function escapeHtml(value) {
@@ -142,9 +180,7 @@ function applyProviderMode() {
       modelInput.value = "gpt-4.1-mini";
     }
     setModelOptions(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"]);
-    providerNotice.textContent =
-      "OpenAI provider는 대화와 선택한 tool 결과를 외부 OpenAI API로 보낼 수 있습니다.";
-    providerNotice.className = "provider-notice warning";
+    applyToolAvailability();
     return;
   }
 
@@ -156,31 +192,73 @@ function applyProviderMode() {
   if (modelInput.value.startsWith("gpt-")) {
     modelInput.value = "";
   }
-  providerNotice.textContent = "";
-  providerNotice.className = "provider-notice";
+  applyToolAvailability();
 }
 
 function addMessage(role, text, options = {}) {
+  emptyState?.remove();
   const el = document.createElement("article");
   el.className = `message ${role}${options.error ? " error" : ""}`;
-  el.textContent = text;
-
-  if (options.traces?.length) {
-    el.appendChild(renderToolTrace(options.traces));
-  }
-  if (options.tokenUsage) {
-    el.appendChild(renderTokenUsage(options.tokenUsage));
-  }
-  if (options.agentSteps?.length) {
-    el.appendChild(renderAgentTrace(options.agentSteps));
+  if (role === "assistant" && options.structured) {
+    el.classList.add("structured");
+    const answerSection = renderMessageSection("LLM 답변", text);
+    if (Number.isFinite(Number(options.elapsedMs))) {
+      answerSection.appendChild(renderRunMetrics(options.elapsedMs, options.overBudget));
+    }
+    if (options.tokenUsage) {
+      answerSection.appendChild(renderTokenUsage(options.tokenUsage));
+    }
+    el.appendChild(answerSection);
+    if (options.traces?.length) {
+      el.appendChild(renderMessageSection("도구 실행 결과", renderToolTrace(options.traces)));
+    }
+    if (options.agentSteps?.length) {
+      el.appendChild(renderMessageSection("Agent 요청 흐름", renderAgentTrace(options.agentSteps)));
+    }
+  } else {
+    el.textContent = text;
+    if (options.traces?.length) {
+      el.appendChild(renderToolTrace(options.traces));
+    }
+    if (options.tokenUsage) {
+      el.appendChild(renderTokenUsage(options.tokenUsage));
+    }
+    if (options.agentSteps?.length) {
+      el.appendChild(renderAgentTrace(options.agentSteps));
+    }
   }
   if (options.debug?.llm_calls?.length) {
     el.appendChild(renderRawDebug(options.debug.llm_calls));
+  }
+  if (role === "assistant" && options.requestId) {
+    const footer = document.createElement("footer");
+    footer.className = "message-request-id";
+    footer.textContent = `요청 ID: ${options.requestId}`;
+    el.appendChild(footer);
   }
 
   messages.appendChild(el);
   messages.scrollTop = messages.scrollHeight;
   return el;
+}
+
+function renderMessageSection(title, content) {
+  const section = document.createElement("section");
+  section.className = "message-section";
+  const heading = document.createElement("h3");
+  heading.className = "message-section-title";
+  heading.textContent = title;
+  section.appendChild(heading);
+
+  if (content instanceof Node) {
+    section.appendChild(content);
+  } else {
+    const body = document.createElement("div");
+    body.className = "message-section-body";
+    body.textContent = content || "";
+    section.appendChild(body);
+  }
+  return section;
 }
 
 function formatTokenUsage(usage) {
@@ -200,27 +278,41 @@ function renderTokenUsage(usage) {
   return box;
 }
 
+function renderRunMetrics(elapsedMs, overBudget) {
+  const box = document.createElement("div");
+  box.className = "run-metrics";
+
+  const elapsed = document.createElement("span");
+  elapsed.textContent = `응답 ${Number(elapsedMs).toFixed(1)}ms`;
+  box.appendChild(elapsed);
+
+  const budget = document.createElement("span");
+  budget.className = `budget-status ${overBudget ? "over" : "within"}`;
+  budget.textContent = overBudget ? "시간 예산 초과" : "시간 예산 이내";
+  box.appendChild(budget);
+  return box;
+}
+
 function renderToolTrace(traces) {
   const traceBox = document.createElement("div");
   traceBox.className = "trace";
-  traceBox.innerHTML = traces
-    .map((trace) => {
-      const status = trace.error_code ? `${trace.status} / ${trace.error_code}` : trace.status;
-      return `<div><strong>${escapeHtml(trace.tool_name)}</strong> ${escapeHtml(status)}, ${escapeHtml(
-        trace.elapsed_ms
-      )}ms<br>${escapeHtml(trace.result_text || "")}</div>`;
-    })
-    .join("");
+  for (const trace of traces) {
+    const item = document.createElement("div");
+    const status = trace.error_code ? `${trace.status} / ${trace.error_code}` : trace.status;
+    item.innerHTML = `<strong>${escapeHtml(trace.tool_name)}</strong> ${escapeHtml(status)}, ${escapeHtml(
+      trace.elapsed_ms
+    )}ms`;
+    const pre = document.createElement("pre");
+    pre.textContent = trace.result_text || (trace.result_payload ? JSON.stringify(trace.result_payload, null, 2) : "");
+    item.appendChild(pre);
+    traceBox.appendChild(item);
+  }
   return traceBox;
 }
 
 function renderAgentTrace(steps) {
   const box = document.createElement("div");
   box.className = "agent-trace";
-  const title = document.createElement("div");
-  title.className = "trace-title";
-  title.textContent = "Agent trace";
-  box.appendChild(title);
 
   for (const step of steps) {
     const item = document.createElement("div");
@@ -263,30 +355,79 @@ function renderRawDebug(calls) {
 }
 
 async function loadTools() {
-  toolList.textContent = "tool 목록을 불러오는 중...";
-  const response = await fetch("/api/playground/tools");
-  if (!response.ok) {
-    toolList.textContent = `tool 목록 로딩 실패: HTTP ${response.status}`;
-    return;
-  }
-  state.tools = await response.json();
-  toolList.innerHTML = "";
-  for (const tool of state.tools) {
-    const item = document.createElement("section");
-    item.className = `tool-item${tool.enabled ? "" : " disabled"}`;
-    item.innerHTML = `
-      <div class="tool-title">
-        <label>
-          <input data-tool-id="${escapeHtml(tool.id)}" type="checkbox" value="${escapeHtml(tool.id)}"
-            ${tool.default_selected ? "checked" : ""} ${tool.enabled ? "" : "disabled"} />
-          <span>${escapeHtml(tool.display_name)}</span>
-        </label>
-        <span class="badge ${tool.permission === "admin" ? "admin" : ""}">${escapeHtml(tool.permission)}</span>
-      </div>
-      <p>${escapeHtml(tool.description)}</p>
-      <p>${tool.enabled ? `${tool.timeout_ms}ms` : "비활성화"}</p>
-    `;
-    toolList.appendChild(item);
+  toolList.innerHTML = '<div class="tool-list-status">도구 목록을 불러오는 중...</div>';
+  try {
+    const response = await fetch("/api/playground/tools");
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    state.tools = await response.json();
+    toolList.innerHTML = "";
+    for (const category of toolCategories) {
+      const categoryTools = state.tools.filter((tool) => tool.category === category.id);
+      if (!categoryTools.length) continue;
+      const panelId = `tool-category-${category.id}`;
+      const categoryElement = document.createElement("section");
+      categoryElement.className = "tool-category";
+      categoryElement.dataset.toolCategory = category.id;
+      categoryElement.innerHTML = `
+        <button class="tool-category-toggle" type="button" aria-expanded="false" aria-controls="${panelId}">
+          <span class="tool-category-copy">
+            <strong>${escapeHtml(category.name)}</strong>
+            <small>${escapeHtml(category.description)}</small>
+          </span>
+          <span class="tool-category-side">
+            <span class="tool-category-count" data-category-count>${categoryTools.length}개 도구</span>
+            <span class="tool-category-chevron" aria-hidden="true">⌄</span>
+          </span>
+        </button>
+        <div id="${panelId}" class="tool-category-content" hidden></div>
+      `;
+      const categoryContent = categoryElement.querySelector(".tool-category-content");
+      for (const tool of categoryTools) {
+        const executionType = executionTypeOf(tool);
+        const executionClass = executionType || "unknown";
+        const executionLabel = executionType === "code" ? "코드" : executionType === "llm" ? "LLM" : "미확인";
+        const selectable = tool.enabled === true && executionType !== null;
+        const item = document.createElement("section");
+        item.className = `tool-item${selectable ? "" : " disabled"}`;
+        item.innerHTML = `
+          <div class="tool-title">
+            <label>
+              <input data-tool-id="${escapeHtml(tool.id)}" type="checkbox" value="${escapeHtml(tool.id)}"
+                ${tool.default_selected && selectable ? "checked" : ""} ${selectable ? "" : "disabled"} />
+              <span>${escapeHtml(tool.display_name)}</span>
+            </label>
+            <div class="tool-badges">
+              <span class="badge execution-${executionClass}" title="도구 실행 방식: ${executionLabel}"
+                aria-label="도구 실행 방식: ${executionLabel}">${executionLabel}</span>
+            </div>
+          </div>
+          <p>${escapeHtml(tool.description)}</p>
+          <p class="tool-meta">${selectable ? `제한 시간 ${escapeHtml(tool.timeout_ms)}ms` : "현재 실행할 수 없는 도구"}</p>
+        `;
+        categoryContent.appendChild(item);
+      }
+      const toggle = categoryElement.querySelector(".tool-category-toggle");
+      toggle.addEventListener("click", () => {
+        const expanded = toggle.getAttribute("aria-expanded") === "true";
+        toggle.setAttribute("aria-expanded", String(!expanded));
+        categoryContent.hidden = expanded;
+        categoryElement.classList.toggle("expanded", !expanded);
+      });
+      toolList.appendChild(categoryElement);
+    }
+    if (!state.tools.length) {
+      toolList.innerHTML = '<div class="tool-list-status">등록된 도구가 없습니다.</div>';
+    }
+    toolList.querySelectorAll("[data-tool-id]").forEach((input) => {
+      input.addEventListener("change", updateCategorySummaries);
+    });
+    applyToolAvailability();
+  } catch (error) {
+    toolList.innerHTML = `<div class="tool-list-status error">도구 목록을 불러오지 못했습니다. ${escapeHtml(
+      error.message
+    )}</div>`;
   }
 }
 
@@ -314,18 +455,21 @@ async function sendChat(message) {
   });
   const data = await response.json();
   if (!response.ok) {
-    addMessage("assistant", JSON.stringify(data, null, 2), { error: true });
+    const errorMessage = data.message || data.detail || data.error_code || `HTTP ${response.status}`;
+    addMessage("assistant", `요청 실패: ${errorMessage}`, { error: true, requestId: data.request_id });
     return;
   }
   state.sessionId = data.session_id || state.sessionId;
-  const warnings = data.warnings?.length ? `\n\n주의: ${data.warnings.join(", ")}` : "";
-  const budget = data.over_budget ? "\n\n주의: agent 시간 예산을 초과했습니다." : "";
-  addMessage("assistant", `${data.assistant_message}${warnings}${budget}`, {
+  addMessage("assistant", data.assistant_message, {
+    structured: true,
     traces: data.tool_calls,
     tokenUsage: data.token_usage,
     agentSteps: data.agent_steps,
     debug: data.debug,
     error: Boolean(data.error_code),
+    requestId: data.request_id,
+    elapsedMs: data.elapsed_ms,
+    overBudget: data.over_budget,
   });
   state.history.push({ role: "user", content: message });
   state.history.push({ role: "assistant", content: data.assistant_message || "" });
@@ -341,6 +485,8 @@ chatForm.addEventListener("submit", async (event) => {
   const pending = addMessage("assistant", "처리 중...");
   try {
     await sendChat(message);
+  } catch (error) {
+    addMessage("assistant", `요청 중 오류가 발생했습니다: ${error.message}`, { error: true });
   } finally {
     pending.remove();
   }
@@ -356,18 +502,31 @@ toolLabForm.addEventListener("submit", async (event) => {
     return;
   }
   toolDraft.textContent = "초안 생성 중...";
-  const response = await fetch("/api/playground/tool-draft", {
-    method: "POST",
-    headers: apiHeaders(),
-    body: JSON.stringify({
-      instruction,
-      provider: providerInput.value,
-      local_base_url: baseUrlInput.value.trim(),
-      model: modelInput.value.trim(),
-    }),
+  try {
+    const response = await fetch("/api/playground/tool-draft", {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        instruction,
+        provider: providerInput.value,
+        local_base_url: baseUrlInput.value.trim(),
+        model: modelInput.value.trim(),
+      }),
+    });
+    const data = await response.json();
+    toolDraft.textContent = response.ok
+      ? JSON.stringify(data, null, 2)
+      : `초안 생성 실패: ${data.message || data.detail || data.error_code || `HTTP ${response.status}`}`;
+  } catch (error) {
+    toolDraft.textContent = `초안 생성 중 오류가 발생했습니다: ${error.message}`;
+  }
+});
+
+document.querySelectorAll("[data-example-prompt]").forEach((button) => {
+  button.addEventListener("click", () => {
+    messageInput.value = button.dataset.examplePrompt || "";
+    messageInput.focus();
   });
-  const data = await response.json();
-  toolDraft.textContent = JSON.stringify(data, null, 2);
 });
 
 document.querySelectorAll(".tab").forEach((tab) => {
@@ -391,32 +550,37 @@ async function checkLlm() {
     openSettings();
     return;
   }
-  setLlmStatus("local LLM 확인 중...");
-  const response = await fetch("/api/playground/llm-status", {
-    method: "POST",
-    headers: apiHeaders(),
-    body: JSON.stringify({
-      provider: providerInput.value,
-      local_base_url: baseUrlInput.value.trim(),
-      model: modelInput.value.trim(),
-    }),
-  });
-  const data = await response.json();
-  if (providerInput.value === "openai") {
-    setModelOptions(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"]);
-  } else {
-    setModelOptions(data.available_models || []);
+  const providerLabel = providerInput.value === "openai" ? "OpenAI" : "local LLM";
+  setLlmStatus(`${providerLabel} 연결 확인 중...`);
+  try {
+    const response = await fetch("/api/playground/llm-status", {
+      method: "POST",
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        provider: providerInput.value,
+        local_base_url: baseUrlInput.value.trim(),
+        model: modelInput.value.trim(),
+      }),
+    });
+    const data = await response.json();
+    if (providerInput.value === "openai") {
+      setModelOptions(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"]);
+    } else {
+      setModelOptions(data.available_models || []);
+    }
+    if (!modelInput.value.trim() && data.available_models?.length) {
+      modelInput.value = data.available_models[0];
+    }
+    if (data.chat_ok) {
+      const usage = formatTokenUsage(data.token_usage);
+      setLlmStatus(`${data.model_used} 연결 정상 (${data.elapsed_ms}ms)${usage ? ` · ${usage}` : ""}`, "ok");
+      return;
+    }
+    const message = data.message || data.error_code || `HTTP ${response.status}`;
+    setLlmStatus(message, "error");
+  } catch (error) {
+    setLlmStatus(`연결 확인 실패: ${error.message}`, "error");
   }
-  if (!modelInput.value.trim() && data.available_models?.length) {
-    modelInput.value = data.available_models[0];
-  }
-  if (data.chat_ok) {
-    const usage = formatTokenUsage(data.token_usage);
-    setLlmStatus(`${data.model_used} 연결 정상 (${data.elapsed_ms}ms)${usage ? ` · ${usage}` : ""}`, "ok");
-    return;
-  }
-  const message = data.message || data.error_code || `HTTP ${response.status}`;
-  setLlmStatus(message, "error");
 }
 
 checkLlmButton.addEventListener("click", checkLlm);
