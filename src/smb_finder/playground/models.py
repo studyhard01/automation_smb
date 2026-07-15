@@ -13,6 +13,7 @@ ToolStatus = Literal["ok", "error", "skipped"]
 AgentAction = Literal["tool_call", "final_answer", "clarify"]
 AgentStepKind = Literal["decision", "tool_call", "observation", "final", "blocked", "error"]
 LlmProvider = Literal["local", "openai"]
+SkillSource = Literal["builtin", "user"]
 
 
 class ToolDefinition(BaseModel):
@@ -29,6 +30,31 @@ class ToolDefinition(BaseModel):
     requires_admin: bool = False
     timeout_ms: int = Field(default=1500, ge=100)
     input_schema: dict[str, Any] = Field(default_factory=dict)
+
+
+class SkillDefinition(BaseModel):
+    """Playground agent가 사용할 SKILL.md 문서와 공개 메타데이터."""
+
+    id: str
+    name: str
+    description: str
+    instructions: str
+    document: str
+    source: SkillSource
+    editable: bool = False
+
+
+class SkillCreateRequest(BaseModel):
+    """사용자 SKILL.md 생성 요청."""
+
+    skill_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
+    document: str = Field(min_length=1, max_length=20_000)
+
+
+class SkillUpdateRequest(BaseModel):
+    """사용자 SKILL.md 수정 요청."""
+
+    document: str = Field(min_length=1, max_length=20_000)
 
 
 class ChatMessage(BaseModel):
@@ -50,6 +76,7 @@ class ChatRequest(BaseModel):
 
     message: str = Field(min_length=1, max_length=2000)
     selected_tool_ids: list[str] = Field(default_factory=list)
+    selected_skill_ids: list[str] = Field(default_factory=list)
     session_id: str = ""
     history: list[ChatMessage] = Field(default_factory=list)
     provider: LlmProvider = "local"
@@ -135,6 +162,7 @@ class ChatResponse(BaseModel):
     provider_used: str = "local"
     model_used: str = ""
     assistant_message: str
+    active_skill_ids: list[str] = Field(default_factory=list)
     tool_calls: list[ToolCallTrace] = Field(default_factory=list)
     agent_steps: list[AgentStepTrace] = Field(default_factory=list)
     elapsed_ms: float = 0.0

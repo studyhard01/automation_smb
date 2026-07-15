@@ -122,6 +122,8 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 
 - 화면: `GET /playground`
 - tool 목록: `GET /api/playground/tools`
+- skill 목록/생성: `GET|POST /api/playground/skills`
+- skill 수정/삭제: `PUT|DELETE /api/playground/skills/{skill_id}`
 - ISCN 핵형 요약: `POST /api/playground/karyotype-summary`
 - 채팅 실행: `POST /api/playground/chat`
 - Tool Lab 초안: `POST /api/playground/tool-draft`
@@ -130,6 +132,20 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 기본 tool은 `find_folder`, `search_content`, `search_rag_chunks`, `cytogenetics_karyotype_summary`,
 `cytogenetics_report`, `ngs_report`, `refresh_content`다. UI는 `SMB 직접 접근`, `DB 접근`, `보고서 관련` 세 분류만
 먼저 표시하고, 분류를 클릭하면 내부 tool 선택지가 열린다.
+
+채팅 입력창 아래 `Skills` 버튼에서는 실제 agent와 같은 `<skill-id>/SKILL.md` 형식의 스킬을 선택·조회·추가·수정·삭제한다.
+기본 스킬은 코드와 함께 제공되는 읽기 전용 문서이며, UI에서 만든 사용자 스킬은
+`PLAYGROUND_SKILLS_DIR`(기본 `.cache/playground-skills`) 아래에 같은 디렉터리 구조로 저장된다. 선택한 SKILL.md의
+frontmatter와 본문 지침은 채팅 요청의 agent system prompt에 실제로 주입되고, 응답의 `active_skill_ids`에서 적용 여부를
+확인할 수 있다. `/tools`는 모든 tool 설명을, `/skills`는 설치된 모든 skill 설명을 LLM 호출 없이 즉시 반환한다.
+
+기본 제공 skill은 다음과 같다.
+
+- `tools`, `skills`: `/tools`, `/skills` slash command 사용법과 목록 출력
+- `rag-grounded-answer`: PostgreSQL vector chunk 근거를 먼저 찾고 문서 위치와 함께 답변
+- `smb-navigation`: 폴더명 검색과 파일 본문 검색 중 가장 작은 tool을 선택
+- `report-workflow`: 핵형·세포유전·NGS 요청을 알맞은 보고서 tool로 라우팅
+- `latency-first`: 불필요한 재호출을 줄이고 시간 예산 안에서 짧게 응답
 
 `search_rag_chunks`는 `rag_db_local_20260713.document_chunks`를 cosine 유사도로 검색한다. DB에 저장된
 `nomic-embed-text-v2-moe`와 동일한 768차원 모델 endpoint가 필요하며, 질의에는 모델 권장
@@ -141,7 +157,8 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 
 Playground는 local/on-prem OpenAI 호환 LLM과 OpenAI API provider를 둘 다 지원한다.
 local provider는 `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY`, `LLM_TIMEOUT_MS` 환경변수를 사용한다.
-OpenAI provider는 UI의 Settings에 임시 API key를 넣거나 서버 `.env`의 `OPENAI_API_KEY`를 사용한다.
+OpenAI provider는 UI의 Settings에 임시 API key를 넣거나 서버 `.env`의 `OPENAI_API_KEY`를 사용한다. UI key가 비어 있으면
+서버 `.env` 값을 자동 사용하므로 재시작·새로고침마다 다시 입력할 필요가 없다. 실제 key는 `.env.example`이나 커밋에 넣지 않는다.
 현재는 합성 데이터 전용 테스트이므로 활성화된 tool은 local/OpenAI provider에서 같은 방식으로 선택·실행된다.
 별도 합성 데이터 토글이나 provider별 tool 차단은 없다. LLM 모델이 비어 있으면 UI는 tool을 실행하지 않고
 설정 필요 메시지를 반환한다.

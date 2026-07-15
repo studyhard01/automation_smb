@@ -40,6 +40,10 @@ def test_openapi_operation_ids_are_stable():
     assert operations["/admin/content-index-jobs"]["get"]["operationId"] == "list_content_index_jobs"
     assert operations["/admin/content-index-jobs/{job_id}"]["get"]["operationId"] == "get_content_index_job"
     assert operations["/api/playground/tools"]["get"]["operationId"] == "list_playground_tools"
+    assert operations["/api/playground/skills"]["get"]["operationId"] == "list_playground_skills"
+    assert operations["/api/playground/skills"]["post"]["operationId"] == "create_playground_skill"
+    assert operations["/api/playground/skills/{skill_id}"]["put"]["operationId"] == "update_playground_skill"
+    assert operations["/api/playground/skills/{skill_id}"]["delete"]["operationId"] == "delete_playground_skill"
     assert (
         operations["/api/playground/karyotype-summary"]["post"]["operationId"]
         == "summarize_cytogenetics_karyotype"

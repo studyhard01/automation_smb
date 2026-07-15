@@ -1,5 +1,8 @@
 const state = {
   tools: [],
+  skills: [],
+  selectedSkillIds: new Set(),
+  editingSkillId: "",
   sessionId: "",
   history: [],
   openaiApiKey: "",
@@ -45,6 +48,18 @@ const settingsDialog = ensureSettingsDialog();
 const openaiApiKeyInput = settingsDialog.querySelector("#openaiApiKey");
 const saveSettingsButton = settingsDialog.querySelector("#saveSettings");
 const clearOpenaiKeyButton = settingsDialog.querySelector("#clearOpenaiKey");
+const skillsDialog = document.querySelector("#skillsDialog");
+const skillsButton = document.querySelector("#skillsButton");
+const closeSkillsButton = document.querySelector("#closeSkills");
+const selectedSkillCount = document.querySelector("#selectedSkillCount");
+const activeSkillChips = document.querySelector("#activeSkillChips");
+const skillsList = document.querySelector("#skillsList");
+const newSkillButton = document.querySelector("#newSkill");
+const skillIdInput = document.querySelector("#skillId");
+const skillDocumentInput = document.querySelector("#skillDocument");
+const skillEditorStatus = document.querySelector("#skillEditorStatus");
+const saveSkillButton = document.querySelector("#saveSkill");
+const deleteSkillButton = document.querySelector("#deleteSkill");
 
 function ensureSettingsDialog() {
   let dialog = document.querySelector("#settingsDialog");
@@ -63,9 +78,7 @@ function ensureSettingsDialog() {
         OpenAI API key
         <input id="openaiApiKey" type="password" autocomplete="off" placeholder="sk-..." />
       </label>
-      <p>
-        API key는 현재 브라우저 탭의 메모리에만 유지되며 새로고침하면 사라집니다.
-      </p>
+      <p>비워 두면 서버의 Git 제외 <code>.env</code>에 저장된 <code>OPENAI_API_KEY</code>를 사용합니다.</p>
       <footer>
         <button id="clearOpenaiKey" class="secondary-button" type="button">Clear</button>
         <button id="saveSettings" class="secondary-button" type="button">Apply</button>
@@ -82,6 +95,24 @@ function selectedToolIds() {
 
 function executionTypeOf(tool) {
   return tool.execution_type === "code" || tool.execution_type === "llm" ? tool.execution_type : null;
+}
+
+function selectedSkills() {
+  const known = new Set(state.skills.map((skill) => skill.id));
+  return [...state.selectedSkillIds].filter((skillId) => known.has(skillId));
+}
+
+function rememberSelectedSkills() {
+  window.localStorage.setItem("playgroundSelectedSkills", JSON.stringify(selectedSkills()));
+}
+
+function restoreSelectedSkills() {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem("playgroundSelectedSkills") || "[]");
+    state.selectedSkillIds = new Set(Array.isArray(stored) ? stored.map(String) : []);
+  } catch (_error) {
+    state.selectedSkillIds = new Set();
+  }
 }
 
 function applyToolAvailability() {
@@ -151,7 +182,10 @@ function saveSettings() {
   settingsDialog.close();
   applyProviderMode();
   if (providerInput.value === "openai") {
-    setLlmStatus(state.openaiApiKey ? "OpenAI API key가 이 탭에 설정되었습니다." : "OpenAI API key가 필요합니다.", state.openaiApiKey ? "ok" : "error");
+    setLlmStatus(
+      state.openaiApiKey ? "이 탭의 OpenAI API key를 사용합니다." : "브라우저 key 미지정 · 서버 .env key를 사용합니다.",
+      "ok"
+    );
   }
 }
 
@@ -159,7 +193,7 @@ function clearOpenaiKey() {
   state.openaiApiKey = "";
   openaiApiKeyInput.value = "";
   applyProviderMode();
-  setLlmStatus("OpenAI API key를 지웠습니다.", "error");
+  setLlmStatus("브라우저 key를 지웠습니다. 서버 .env key가 있으면 자동 사용합니다.", "ok");
 }
 
 function setModelOptions(values) {
@@ -207,6 +241,12 @@ function addMessage(role, text, options = {}) {
     }
     if (options.tokenUsage) {
       answerSection.appendChild(renderTokenUsage(options.tokenUsage));
+    }
+    if (options.activeSkills?.length) {
+      const skillLine = document.createElement("div");
+      skillLine.className = "message-active-skills";
+      skillLine.textContent = `Skills: ${options.activeSkills.join(", ")}`;
+      answerSection.appendChild(skillLine);
     }
     el.appendChild(answerSection);
     if (options.traces?.length) {
@@ -431,15 +471,181 @@ async function loadTools() {
   }
 }
 
-async function sendChat(message) {
-  if (providerInput.value === "openai" && !state.openaiApiKey) {
-    addMessage("assistant", "OpenAI API key를 Settings에서 입력하세요.", { error: true });
-    openSettings();
+function responseErrorMessage(data, fallback) {
+  if (typeof data?.detail === "object" && data.detail) {
+    return data.detail.message || data.detail.code || fallback;
+  }
+  return data?.message || data?.detail || data?.error_code || fallback;
+}
+
+function renderActiveSkills() {
+  const activeIds = selectedSkills();
+  selectedSkillCount.textContent = String(activeIds.length);
+  activeSkillChips.innerHTML = "";
+  if (!activeIds.length) {
+    activeSkillChips.innerHTML = "<span>활성 skill 없음</span>";
     return;
   }
+  for (const skillId of activeIds) {
+    const chip = document.createElement("span");
+    chip.className = "active-skill-chip";
+    chip.textContent = skillId;
+    activeSkillChips.appendChild(chip);
+  }
+}
+
+function openSkillEditor(skillId) {
+  const skill = state.skills.find((item) => item.id === skillId);
+  if (!skill) return;
+  state.editingSkillId = skill.id;
+  skillIdInput.value = skill.id;
+  skillIdInput.disabled = true;
+  skillDocumentInput.value = skill.document;
+  skillDocumentInput.readOnly = !skill.editable;
+  saveSkillButton.disabled = !skill.editable;
+  deleteSkillButton.disabled = !skill.editable;
+  skillEditorStatus.textContent = skill.editable
+    ? "사용자 skill · 수정 내용은 로컬 SKILL.md에 저장됩니다."
+    : "기본 skill · 코드와 함께 제공되는 읽기 전용 SKILL.md입니다.";
+  skillsList.querySelectorAll("[data-skill-open]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.skillOpen === skill.id);
+  });
+}
+
+function renderSkillsList() {
+  skillsList.innerHTML = "";
+  for (const skill of state.skills) {
+    const row = document.createElement("section");
+    row.className = "skill-list-item";
+    row.innerHTML = `
+      <label>
+        <input data-skill-select="${escapeHtml(skill.id)}" type="checkbox"
+          ${state.selectedSkillIds.has(skill.id) ? "checked" : ""} />
+        <span>
+          <strong>${escapeHtml(skill.id)}</strong>
+          <small>${escapeHtml(skill.description)}</small>
+        </span>
+      </label>
+      <button data-skill-open="${escapeHtml(skill.id)}" class="skill-open-button" type="button">
+        ${skill.editable ? "편집" : "보기"}
+      </button>
+    `;
+    skillsList.appendChild(row);
+  }
+  skillsList.querySelectorAll("[data-skill-select]").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (input.checked) state.selectedSkillIds.add(input.dataset.skillSelect);
+      else state.selectedSkillIds.delete(input.dataset.skillSelect);
+      rememberSelectedSkills();
+      renderActiveSkills();
+    });
+  });
+  skillsList.querySelectorAll("[data-skill-open]").forEach((button) => {
+    button.addEventListener("click", () => openSkillEditor(button.dataset.skillOpen));
+  });
+  if (state.editingSkillId && state.skills.some((skill) => skill.id === state.editingSkillId)) {
+    openSkillEditor(state.editingSkillId);
+  } else if (state.skills.length) {
+    openSkillEditor(state.skills[0].id);
+  }
+  renderActiveSkills();
+}
+
+async function loadSkills() {
+  skillsList.innerHTML = '<div class="tool-list-status">skill 목록을 불러오는 중...</div>';
+  try {
+    const response = await fetch("/api/playground/skills");
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    state.skills = await response.json();
+    const known = new Set(state.skills.map((skill) => skill.id));
+    state.selectedSkillIds = new Set([...state.selectedSkillIds].filter((skillId) => known.has(skillId)));
+    rememberSelectedSkills();
+    renderSkillsList();
+  } catch (error) {
+    skillsList.innerHTML = `<div class="tool-list-status error">skill 목록을 불러오지 못했습니다. ${escapeHtml(
+      error.message
+    )}</div>`;
+  }
+}
+
+function startNewSkill() {
+  state.editingSkillId = "";
+  skillIdInput.disabled = false;
+  skillIdInput.value = "new-skill";
+  skillDocumentInput.readOnly = false;
+  skillDocumentInput.value = `---
+name: new-skill
+description: Use when the user needs this custom Playground workflow.
+---
+
+# New Skill
+
+Describe the workflow instructions that the agent must follow.`;
+  saveSkillButton.disabled = false;
+  deleteSkillButton.disabled = true;
+  skillEditorStatus.textContent = "새 사용자 skill · id와 frontmatter name을 동일하게 작성하세요.";
+  skillsList.querySelectorAll("[data-skill-open]").forEach((button) => button.classList.remove("active"));
+  skillIdInput.focus();
+}
+
+async function saveSkill() {
+  const skillId = skillIdInput.value.trim();
+  const documentText = skillDocumentInput.value.trim();
+  if (!skillId || !documentText) {
+    skillEditorStatus.textContent = "Skill ID와 SKILL.md 원문을 입력하세요.";
+    return;
+  }
+  const isUpdate = Boolean(state.editingSkillId);
+  const endpoint = isUpdate
+    ? `/api/playground/skills/${encodeURIComponent(state.editingSkillId)}`
+    : "/api/playground/skills";
+  skillEditorStatus.textContent = "저장 중...";
+  const payload = isUpdate ? { document: documentText } : { skill_id: skillId, document: documentText };
+  try {
+    const response = await fetch(endpoint, {
+      method: isUpdate ? "PUT" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      skillEditorStatus.textContent = `저장 실패: ${responseErrorMessage(data, `HTTP ${response.status}`)}`;
+      return;
+    }
+    state.editingSkillId = data.id;
+    await loadSkills();
+    openSkillEditor(data.id);
+    skillEditorStatus.textContent = "SKILL.md를 저장했습니다.";
+  } catch (error) {
+    skillEditorStatus.textContent = `저장 중 오류: ${error.message}`;
+  }
+}
+
+async function deleteSkill() {
+  const skillId = state.editingSkillId;
+  const skill = state.skills.find((item) => item.id === skillId);
+  if (!skill?.editable || !window.confirm(`${skillId} skill을 삭제할까요?`)) return;
+  try {
+    const response = await fetch(`/api/playground/skills/${encodeURIComponent(skillId)}`, { method: "DELETE" });
+    if (!response.ok) {
+      const data = await response.json();
+      skillEditorStatus.textContent = `삭제 실패: ${responseErrorMessage(data, `HTTP ${response.status}`)}`;
+      return;
+    }
+    state.selectedSkillIds.delete(skillId);
+    state.editingSkillId = "";
+    rememberSelectedSkills();
+    await loadSkills();
+  } catch (error) {
+    skillEditorStatus.textContent = `삭제 중 오류: ${error.message}`;
+  }
+}
+
+async function sendChat(message) {
   const payload = {
     message,
     selected_tool_ids: selectedToolIds(),
+    selected_skill_ids: selectedSkills(),
     session_id: state.sessionId,
     history: compactHistory(),
     provider: providerInput.value,
@@ -464,6 +670,7 @@ async function sendChat(message) {
     structured: true,
     traces: data.tool_calls,
     tokenUsage: data.token_usage,
+    activeSkills: data.active_skill_ids,
     agentSteps: data.agent_steps,
     debug: data.debug,
     error: Boolean(data.error_code),
@@ -496,11 +703,6 @@ toolLabForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const instruction = toolInstruction.value.trim();
   if (!instruction) return;
-  if (providerInput.value === "openai" && !state.openaiApiKey) {
-    toolDraft.textContent = "OpenAI API key를 Settings에서 입력하세요.";
-    openSettings();
-    return;
-  }
   toolDraft.textContent = "초안 생성 중...";
   try {
     const response = await fetch("/api/playground/tool-draft", {
@@ -545,11 +747,6 @@ function setLlmStatus(text, status = "") {
 }
 
 async function checkLlm() {
-  if (providerInput.value === "openai" && !state.openaiApiKey) {
-    setLlmStatus("OpenAI API key를 Settings에서 입력하세요.", "error");
-    openSettings();
-    return;
-  }
   const providerLabel = providerInput.value === "openai" ? "OpenAI" : "local LLM";
   setLlmStatus(`${providerLabel} 연결 확인 중...`);
   try {
@@ -589,5 +786,12 @@ providerInput.addEventListener("change", applyProviderMode);
 settingsButton?.addEventListener("click", openSettings);
 saveSettingsButton.addEventListener("click", saveSettings);
 clearOpenaiKeyButton.addEventListener("click", clearOpenaiKey);
+skillsButton.addEventListener("click", () => skillsDialog.showModal());
+closeSkillsButton.addEventListener("click", () => skillsDialog.close());
+newSkillButton.addEventListener("click", startNewSkill);
+saveSkillButton.addEventListener("click", saveSkill);
+deleteSkillButton.addEventListener("click", deleteSkill);
+restoreSelectedSkills();
 applyProviderMode();
 loadTools();
+loadSkills();

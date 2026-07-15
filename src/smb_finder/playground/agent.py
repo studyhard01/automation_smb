@@ -26,12 +26,14 @@ from .models import (
     LlmStatusResponse,
     PlannedToolCall,
     PlaygroundDebug,
+    SkillDefinition,
     TokenUsage,
     ToolCallTrace,
     ToolDraftRequest,
     ToolDraftResponse,
     ToolExecutionResult,
 )
+from .skills import SkillStore, format_skills_help, format_tools_help
 from .tracing import trace_openai_chat_completion
 from .tools import ToolExecutionContext, ToolHandler
 
@@ -186,8 +188,9 @@ def _limit_text(value: str, limit: int) -> str:
 class PlaygroundAgent:
     """선택된 read tool만 사용하는 제한형 tool-use agent."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, skill_store: SkillStore | None = None):
         self.settings = settings
+        self.skill_store = skill_store or SkillStore(settings.playground_skills_dir)
 
     def _resolve_llm_connection(
         self,
@@ -354,6 +357,29 @@ class PlaygroundAgent:
         started = time.perf_counter()
         request_id = request_id or str(uuid.uuid4())
         session_id = request.session_id or f"pg-{uuid.uuid4()}"
+        warnings: list[str] = []
+        available_skills = self.skill_store.list()
+        skill_map = {skill.id: skill for skill in available_skills}
+        unknown_skills = sorted(set(request.selected_skill_ids) - set(skill_map))
+        if unknown_skills:
+            warnings.append(f"unknown_skills_ignored:{','.join(unknown_skills)}")
+        active_skills = [skill_map[skill_id] for skill_id in request.selected_skill_ids if skill_id in skill_map]
+        command = request.message.strip().lower()
+        if command in {"/tools", "/skills"}:
+            assistant_message = (
+                format_tools_help(registry) if command == "/tools" else format_skills_help(available_skills)
+            )
+            command_skill = command.removeprefix("/")
+            return ChatResponse(
+                request_id=request_id,
+                session_id=session_id,
+                provider_used=request.provider,
+                model_used=request.model,
+                assistant_message=assistant_message,
+                active_skill_ids=[command_skill],
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                warnings=warnings,
+            )
         connection = self._resolve_llm_connection(
             provider=request.provider,
             local_base_url=request.local_base_url,
@@ -362,7 +388,6 @@ class PlaygroundAgent:
         )
         model = connection.model
         base_url = connection.base_url
-        warnings: list[str] = []
         all_steps: list[AgentStepTrace] = []
         traces: list[ToolCallTrace] = []
         debug_calls: list[LlmDebugCall] = []
@@ -484,6 +509,7 @@ class PlaygroundAgent:
                     session_id=session_id,
                     usage_calls=usage_calls,
                     debug_calls=debug_calls if debug_allowed else None,
+                    active_skills=active_skills,
                 )
             except LlmResponseFormatError:
                 return self._error_response(
@@ -735,6 +761,7 @@ class PlaygroundAgent:
             provider_used=connection.provider,
             model_used=model,
             assistant_message=final_answer,
+            active_skill_ids=[skill.id for skill in active_skills],
             tool_calls=traces,
             agent_steps=all_steps if request.debug_trace else [],
             elapsed_ms=elapsed_ms,
@@ -937,6 +964,7 @@ class PlaygroundAgent:
         session_id: str = "",
         usage_calls: list[TokenUsage] | None = None,
         debug_calls: list[LlmDebugCall] | None = None,
+        active_skills: list[SkillDefinition] | None = None,
     ) -> AgentDecision:
         tool_specs = [
             {
@@ -951,6 +979,7 @@ class PlaygroundAgent:
             "message": request.message[:1000],
             "recent_history": self._recent_history(request.history),
             "selected_tools": tool_specs,
+            "active_skill_ids": [skill.id for skill in active_skills or []],
             "observations": observations[-3:],
             "step": step,
             "limits": {
@@ -958,20 +987,24 @@ class PlaygroundAgent:
                 "max_tool_calls": max(0, self.settings.playground_agent_max_tool_calls),
             },
         }
+        system_prompt = (
+            "You are a constrained Korean lab assistant agent. "
+            "Return only JSON with keys: action, tool_calls, answer, question, rationale. "
+            "action must be one of: tool_call, final_answer, clarify. "
+            "Each tool_calls item must use exactly: {\"tool_id\":\"...\",\"arguments\":{...}}. "
+            "Call at most one tool at a time and use only selected tool ids. "
+            "Use final_answer when local tool results are enough. "
+            "Do not invent paths or results. "
+            "rationale must be a short public explanation, not hidden chain-of-thought."
+        )
+        skill_instructions = self._skill_system_instructions(active_skills or [])
+        if skill_instructions:
+            system_prompt = f"{system_prompt}\n\n{skill_instructions}"
         data = self._chat_json(
             [
                 {
                     "role": "system",
-                    "content": (
-                        "You are a constrained Korean lab assistant agent. "
-                        "Return only JSON with keys: action, tool_calls, answer, question, rationale. "
-                        "action must be one of: tool_call, final_answer, clarify. "
-                        "Each tool_calls item must use exactly: {\"tool_id\":\"...\",\"arguments\":{...}}. "
-                        "Call at most one tool at a time and use only selected tool ids. "
-                        "Use final_answer when local tool results are enough. "
-                        "Do not invent paths or results. "
-                        "rationale must be a short public explanation, not hidden chain-of-thought."
-                    ),
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
             ],
@@ -986,6 +1019,25 @@ class PlaygroundAgent:
             debug_calls=debug_calls,
         )
         return self._decision_from_json(data)
+
+    def _skill_system_instructions(self, skills: list[SkillDefinition]) -> str:
+        """선택된 SKILL.md 원문을 설정된 전체 글자 예산 안에서 system prompt에 주입한다."""
+
+        if not skills:
+            return ""
+        remaining = max(0, self.settings.playground_skill_prompt_chars)
+        sections: list[str] = [
+            "The following user-selected SKILL.md documents are active. Follow each relevant workflow instruction."
+        ]
+        for skill in skills:
+            block = f'<skill id="{skill.id}">\n{skill.document.strip()}\n</skill>'
+            if len(block) > remaining:
+                if remaining > 200:
+                    sections.append(f"{block[:remaining]}\n[skill truncated]")
+                break
+            sections.append(block)
+            remaining -= len(block)
+        return "\n\n".join(sections)
 
     def _decision_from_json(self, data: dict[str, Any]) -> AgentDecision:
         action = str(data.get("action", "")).strip()

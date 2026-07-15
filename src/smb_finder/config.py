@@ -150,6 +150,16 @@ class Settings(BaseSettings):
     playground_agent_budget_ms: int = Field(default=10000, description="Playground agent 전체 시간 예산(ms)")
     playground_agent_context_messages: int = Field(default=6, description="Playground agent에 전달할 최근 대화 수")
     playground_agent_result_chars: int = Field(default=2000, description="LLM observation에 전달할 tool 결과 최대 글자 수")
+    playground_skills_dir: str = Field(
+        default=".cache/playground-skills",
+        description="UI에서 생성한 사용자 SKILL.md를 저장할 Git 제외 로컬 디렉터리",
+    )
+    playground_skill_prompt_chars: int = Field(
+        default=16_000,
+        ge=1000,
+        le=100_000,
+        description="한 요청에서 system prompt에 주입할 전체 skill 지침 글자 수 상한",
+    )
     playground_debug_preview_chars: int = Field(default=4000, description="raw LLM debug preview 최대 글자 수")
     @field_validator("langgraph_studio_observer_url")
     @classmethod

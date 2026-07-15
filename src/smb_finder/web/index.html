@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Synthetic Chatbot Playground</title>
-    <link rel="stylesheet" href="/playground/assets/playground.css?v=20260714-4" />
+    <link rel="stylesheet" href="/playground/assets/playground.css?v=20260715-1" />
   </head>
   <body>
     <main class="app-shell">
@@ -81,6 +81,14 @@
             </section>
           </div>
           <form id="chatForm" class="composer">
+            <div class="composer-skills">
+              <button id="skillsButton" class="skills-button" type="button">
+                Skills <span id="selectedSkillCount">0</span>
+              </button>
+              <div id="activeSkillChips" class="active-skill-chips" aria-live="polite">
+                <span>활성 skill 없음</span>
+              </div>
+            </div>
             <textarea
               id="messageInput"
               rows="2"
@@ -110,6 +118,45 @@
         </div>
       </section>
     </main>
-    <script src="/playground/assets/playground.js?v=20260714-4"></script>
+
+    <dialog id="skillsDialog" class="skills-dialog">
+      <div class="skills-dialog-shell">
+        <header class="skills-dialog-header">
+          <div>
+            <p class="eyebrow">AGENT SKILLS</p>
+            <h2>SKILL.md 관리</h2>
+            <p>선택한 스킬 원문이 실제 agent system prompt에 적용됩니다.</p>
+          </div>
+          <button id="closeSkills" class="icon-button" type="button" aria-label="Skills 닫기">×</button>
+        </header>
+        <div class="skills-manager-layout">
+          <aside class="skills-manager-sidebar">
+            <div class="skills-manager-toolbar">
+              <strong>Skills</strong>
+              <button id="newSkill" class="secondary-button" type="button">새 스킬</button>
+            </div>
+            <div id="skillsList" class="skills-list"></div>
+          </aside>
+          <section class="skill-editor">
+            <label>
+              Skill ID
+              <input id="skillId" type="text" maxlength="64" placeholder="my-skill" autocomplete="off" />
+            </label>
+            <label>
+              SKILL.md 원문
+              <textarea id="skillDocument" rows="18" spellcheck="false"></textarea>
+            </label>
+            <p id="skillEditorStatus" class="skill-editor-status" aria-live="polite">
+              기본 skill은 읽기 전용이며 사용자 skill은 로컬 .cache에 저장됩니다.
+            </p>
+            <footer class="skill-editor-actions">
+              <button id="deleteSkill" class="danger-button" type="button" disabled>삭제</button>
+              <button id="saveSkill" type="button">저장</button>
+            </footer>
+          </section>
+        </div>
+      </div>
+    </dialog>
+    <script src="/playground/assets/playground.js?v=20260715-1"></script>
   </body>
 </html>
