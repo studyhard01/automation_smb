@@ -6,7 +6,11 @@
 # 폴더 인덱스 캐시 (공유폴더 경로 정보 포함 — 외부 공유 금지)
 *.index.json
 .cache/
-data/
+# 데이터 디렉터리는 기본 제외하되 일반 합성 MLflow 평가 fixture만 버전 관리한다.
+data/*
+!data/evaluation/
+data/evaluation/*
+!data/evaluation/*.jsonl
 
 # Python
 __pycache__/

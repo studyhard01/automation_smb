@@ -25,11 +25,12 @@ from smb_finder.playground.models import (
 from smb_finder.playground.tracing import (
     _hide_langsmith_outputs_preserve_usage,
     _langsmith_trace_inputs,
+    _langsmith_trace_metadata,
     _langsmith_trace_outputs,
     is_langsmith_tracing_enabled,
 )
 from smb_finder.playground.tools import PlaygroundRuntime, ToolExecutionContext, build_tool_registry
-from smb_finder.rag_search import RagChunkHit, RagSearchResponse
+from smb_finder.rag_search import RagChunkHit, RagSearchError, RagSearchResponse
 
 
 class FakeFinder:
@@ -108,6 +109,7 @@ def test_tool_registry_exposes_builtin_tools_without_admin():
         "cytogenetics_report",
         "ngs_report",
         "refresh_content",
+        "create_playground_skill",
     }
     assert registry["find_folder"].definition.default_selected is True
     assert registry["refresh_content"].definition.enabled is False
@@ -117,6 +119,8 @@ def test_tool_registry_exposes_builtin_tools_without_admin():
     assert registry["find_folder"].definition.category == "smb"
     assert registry["search_rag_chunks"].definition.category == "database"
     assert registry["cytogenetics_report"].definition.category == "report"
+    assert registry["create_playground_skill"].definition.category == "skill"
+    assert registry["create_playground_skill"].definition.permission == "write"
     assert "provider_availability" not in registry["find_folder"].definition.model_dump()
     assert "external_provider_allowed" not in registry["find_folder"].definition.model_dump()
     assert {
@@ -128,6 +132,7 @@ def test_tool_registry_exposes_builtin_tools_without_admin():
         "cytogenetics_report",
         "ngs_report",
         "refresh_content",
+        "create_playground_skill",
     }
 
     result = registry["find_folder"].run({"query": "OO검사 폴더 찾아줘"})
@@ -369,6 +374,168 @@ def test_agent_executes_tool_then_final_answer(monkeypatch):
     assert response.tool_calls[0].tool_id == "find_folder"
     assert response.assistant_message == "OO검사 폴더를 찾았습니다."
     assert [step.kind for step in response.agent_steps] == ["decision", "tool_call", "observation", "decision", "final"]
+
+
+def test_rag_grounded_fast_path_searches_directly_and_synthesizes_once(monkeypatch):
+    runtime = _runtime()
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+    llm_calls = []
+
+    def fail_decision(**kwargs):  # noqa: ANN003, ARG001
+        raise AssertionError("RAG fast path must not call the decision LLM")
+
+    def fake_chat(messages, **kwargs):  # noqa: ANN001, ANN003
+        llm_calls.append({"messages": messages, **kwargs})
+        return {"answer": "오로라 일정은 7월입니다. imaginary.md를 참고했습니다."}
+
+    monkeypatch.setattr(agent, "_decide_next_action", fail_decision)
+    monkeypatch.setattr(agent, "_chat_json", fake_chat)
+
+    response = agent.run(
+        ChatRequest(
+            message="프로젝트 오로라 일정은?",
+            selected_tool_ids=["search_rag_chunks"],
+            selected_skill_ids=["rag-grounded-answer"],
+            debug_trace=True,
+        ),
+        registry,
+        request_id="req-rag-fast-success",
+    )
+
+    assert response.error_code == ""
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].result_payload is not None
+    assert response.tool_calls[0].result_payload["hits"][0]["file_name"] == "aurora.md"
+    assert len(llm_calls) == 1
+    assert llm_calls[0]["purpose"] == "rag_grounded_synthesis"
+    assert llm_calls[0]["request_id"] == "req-rag-fast-success"
+    source_list = response.assistant_message.split("근거 문서:\n", maxsplit=1)[1]
+    assert source_list == "- aurora.md / 일정"
+    assert "imaginary.md" not in source_list
+    assert [step.kind for step in response.agent_steps] == ["tool_call", "observation", "final"]
+
+
+def test_rag_grounded_fast_path_stops_without_llm_when_search_errors(monkeypatch):
+    class ErrorRagSearcher:
+        def search(self, query: str, limit: int) -> RagSearchResponse:  # noqa: ARG002
+            raise RagSearchError("embedding_unavailable", "로컬 임베딩 endpoint에 연결할 수 없습니다.", 12.0)
+
+    runtime = _runtime()
+    runtime = PlaygroundRuntime(
+        settings=runtime.settings,
+        finder=runtime.finder,
+        content_searcher=runtime.content_searcher,
+        rag_searcher=ErrorRagSearcher(),
+    )
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+    llm_call_count = 0
+
+    def fake_chat(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        nonlocal llm_call_count
+        llm_call_count += 1
+        return {"answer": "호출되면 안 됩니다."}
+
+    monkeypatch.setattr(agent, "_chat_json", fake_chat)
+
+    response = agent.run(
+        ChatRequest(
+            message="프로젝트 오로라 일정은?",
+            selected_tool_ids=["search_rag_chunks"],
+            selected_skill_ids=["rag-grounded-answer"],
+        ),
+        registry,
+    )
+
+    assert llm_call_count == 0
+    assert response.error_code == "embedding_unavailable"
+    assert response.assistant_message == "로컬 임베딩 endpoint에 연결할 수 없습니다."
+    assert response.tool_calls[0].error_code == "embedding_unavailable"
+
+
+def test_rag_grounded_fast_path_returns_no_hit_without_synthesis(monkeypatch):
+    class EmptyRagSearcher:
+        def search(self, query: str, limit: int) -> RagSearchResponse:  # noqa: ARG002
+            return RagSearchResponse(
+                query=query,
+                hits=[],
+                result_count=0,
+                embedding_model="synthetic-embedding",
+            )
+
+    runtime = _runtime()
+    runtime = PlaygroundRuntime(
+        settings=runtime.settings,
+        finder=runtime.finder,
+        content_searcher=runtime.content_searcher,
+        rag_searcher=EmptyRagSearcher(),
+    )
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+    llm_call_count = 0
+
+    def fake_chat(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        nonlocal llm_call_count
+        llm_call_count += 1
+        return {"answer": "호출되면 안 됩니다."}
+
+    monkeypatch.setattr(agent, "_chat_json", fake_chat)
+
+    response = agent.run(
+        ChatRequest(
+            message="DB에 없는 합성 질문",
+            selected_tool_ids=["search_rag_chunks"],
+            selected_skill_ids=["rag-grounded-answer"],
+        ),
+        registry,
+    )
+
+    assert llm_call_count == 0
+    assert response.error_code == ""
+    assert response.assistant_message == "DB 벡터 검색과 일치하는 chunk를 찾지 못했습니다."
+    assert response.tool_calls[0].result_payload["result_count"] == 0
+
+
+def test_general_agent_stops_after_tool_error_without_second_decision(monkeypatch):
+    class ErrorRagSearcher:
+        def search(self, query: str, limit: int) -> RagSearchResponse:  # noqa: ARG002
+            raise RagSearchError("embedding_unavailable", "합성 임베딩 오류", 9.0)
+
+    runtime = _runtime()
+    runtime = PlaygroundRuntime(
+        settings=runtime.settings,
+        finder=runtime.finder,
+        content_searcher=runtime.content_searcher,
+        rag_searcher=ErrorRagSearcher(),
+    )
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+    decision_count = 0
+
+    def decide(**kwargs):  # noqa: ANN003, ARG001
+        nonlocal decision_count
+        decision_count += 1
+        return AgentDecision(
+            action="tool_call",
+            tool_calls=[PlannedToolCall(tool_id="search_rag_chunks", arguments={"query": "합성 질문"})],
+        )
+
+    monkeypatch.setattr(agent, "_decide_next_action", decide)
+
+    response = agent.run(
+        ChatRequest(
+            message="합성 질문",
+            selected_tool_ids=["search_rag_chunks", "find_folder"],
+            debug_trace=True,
+        ),
+        registry,
+    )
+
+    assert decision_count == 1
+    assert response.error_code == "embedding_unavailable"
+    assert response.assistant_message == "합성 임베딩 오류"
+    assert [step.kind for step in response.agent_steps] == ["decision", "tool_call", "observation", "error"]
 
 
 def test_agent_accepts_local_model_tool_call_aliases(monkeypatch):
@@ -807,3 +974,17 @@ def test_langsmith_trace_body_visibility_follows_settings():
     assert visible_inputs["messages"] == messages
     assert _langsmith_trace_outputs(hidden_settings, output) == {"usage_metadata": output["usage_metadata"]}
     assert _langsmith_trace_outputs(visible_settings, output) == output
+
+
+def test_langsmith_trace_metadata_correlates_request_and_synthesis():
+    metadata = _langsmith_trace_metadata(
+        model="gpt-test",
+        purpose="rag_grounded_synthesis",
+        session_id="pg-session",
+        request_id="req-123",
+        message_count=2,
+    )
+
+    assert metadata["request_id"] == "req-123"
+    assert metadata["purpose"] == "rag_grounded_synthesis"
+    assert metadata["session_id"] == "pg-session"

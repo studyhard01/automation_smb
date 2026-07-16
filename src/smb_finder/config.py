@@ -118,6 +118,19 @@ class Settings(BaseSettings):
     langsmith_hide_inputs: bool = Field(default=False, description="LangSmith trace에서 LLM 입력 본문 숨김")
     langsmith_hide_outputs: bool = Field(default=False, description="LangSmith trace에서 LLM 출력 본문 숨김")
 
+    # ── MLflow 문서 챗봇 오프라인 평가 (서비스 경로 기본 OFF) ──
+    mlflow_evaluation_enabled: bool = Field(default=False, description="MLflow 오프라인 평가 기능 활성화 여부")
+    mlflow_tracing_enabled: bool = Field(default=False, description="MLflow 서비스 tracing 활성화 여부")
+    mlflow_tracking_uri: str = Field(default="http://127.0.0.1:5000", description="MLflow Tracking Server URL")
+    mlflow_experiment_name: str = Field(
+        default="automation-smb-doc-chatbot",
+        description="문서 챗봇 평가 experiment 이름",
+    )
+    mlflow_tracking_timeout_ms: int = Field(default=2000, ge=100, le=30000, description="MLflow preflight timeout")
+    mlflow_judge_enabled: bool = Field(default=False, description="MLflow LLM judge 활성화 여부")
+    mlflow_judge_model: str = Field(default="openai:/gpt-4.1-mini", description="MLflow judge model URI")
+    mlflow_trace_include_content: bool = Field(default=False, description="합성 평가 trace에 chunk 본문 포함 여부")
+
     # ── 로컬 LangGraph Studio 관측기 (기본 OFF, 안전한 메타데이터만 전송) ──
     langgraph_studio_observer_enabled: bool = Field(
         default=False,

@@ -279,6 +279,7 @@ class PlaygroundAgent:
         *,
         connection: LlmConnection,
         session_id: str,
+        request_id: str = "",
         usage_calls: list[TokenUsage] | None = None,
         debug_calls: list[LlmDebugCall] | None = None,
     ) -> ToolExecutionContext:
@@ -294,6 +295,7 @@ class PlaygroundAgent:
                 purpose=purpose,
                 provider=connection.provider,
                 session_id=session_id,
+                request_id=request_id,
                 usage_calls=usage_calls,
                 debug_calls=debug_calls,
             )
@@ -440,6 +442,12 @@ class PlaygroundAgent:
             )
 
         selected = [tool_id for tool_id in request.selected_tool_ids if tool_id in registry]
+        if (
+            any(skill.id == "skill-creator" for skill in active_skills)
+            and "create_playground_skill" in registry
+            and "create_playground_skill" not in selected
+        ):
+            selected.append("create_playground_skill")
         unknown = sorted(set(request.selected_tool_ids) - set(registry))
         if unknown:
             warnings.append(f"unknown_tools_ignored:{','.join(unknown)}")
@@ -475,15 +483,33 @@ class PlaygroundAgent:
             )
         handlers = {tool_id: registry[tool_id] for tool_id in selected}
 
+        if (
+            set(request.selected_tool_ids) == {"search_rag_chunks"}
+            and set(request.selected_skill_ids) == {"rag-grounded-answer"}
+        ):
+            return self._run_rag_grounded_fast_path(
+                request=request,
+                handler=registry["search_rag_chunks"],
+                active_skills=active_skills,
+                connection=connection,
+                session_id=session_id,
+                request_id=request_id,
+                started=started,
+                warnings=warnings,
+                debug_allowed=debug_allowed,
+            )
+
         tool_context = self._tool_execution_context(
             connection=connection,
             session_id=session_id,
+            request_id=request_id,
             usage_calls=usage_calls,
             debug_calls=debug_calls if debug_allowed else None,
         )
 
         observations: list[dict[str, str]] = []
         final_answer = ""
+        response_error_code = ""
         over_budget = False
         max_steps = max(1, self.settings.playground_agent_max_steps)
         max_tool_calls = max(0, self.settings.playground_agent_max_tool_calls)
@@ -507,6 +533,7 @@ class PlaygroundAgent:
                     step=step,
                     provider=connection.provider,
                     session_id=session_id,
+                    request_id=request_id,
                     usage_calls=usage_calls,
                     debug_calls=debug_calls if debug_allowed else None,
                     active_skills=active_skills,
@@ -705,6 +732,11 @@ class PlaygroundAgent:
                         "result": observation_text,
                     }
                 )
+                if status == "ok" and handler.definition.id == "create_playground_skill" and result_payload:
+                    created_skill_id = str(result_payload.get("id", "")).strip()
+                    created_skill = self.skill_store.get(created_skill_id) if created_skill_id else None
+                    if created_skill is not None and all(skill.id != created_skill.id for skill in active_skills):
+                        active_skills.append(created_skill)
                 all_steps.append(
                     AgentStepTrace(
                         step=step,
@@ -719,6 +751,23 @@ class PlaygroundAgent:
                         error_code=error_code,
                     )
                 )
+                if status != "ok":
+                    final_answer = result_text
+                    response_error_code = error_code or "tool_failed"
+                    all_steps.append(
+                        AgentStepTrace(
+                            step=step,
+                            kind="error",
+                            title="tool 오류로 종료",
+                            detail=result_text,
+                            action="final_answer",
+                            tool_id=handler.definition.id,
+                            tool_name=handler.definition.display_name,
+                            status="error",
+                            error_code=response_error_code,
+                        )
+                    )
+                    break
                 if status == "ok" and handler.returns_final_answer:
                     final_answer = result_text
                     all_steps.append(
@@ -766,10 +815,236 @@ class PlaygroundAgent:
             agent_steps=all_steps if request.debug_trace else [],
             elapsed_ms=elapsed_ms,
             warnings=warnings,
+            error_code=response_error_code,
             over_budget=over_budget,
             debug=PlaygroundDebug(llm_calls=debug_calls) if debug_allowed else None,
             token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
         )
+
+    def _run_rag_grounded_fast_path(
+        self,
+        *,
+        request: ChatRequest,
+        handler: ToolHandler,
+        active_skills: list[SkillDefinition],
+        connection: LlmConnection,
+        session_id: str,
+        request_id: str,
+        started: float,
+        warnings: list[str],
+        debug_allowed: bool,
+    ) -> ChatResponse:
+        """단일 RAG tool과 근거 답변 skill 조합을 결정 LLM 없이 실행한다."""
+
+        arguments = {"query": request.message, "limit": self.settings.rag_db_default_limit}
+        trace_started = time.perf_counter()
+        try:
+            result = handler.execute(arguments)
+        except Exception:  # noqa: BLE001 - 공개 응답에는 내부 예외 대신 안정된 코드만 반환한다.
+            result = ToolExecutionResult(
+                status="error",
+                result_text="tool 실행 중 오류가 발생했습니다.",
+                error_code="tool_failed",
+            )
+        tool_elapsed_ms = round((time.perf_counter() - trace_started) * 1000, 1)
+        trace = ToolCallTrace(
+            tool_id=handler.definition.id,
+            tool_name=handler.definition.display_name,
+            arguments_summary=result.arguments_summary,
+            status=result.status,
+            elapsed_ms=tool_elapsed_ms,
+            result_text=result.result_text,
+            result_payload=result.result_payload,
+            error_code=result.error_code,
+        )
+        observation_text = _limit_text(result.result_text, self.settings.playground_agent_result_chars)
+        steps = [
+            AgentStepTrace(
+                step=1,
+                kind="tool_call",
+                title="tool 실행",
+                detail=self._public_arguments_summary(arguments),
+                action="tool_call",
+                tool_id=handler.definition.id,
+                tool_name=handler.definition.display_name,
+            ),
+            AgentStepTrace(
+                step=1,
+                kind="observation",
+                title="tool 결과",
+                detail=observation_text,
+                action="tool_call",
+                tool_id=handler.definition.id,
+                tool_name=handler.definition.display_name,
+                status=result.status,
+                elapsed_ms=tool_elapsed_ms,
+                error_code=result.error_code,
+            ),
+        ]
+        if result.status != "ok":
+            return ChatResponse(
+                request_id=request_id,
+                session_id=session_id,
+                provider_used=connection.provider,
+                model_used=connection.model,
+                assistant_message=result.result_text,
+                active_skill_ids=[skill.id for skill in active_skills],
+                tool_calls=[trace],
+                agent_steps=steps if request.debug_trace else [],
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                warnings=warnings,
+                error_code=result.error_code or "tool_failed",
+            )
+
+        result_payload = result.result_payload or {}
+        raw_hits = result_payload.get("hits")
+        hits = raw_hits if isinstance(raw_hits, list) else []
+        result_count = result_payload.get("result_count", len(hits))
+        if not hits or result_count == 0:
+            steps.append(
+                AgentStepTrace(
+                    step=1,
+                    kind="final",
+                    title="검색 근거 없음",
+                    detail=result.result_text,
+                    action="final_answer",
+                    tool_id=handler.definition.id,
+                    tool_name=handler.definition.display_name,
+                )
+            )
+            return ChatResponse(
+                request_id=request_id,
+                session_id=session_id,
+                provider_used=connection.provider,
+                model_used=connection.model,
+                assistant_message=result.result_text,
+                active_skill_ids=[skill.id for skill in active_skills],
+                tool_calls=[trace],
+                agent_steps=steps if request.debug_trace else [],
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                warnings=warnings,
+            )
+
+        usage_calls: list[TokenUsage] = []
+        debug_calls: list[LlmDebugCall] = []
+        skill_instructions = self._skill_system_instructions(active_skills)
+        try:
+            synthesis = self._chat_json(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Answer the user's question in Korean using only the supplied local document evidence. "
+                            "Cite the file name and section or location for every material claim. "
+                            "If the evidence is insufficient, say so explicitly. "
+                            "Never invent a document, location, or fact. Return only JSON: {\"answer\":\"...\"}."
+                            f"\n\n{skill_instructions}"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {"question": request.message, "evidence": observation_text},
+                            ensure_ascii=False,
+                        ),
+                    },
+                ],
+                model=connection.model,
+                base_url=connection.base_url,
+                api_key=connection.api_key,
+                max_tokens=500,
+                purpose="rag_grounded_synthesis",
+                provider=connection.provider,
+                session_id=session_id,
+                request_id=request_id,
+                usage_calls=usage_calls,
+                debug_calls=debug_calls if debug_allowed else None,
+            )
+            final_answer = str(synthesis.get("answer", "")).strip()
+            if not final_answer:
+                raise LlmResponseFormatError("RAG synthesis response has no answer")
+        except LlmResponseFormatError:
+            return ChatResponse(
+                request_id=request_id,
+                session_id=session_id,
+                provider_used=connection.provider,
+                model_used=connection.model,
+                assistant_message="LLM 응답을 근거 답변 JSON으로 해석하지 못했습니다.",
+                active_skill_ids=[skill.id for skill in active_skills],
+                tool_calls=[trace],
+                agent_steps=steps if request.debug_trace else [],
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                warnings=warnings,
+                error_code="llm_response_invalid_json",
+                debug=PlaygroundDebug(llm_calls=debug_calls) if debug_calls else None,
+                token_usage=self._aggregate_token_usage(usage_calls, connection.provider, connection.model),
+            )
+        except Exception:  # noqa: BLE001 - LLM 호출 상세는 공개하지 않는다.
+            return ChatResponse(
+                request_id=request_id,
+                session_id=session_id,
+                provider_used=connection.provider,
+                model_used=connection.model,
+                assistant_message="근거 답변을 생성하는 LLM 호출이 실패했습니다.",
+                active_skill_ids=[skill.id for skill in active_skills],
+                tool_calls=[trace],
+                agent_steps=steps if request.debug_trace else [],
+                elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
+                warnings=warnings,
+                error_code="local_llm_failed",
+                debug=PlaygroundDebug(llm_calls=debug_calls) if debug_calls else None,
+                token_usage=self._aggregate_token_usage(usage_calls, connection.provider, connection.model),
+            )
+
+        citations = self._rag_evidence_citations(hits)
+        if citations:
+            final_answer = f"{final_answer}\n\n근거 문서:\n" + "\n".join(f"- {citation}" for citation in citations)
+        steps.append(
+            AgentStepTrace(
+                step=2,
+                kind="final",
+                title="근거 기반 최종 답변",
+                detail=final_answer,
+                action="final_answer",
+            )
+        )
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        over_budget = elapsed_ms > self.settings.playground_agent_budget_ms
+        if over_budget:
+            warnings.append("playground_agent_over_budget")
+        return ChatResponse(
+            request_id=request_id,
+            session_id=session_id,
+            provider_used=connection.provider,
+            model_used=connection.model,
+            assistant_message=final_answer,
+            active_skill_ids=[skill.id for skill in active_skills],
+            tool_calls=[trace],
+            agent_steps=steps if request.debug_trace else [],
+            elapsed_ms=elapsed_ms,
+            warnings=warnings,
+            over_budget=over_budget,
+            debug=PlaygroundDebug(llm_calls=debug_calls) if debug_allowed else None,
+            token_usage=self._aggregate_token_usage(usage_calls, connection.provider, connection.model),
+        )
+
+    def _rag_evidence_citations(self, hits: list[Any]) -> list[str]:
+        """검색 payload에 실제 존재하는 hit만 근거 문서 목록으로 정규화한다."""
+
+        citations: list[str] = []
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            file_name = str(hit.get("file_name", "")).strip()
+            if not file_name:
+                continue
+            location = str(
+                hit.get("section_path") or hit.get("location_label") or hit.get("location_type") or ""
+            ).strip()
+            citation = f"{file_name} / {location}" if location else file_name
+            if citation not in citations:
+                citations.append(citation)
+        return citations
 
     def draft_tool(self, request: ToolDraftRequest, openai_api_key: str = "") -> ToolDraftResponse:
         connection = self._resolve_llm_connection(
@@ -962,6 +1237,7 @@ class PlaygroundAgent:
         step: int,
         provider: str = "local",
         session_id: str = "",
+        request_id: str = "",
         usage_calls: list[TokenUsage] | None = None,
         debug_calls: list[LlmDebugCall] | None = None,
         active_skills: list[SkillDefinition] | None = None,
@@ -1015,6 +1291,7 @@ class PlaygroundAgent:
             purpose=f"agent_decision_step_{step}",
             provider=provider,
             session_id=session_id,
+            request_id=request_id,
             usage_calls=usage_calls,
             debug_calls=debug_calls,
         )
@@ -1104,6 +1381,7 @@ class PlaygroundAgent:
         purpose: str = "chat_json",
         provider: str = "local",
         session_id: str = "",
+        request_id: str = "",
         usage_calls: list[TokenUsage] | None = None,
         debug_calls: list[LlmDebugCall] | None = None,
     ) -> dict[str, Any]:
@@ -1146,6 +1424,7 @@ class PlaygroundAgent:
                 messages=request_messages,
                 call=post_json,
                 usage_metadata=lambda body: self._langsmith_usage_metadata(body, provider, model),
+                request_id=request_id,
             )
             usage = self._token_usage_from_response(response_json, provider, model)
             if usage is not None and usage_calls is not None:

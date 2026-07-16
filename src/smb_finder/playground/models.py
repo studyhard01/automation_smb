@@ -6,9 +6,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ToolPermission = Literal["read", "admin"]
+ToolPermission = Literal["read", "write", "admin"]
 ToolExecutionType = Literal["code", "llm"]
-ToolCategory = Literal["smb", "database", "report"]
+ToolCategory = Literal["smb", "database", "report", "skill"]
 ToolStatus = Literal["ok", "error", "skipped"]
 AgentAction = Literal["tool_call", "final_answer", "clarify"]
 AgentStepKind = Literal["decision", "tool_call", "observation", "final", "blocked", "error"]

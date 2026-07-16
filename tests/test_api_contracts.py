@@ -93,6 +93,7 @@ def test_playground_tools_api_serializes_execution_type():
         "cytogenetics_report",
         "ngs_report",
         "refresh_content",
+        "create_playground_skill",
     }
     assert tools["find_folder"]["enabled"] is True
     assert tools["search_rag_chunks"]["enabled"] is True
@@ -103,6 +104,8 @@ def test_playground_tools_api_serializes_execution_type():
     assert tools["find_folder"]["category"] == "smb"
     assert tools["search_rag_chunks"]["category"] == "database"
     assert tools["cytogenetics_report"]["category"] == "report"
+    assert tools["create_playground_skill"]["category"] == "skill"
+    assert tools["create_playground_skill"]["permission"] == "write"
 
 
 def test_playground_chat_api_generates_request_id(monkeypatch):

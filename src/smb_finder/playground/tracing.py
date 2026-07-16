@@ -43,6 +43,19 @@ def _langsmith_trace_outputs(settings: Settings, outputs: dict[str, Any]) -> dic
     return outputs
 
 
+def _langsmith_trace_metadata(*, model: str, purpose: str, session_id: str, request_id: str, message_count: int) -> dict[str, Any]:
+    """Playground 요청과 개별 LLM run을 연결할 공개 메타데이터를 만든다."""
+
+    return {
+        "ls_provider": "openai",
+        "ls_model_name": model,
+        "purpose": purpose,
+        "request_id": request_id,
+        "session_id": session_id,
+        "message_count": message_count,
+    }
+
+
 def is_langsmith_tracing_enabled(settings: Settings, provider: str) -> bool:
     """OpenAI provider에 대해서만 LangSmith 추적을 opt-in으로 켠다."""
     return provider == "openai" and settings.langsmith_tracing and bool(settings.langsmith_api_key.strip())
@@ -59,6 +72,7 @@ def trace_openai_chat_completion(
     messages: list[dict[str, str]],
     call: Callable[[], dict[str, Any]],
     usage_metadata: Callable[[dict[str, Any]], dict[str, int]],
+    request_id: str = "",
 ) -> dict[str, Any]:
     """OpenAI 호환 chat completion 호출을 LangSmith LLM run으로 감싼다.
 
@@ -91,13 +105,13 @@ def trace_openai_chat_completion(
         return call()
 
     captured: dict[str, Any] = {}
-    metadata = {
-        "ls_provider": "openai",
-        "ls_model_name": model,
-        "purpose": purpose,
-        "session_id": session_id,
-        "message_count": message_count,
-    }
+    metadata = _langsmith_trace_metadata(
+        model=model,
+        purpose=purpose,
+        session_id=session_id,
+        request_id=request_id,
+        message_count=message_count,
+    )
 
     def process_inputs(_: dict[str, Any]) -> dict[str, Any]:
         return _langsmith_trace_inputs(

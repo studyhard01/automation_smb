@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -15,7 +16,12 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 _SKILL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _BUILTIN_ROOT = Path(__file__).resolve().parent / "builtin_skills"
-_CATEGORY_NAMES = {"smb": "SMB 직접 접근", "database": "DB 접근", "report": "보고서 관련"}
+_CATEGORY_NAMES = {
+    "smb": "SMB 직접 접근",
+    "database": "DB 접근",
+    "report": "보고서 관련",
+    "skill": "Skill 관리",
+}
 
 
 class SkillStoreError(ValueError):
@@ -29,7 +35,13 @@ class SkillStoreError(ValueError):
 
 def _unquote_metadata(value: str) -> str:
     value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+    if len(value) >= 2 and value[0] == value[-1] == '"':
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value[1:-1]
+        return parsed if isinstance(parsed, str) else value[1:-1]
+    if len(value) >= 2 and value[0] == value[-1] == "'":
         return value[1:-1]
     return value
 
@@ -153,7 +165,7 @@ def format_tools_help(registry: dict[str, "ToolHandler"]) -> str:
     """현재 registry의 모든 tool 설명을 slash command 답변으로 만든다."""
 
     lines = ["사용 가능한 tools"]
-    for category in ("smb", "database", "report"):
+    for category in ("smb", "database", "report", "skill"):
         handlers = [item for item in registry.values() if item.definition.category == category]
         if not handlers:
             continue

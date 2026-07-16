@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -13,6 +15,7 @@ from smb_finder.reports import run_cytogenetics_karyotype_summary, run_cytogenet
 from smb_finder.tooling import ToolExecutionError, ToolExecutor
 
 from .models import ToolDefinition, ToolExecutionResult
+from .skills import SkillStore, SkillStoreError
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,7 @@ def build_tool_registry(runtime: PlaygroundRuntime) -> dict[str, ToolHandler]:
 
     settings = runtime.settings
     search_executor = ToolExecutor(runtime)
+    skill_store = SkillStore(settings.playground_skills_dir)
 
     def find_folder(args: dict[str, Any]) -> ToolExecutionResult:
         query = _text_arg(args, "query")
@@ -230,6 +234,88 @@ def build_tool_registry(runtime: PlaygroundRuntime) -> dict[str, ToolHandler]:
 
     def ngs_report(args: dict[str, Any]) -> ToolExecutionResult:
         return run_ngs_report(args, settings=settings, content_searcher=runtime.content_searcher)
+
+    def create_playground_skill(args: dict[str, Any]) -> ToolExecutionResult:
+        """검증된 사용자 SKILL.md를 로컬 Playground 저장소에 만든다."""
+
+        skill_id = _text_arg(args, "skill_id")
+        description = re.sub(r"\s+", " ", _text_arg(args, "description")).strip()
+        instructions = _text_arg(args, "instructions").replace("\r\n", "\n").replace("\r", "\n")
+        arguments_summary = (
+            f"skill_id={skill_id or '-'} description_len={len(description)} instructions_len={len(instructions)}"
+        )
+        if not description:
+            return ToolExecutionResult(
+                status="error",
+                result_text="스킬을 언제 사용할지 설명하는 description이 필요합니다.",
+                error_code="skill_description_missing",
+                arguments_summary=arguments_summary,
+            )
+        if len(description) > 500:
+            return ToolExecutionResult(
+                status="error",
+                result_text="스킬 description은 500자 이하여야 합니다.",
+                error_code="skill_description_too_large",
+                arguments_summary=arguments_summary,
+            )
+        if not instructions:
+            return ToolExecutionResult(
+                status="error",
+                result_text="스킬 본문 instructions가 필요합니다.",
+                error_code="skill_instructions_missing",
+                arguments_summary=arguments_summary,
+            )
+        if instructions.startswith("---"):
+            return ToolExecutionResult(
+                status="error",
+                result_text="instructions에는 frontmatter를 넣지 마세요. 서버가 SKILL.md 메타데이터를 생성합니다.",
+                error_code="skill_instructions_frontmatter",
+                arguments_summary=arguments_summary,
+            )
+        if len(instructions.splitlines()) > 500:
+            return ToolExecutionResult(
+                status="error",
+                result_text="스킬 본문은 500줄 이하여야 합니다.",
+                error_code="skill_instructions_too_many_lines",
+                arguments_summary=arguments_summary,
+            )
+
+        document = (
+            "---\n"
+            f"name: {skill_id}\n"
+            f"description: {json.dumps(description, ensure_ascii=False)}\n"
+            "---\n\n"
+            f"{instructions}\n"
+        )
+        try:
+            skill = skill_store.create(skill_id, document)
+        except SkillStoreError as exc:
+            return ToolExecutionResult(
+                status="error",
+                result_text=exc.message,
+                error_code=exc.code,
+                arguments_summary=arguments_summary,
+            )
+        except OSError:
+            return ToolExecutionResult(
+                status="error",
+                result_text="로컬 skill 저장소에 SKILL.md를 기록하지 못했습니다.",
+                error_code="skill_write_failed",
+                arguments_summary=arguments_summary,
+            )
+
+        return ToolExecutionResult(
+            result_text=f"'{skill.id}' 스킬을 생성하고 현재 agent에 즉시 활성화했습니다.",
+            observation_text=f"새 스킬 '{skill.id}'이 생성되어 다음 agent 판단부터 사용할 수 있습니다.",
+            result_payload={
+                "id": skill.id,
+                "name": skill.name,
+                "description": skill.description,
+                "source": skill.source,
+                "editable": skill.editable,
+            },
+            arguments_summary=arguments_summary,
+        )
 
     find_timeout = max(100, settings.find_budget_ms)
     content_timeout = max(100, settings.content_search_budget_ms)
@@ -364,5 +450,27 @@ def build_tool_registry(runtime: PlaygroundRuntime) -> dict[str, ToolHandler]:
                 input_schema={"path": "공유 루트 기준 상대 폴더 경로"},
             ),
             run=refresh_content,
+        ),
+        "create_playground_skill": ToolHandler(
+            definition=ToolDefinition(
+                id="create_playground_skill",
+                display_name="Skill 생성",
+                description=(
+                    "검증된 SKILL.md를 로컬 Playground 저장소에 만들고 현재 agent에 즉시 활성화합니다. "
+                    "skill-creator 스킬을 선택했을 때 자동으로 사용할 수 있습니다."
+                ),
+                category="skill",
+                permission="write",
+                execution_type="code",
+                enabled=True,
+                default_selected=False,
+                timeout_ms=1000,
+                input_schema={
+                    "skill_id": "소문자 영문·숫자·하이픈으로 된 고유 id(최대 64자)",
+                    "description": "이 스킬을 사용할 상황과 trigger를 설명하는 한 줄",
+                    "instructions": "frontmatter를 제외한 간결한 Markdown 실행 지침",
+                },
+            ),
+            run=create_playground_skill,
         ),
     }

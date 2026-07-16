@@ -90,6 +90,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `src/smb_finder/content_indexer.py` | SMB 파일 순회→추출→FTS5 적재 (관리/백그라운드) |
 | `src/smb_finder/content_search.py` | 내용 검색 오케스트레이터 (토큰화→검색, 시간 측정) |
 | `src/smb_finder/rag_search.py` | 로컬 PostgreSQL 질의 임베딩→pgvector chunk 검색 (단계별 시간 측정) |
+| `src/smb_finder/evaluation/` | 합성 golden dataset 로더, retrieval scorer, corpus fingerprint, 선택적 MLflow 기록 adapter |
 | `src/smb_finder/reports/` | 검사 보고서 업무 보조 tool — LLM 기반 ISCN 요약 + 로컬 후보 문서 검색/체크리스트 |
 | `src/smb_finder/tooling/` | 검색 도구 공통 Pydantic 계약·불변 catalog·timeout/동시 실행/감사 로그 executor |
 | `src/smb_finder/mcp_server.py` | 읽기 전용 MCP 검색 도구 등록과 HTTP transport 설정 |
@@ -97,11 +98,15 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `src/smb_finder/playground/` | 자체 챗봇 Playground — 선택한 tool만 호출하는 local LLM 기반 채팅 API |
 | `src/smb_finder/playground/studio_observer.py` | Playground 실행 메타데이터를 로컬 LangGraph Studio 관찰 graph로 보내는 비동기·fail-open observer |
 | `src/smb_finder/web/` | `/playground` 정적 UI — tool 선택, 채팅, Tool Lab 초안 화면 |
+| `scripts/start_local_stack.ps1` | Playground·MLflow·LangGraph Studio 통합 Start/Stop/Status 실행기 |
+| `scripts/run_mlflow_doc_eval.py` | 문서 RAG retrieval-only golden evaluation CLI |
+| `data/evaluation/` | 실제 환경과 무관한 합성 문서 챗봇 golden JSONL fixture |
 | `docs/PLAYGROUND_TOOLS.md` | `/playground` 등록 tool별 입력·동작·테스트 계약 |
 | `docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md` | 세포유전 LLM 보고서 프로세스 이관 가이드 |
 | `docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md` | 공통 ToolSpec을 중심으로 REST·Playground·MCP·LangChain을 연결하는 목표 아키텍처와 흐름도 |
 | `docs/MCP_IMPLEMENTATION_PLAN.md` | 검색 도구 2개부터 시작하는 MCP MVP의 작업 순서·테스트·롤백 계획 |
 | `docs/playground_agentic_plan.md` | Playground 제한형 agent loop와 debug 토글 구현 계획 |
+| `docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md` | MLflow 기반 문서 RAG 검색·답변·지연 평가 최종 개발 계획 |
 | `integrations/langflow/` | 노코드 외피 — Langflow 컴포넌트 + `folder_search` 워크플로우 자동 생성기 ([README](integrations/langflow/README.md)) |
 | `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
 
@@ -130,7 +135,8 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 - local LLM 확인: `POST /api/playground/llm-status`
 
 기본 tool은 `find_folder`, `search_content`, `search_rag_chunks`, `cytogenetics_karyotype_summary`,
-`cytogenetics_report`, `ngs_report`, `refresh_content`다. UI는 `SMB 직접 접근`, `DB 접근`, `보고서 관련` 세 분류만
+`cytogenetics_report`, `ngs_report`, `refresh_content`, `create_playground_skill`이다. UI는 `SMB 직접 접근`, `DB 접근`,
+`보고서 관련`, `Skill 관리` 분류만
 먼저 표시하고, 분류를 클릭하면 내부 tool 선택지가 열린다.
 
 채팅 입력창 아래 `Skills` 버튼에서는 실제 agent와 같은 `<skill-id>/SKILL.md` 형식의 스킬을 선택·조회·추가·수정·삭제한다.
@@ -142,15 +148,25 @@ frontmatter와 본문 지침은 채팅 요청의 agent system prompt에 실제�
 기본 제공 skill은 다음과 같다.
 
 - `tools`, `skills`: `/tools`, `/skills` slash command 사용법과 목록 출력
+- `skill-creator`: 대화로 실제 `<skill-id>/SKILL.md`를 생성하고 같은 요청의 다음 agent 판단부터 즉시 적용
 - `rag-grounded-answer`: PostgreSQL vector chunk 근거를 먼저 찾고 문서 위치와 함께 답변
 - `smb-navigation`: 폴더명 검색과 파일 본문 검색 중 가장 작은 tool을 선택
 - `report-workflow`: 핵형·세포유전·NGS 요청을 알맞은 보고서 tool로 라우팅
 - `latency-first`: 불필요한 재호출을 줄이고 시간 예산 안에서 짧게 응답
 
+새 스킬을 대화로 만들려면 아래 `Skills` 버튼에서 `skill-creator`를 선택하고, 예를 들어
+`합성 프로젝트 회의록을 세 줄로 요약하는 스킬을 만들어줘`라고 입력한다. agent가 로컬
+`create_playground_skill` tool을 호출하면 검증된 SKILL.md가 `PLAYGROUND_SKILLS_DIR`에 저장되고, 응답 직후 UI 선택 목록과
+현재 대화에 함께 활성화된다. 생성 tool은 `skill-creator`가 활성화되면 별도 tool 체크 없이 agent에 자동 연결된다.
+
 `search_rag_chunks`는 `rag_db_local_20260713.document_chunks`를 cosine 유사도로 검색한다. DB에 저장된
 `nomic-embed-text-v2-moe`와 동일한 768차원 모델 endpoint가 필요하며, 질의에는 모델 권장
 `search_query: ` prefix를 자동으로 붙인다. 연결은 `.env`의 `RAG_DB_*`, `RAG_EMBEDDING_*`로 바꿀 수 있다.
 찾은 chunk는 agent observation으로 전달되고 선택한 LLM이 근거 기반 최종 답변을 작성한다.
+`search_rag_chunks` tool과 `rag-grounded-answer` skill만 선택한 문서 챗봇 요청은 결정용 LLM 호출을 생략하는
+RAG fast path로 실행된다. 검색 성공 시 근거 합성 LLM을 1회만 호출하고, 검색 오류 또는 무결과이면 추가 LLM 호출 없이
+즉시 상태를 반환한다. Playground의 `문서 근거` 영역에서는 실제 검색 결과의 파일명, 섹션/위치, 유사도와
+embedding/DB 지연을 접어서 확인할 수 있다.
 보고서 tool은 문서를 자동 확정하지 않고, 로컬 내용 인덱스에서 관련 템플릿 후보를 찾은 뒤
 작성 체크리스트와 다음 행동을 제시한다. 결과 trace에는 구조화 payload가 포함되어 UI가 후보 문서와
 체크리스트를 별도 블록으로 표시한다.
@@ -203,8 +219,72 @@ LANGSMITH_TRACING=false
 Studio에서 `playground_observer` graph를 선택하면 Playground 응답 하단의 요청 ID와 같은 run을 찾을 수 있다.
 로컬 Agent Server의 in-memory run은 개발 서버 재시작 시 사라진다. LangSmith tracing은 같은 `.env.studio`에서
 표준 환경변수로 선택적으로 켤 수 있으며, 별도 안전 검사나 `synthetic_trace` 프로필 분기는 없다.
+OpenAI 호출 trace에는 Playground `request_id`와 호출 목적(`purpose`)이 metadata로 기록된다. RAG fast path의 합성 호출은
+`purpose=rag_grounded_synthesis`로 구분되며, `LANGSMITH_HIDE_INPUTS=false`, `LANGSMITH_HIDE_OUTPUTS=false`이면 같은
+request ID로 입력 messages와 응답/토큰 사용량을 함께 조회할 수 있다.
+
+## MLflow 문서 챗봇 평가
+
+MLflow는 Playground 요청 경로와 분리된 선택적 오프라인 평가 계층이다. Phase 1에서는 15개 합성 golden case로
+`RagVectorSearcher`를 직접 실행해 Hit@K, Recall@K, MRR, no-answer 정확도와 embedding/DB/retrieval p50·p95를 계산한다.
+평가 결과는 `automation-smb-doc-chatbot` experiment의 metric, parameter, JSON artifact로 기록하며 MLflow가 없어도
+Playground 서비스 import와 채팅 동작에는 영향이 없다.
+
+```powershell
+# 실행 중인 로컬 스택을 멈춘 상태에서 최초 1회
+uv sync --native-tls --extra dev --extra evaluation
+
+# MLflow UI 시작
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
+  -Action Start -Profile Mlflow
+
+# retrieval-only baseline 기록
+uv run --no-sync python .\scripts\run_mlflow_doc_eval.py `
+  --mode retrieval `
+  --dataset .\data\evaluation\document_chatbot_golden.jsonl `
+  --top-k 5
+
+# MLflow 없이 로컬 지표만 확인
+uv run --no-sync python .\scripts\run_mlflow_doc_eval.py --top-k 5 --no-mlflow
+```
+
+결과 UI는 `http://127.0.0.1:5000`에서 확인한다. golden fixture의 문서 key는 전체 내부 경로가 아닌 파일명 기반이며,
+평가 artifact에는 chunk 본문을 포함하지 않는다. 자세한 단계별 계획과 baseline은
+[`docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md`](docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md)를 참고한다.
 
 ## 설치 · 실행
+
+### 통합 로컬 스택
+
+Playground, MLflow, LangGraph Studio는 별도 프로세스이지만 루트에서 한 스크립트로 필요한 조합을 실행할 수 있다.
+`Studio` 프로필은 HTTP tool 호출에 필요한 Playground도 함께 시작한다.
+
+```powershell
+cd C:\Users\AI_team\Desktop\project\automation_smb
+
+# 실제 실행 전 명령 확인
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
+  -Action Plan -Profile All
+
+# Playground(:8010) + MLflow(:5000) + LangGraph Studio(:2024)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
+  -Action Start -Profile All
+
+# 상태 확인과 종료
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
+  -Action Status -Profile All
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
+  -Action Stop -Profile All
+```
+
+지원 프로필은 `Playground`, `Mlflow`, `Studio`, `All`이다. 기본은 숨김 프로세스로 실행하고
+`.cache/local-stack/logs`에 stdout/stderr를 저장한다. 서비스별 콘솔 창이 필요하면 `-Visible`, Playground의
+reload를 끄려면 `-NoReload`를 추가한다. MLflow는 현재 선택 의존성이므로 첫 실행 시 `uv run --with`가
+`mlflow[genai]>=3.9,<4`를 로컬 uv cache에 준비한다.
+
+이 스크립트는 사용 환경마다 실행 명령이 다른 local LLM, embedding server, PostgreSQL은 시작하지 않는다.
+문서 RAG를 쓰려면 해당 endpoint와 DB를 별도로 준비해야 한다. 기존
+`integrations/langgraph/start_local_studio.ps1`는 그대로 유지하며 통합 스크립트가 내부에서 재사용한다.
 
 ```powershell
 # uv.lock 기준으로 Python 3.11 가상환경과 개발 의존성을 한 번에 맞춘다.

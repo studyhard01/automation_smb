@@ -6,6 +6,7 @@ const state = {
   sessionId: "",
   history: [],
   openaiApiKey: "",
+  chatPending: false,
 };
 
 const toolCategories = [
@@ -24,12 +25,18 @@ const toolCategories = [
     name: "보고서 관련",
     description: "핵형 분석과 보고서 작성용 도구를 모아 봅니다.",
   },
+  {
+    id: "skill",
+    name: "Skill 관리",
+    description: "실제 SKILL.md를 만들고 현재 agent에 적용합니다.",
+  },
 ];
 
 const toolList = document.querySelector("#toolList");
 const messages = document.querySelector("#messages");
 const chatForm = document.querySelector("#chatForm");
 const messageInput = document.querySelector("#messageInput");
+const chatSubmitButton = chatForm.querySelector('button[type="submit"]');
 const providerInput = document.querySelector("#provider");
 const baseUrlInput = document.querySelector("#baseUrl");
 const modelInput = document.querySelector("#model");
@@ -249,6 +256,10 @@ function addMessage(role, text, options = {}) {
       answerSection.appendChild(skillLine);
     }
     el.appendChild(answerSection);
+    const ragTraces = (options.traces || []).filter((trace) => trace.tool_id === "search_rag_chunks");
+    if (ragTraces.length) {
+      el.appendChild(renderMessageSection("문서 근거", renderRagEvidence(ragTraces)));
+    }
     if (options.traces?.length) {
       el.appendChild(renderMessageSection("도구 실행 결과", renderToolTrace(options.traces)));
     }
@@ -333,6 +344,113 @@ function renderRunMetrics(elapsedMs, overBudget) {
   return box;
 }
 
+function formatMilliseconds(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(1)}ms` : "-";
+}
+
+function ragFileLabel(hit) {
+  const fileName = String(hit?.file_name || "").trim();
+  if (fileName) return fileName;
+  const filePath = String(hit?.file_path || "").trim();
+  if (filePath) return filePath.split(/[\\/]/).filter(Boolean).pop() || "문서";
+  return hit?.document_id ? `문서 #${hit.document_id}` : "문서";
+}
+
+function ragLocationLabel(hit) {
+  const explicit = [hit?.section_path, hit?.location_label, hit?.sheet_name, hit?.location_type]
+    .map((value) => String(value || "").trim())
+    .find(Boolean);
+  if (explicit) return explicit;
+  if (hit?.page_start != null) {
+    return hit.page_end != null && hit.page_end !== hit.page_start
+      ? `${hit.page_start}-${hit.page_end}페이지`
+      : `${hit.page_start}페이지`;
+  }
+  if (hit?.slide_start != null) {
+    return hit.slide_end != null && hit.slide_end !== hit.slide_start
+      ? `${hit.slide_start}-${hit.slide_end}슬라이드`
+      : `${hit.slide_start}슬라이드`;
+  }
+  return "위치 정보 없음";
+}
+
+function renderRagEvidence(traces) {
+  const box = document.createElement("div");
+  box.className = "rag-evidence";
+
+  for (const trace of traces) {
+    const run = document.createElement("div");
+    run.className = "rag-evidence-run";
+    const payload = trace.result_payload && typeof trace.result_payload === "object" ? trace.result_payload : {};
+
+    if (trace.status !== "ok" || trace.error_code) {
+      run.classList.add("error");
+      const title = document.createElement("strong");
+      title.textContent = `검색 오류${trace.error_code ? ` · ${trace.error_code}` : ""}`;
+      const detail = document.createElement("p");
+      detail.textContent = String(trace.result_text || "문서 검색 도구를 실행하지 못했습니다.");
+      run.append(title, detail);
+      box.appendChild(run);
+      continue;
+    }
+
+    const hits = Array.isArray(payload.hits) ? payload.hits : [];
+    const metrics = document.createElement("div");
+    metrics.className = "rag-evidence-metrics";
+    metrics.textContent = `근거 ${hits.length}건 · 임베딩 ${formatMilliseconds(payload.embedding_ms)} · DB ${formatMilliseconds(
+      payload.db_ms
+    )}`;
+    run.appendChild(metrics);
+
+    if (!hits.length) {
+      run.classList.add("empty");
+      const empty = document.createElement("p");
+      empty.textContent = "검색은 정상 완료됐지만 일치하는 문서 chunk가 없습니다.";
+      run.appendChild(empty);
+      box.appendChild(run);
+      continue;
+    }
+
+    const list = document.createElement("div");
+    list.className = "rag-evidence-list";
+    hits.forEach((hit, index) => {
+      const card = document.createElement("article");
+      card.className = "rag-evidence-card";
+
+      const header = document.createElement("div");
+      header.className = "rag-evidence-header";
+      const file = document.createElement("strong");
+      file.textContent = `${index + 1}. ${ragFileLabel(hit)}`;
+      const similarity = document.createElement("span");
+      const score = Number(hit?.similarity);
+      similarity.textContent = Number.isFinite(score) ? `유사도 ${score.toFixed(3)}` : "유사도 -";
+      header.append(file, similarity);
+
+      const location = document.createElement("div");
+      location.className = "rag-evidence-location";
+      location.textContent = ragLocationLabel(hit);
+      card.append(header, location);
+
+      const content = String(hit?.content || "").trim();
+      if (content) {
+        const details = document.createElement("details");
+        details.className = "rag-evidence-content";
+        const summary = document.createElement("summary");
+        summary.textContent = "근거 내용 보기";
+        const text = document.createElement("p");
+        text.textContent = limitText(content, 1600);
+        details.append(summary, text);
+        card.appendChild(details);
+      }
+      list.appendChild(card);
+    });
+    run.appendChild(list);
+    box.appendChild(run);
+  }
+  return box;
+}
+
 function renderToolTrace(traces) {
   const traceBox = document.createElement("div");
   traceBox.className = "trace";
@@ -343,7 +461,15 @@ function renderToolTrace(traces) {
       trace.elapsed_ms
     )}ms`;
     const pre = document.createElement("pre");
-    pre.textContent = trace.result_text || (trace.result_payload ? JSON.stringify(trace.result_payload, null, 2) : "");
+    if (trace.tool_id === "search_rag_chunks" && trace.status === "ok" && !trace.error_code) {
+      const payload = trace.result_payload || {};
+      const resultCount = Array.isArray(payload.hits) ? payload.hits.length : Number(payload.result_count || 0);
+      pre.textContent = `문서 근거 ${resultCount}건 · 임베딩 ${formatMilliseconds(payload.embedding_ms)} · DB ${formatMilliseconds(
+        payload.db_ms
+      )}`;
+    } else {
+      pre.textContent = trace.result_text || (trace.result_payload ? JSON.stringify(trace.result_payload, null, 2) : "");
+    }
     item.appendChild(pre);
     traceBox.appendChild(item);
   }
@@ -472,10 +598,27 @@ async function loadTools() {
 }
 
 function responseErrorMessage(data, fallback) {
-  if (typeof data?.detail === "object" && data.detail) {
-    return data.detail.message || data.detail.code || fallback;
+  const normalizeDetail = (value) => {
+    if (value == null || value === "") return "";
+    if (["string", "number", "boolean"].includes(typeof value)) return String(value);
+    if (Array.isArray(value)) return value.map(normalizeDetail).filter(Boolean).join("; ");
+    if (typeof value === "object") {
+      const location = Array.isArray(value.loc) ? value.loc.filter((item) => item !== "body").join(".") : "";
+      const message = normalizeDetail(value.message || value.msg || value.code || value.error || value.detail);
+      if (message) return location ? `${location}: ${message}` : message;
+      try {
+        return limitText(JSON.stringify(value), 500);
+      } catch (_error) {
+        return "";
+      }
+    }
+    return String(value);
+  };
+  for (const value of [data?.message, data?.detail, data?.error_code, data?.error]) {
+    const message = normalizeDetail(value);
+    if (message) return message;
   }
-  return data?.message || data?.detail || data?.error_code || fallback;
+  return fallback;
 }
 
 function renderActiveSkills() {
@@ -661,11 +804,20 @@ async function sendChat(message) {
   });
   const data = await response.json();
   if (!response.ok) {
-    const errorMessage = data.message || data.detail || data.error_code || `HTTP ${response.status}`;
+    const errorMessage = responseErrorMessage(data, `HTTP ${response.status}`);
     addMessage("assistant", `요청 실패: ${errorMessage}`, { error: true, requestId: data.request_id });
     return;
   }
   state.sessionId = data.session_id || state.sessionId;
+  const createdSkillIds = (data.tool_calls || [])
+    .filter((trace) => trace.tool_id === "create_playground_skill" && trace.status === "ok")
+    .map((trace) => String(trace.result_payload?.id || "").trim())
+    .filter(Boolean);
+  if (createdSkillIds.length) {
+    createdSkillIds.forEach((skillId) => state.selectedSkillIds.add(skillId));
+    rememberSelectedSkills();
+    await loadSkills();
+  }
   addMessage("assistant", data.assistant_message, {
     structured: true,
     traces: data.tool_calls,
@@ -685,8 +837,13 @@ async function sendChat(message) {
 
 chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (state.chatPending) return;
   const message = messageInput.value.trim();
   if (!message) return;
+  state.chatPending = true;
+  chatForm.setAttribute("aria-busy", "true");
+  chatSubmitButton.disabled = true;
+  chatSubmitButton.textContent = "전송 중";
   messageInput.value = "";
   addMessage("user", message);
   const pending = addMessage("assistant", "처리 중...");
@@ -696,6 +853,10 @@ chatForm.addEventListener("submit", async (event) => {
     addMessage("assistant", `요청 중 오류가 발생했습니다: ${error.message}`, { error: true });
   } finally {
     pending.remove();
+    state.chatPending = false;
+    chatForm.removeAttribute("aria-busy");
+    chatSubmitButton.disabled = false;
+    chatSubmitButton.textContent = "전송";
   }
 });
 
