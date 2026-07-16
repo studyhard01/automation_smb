@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from statistics import mean
 from typing import Any
 
-from .models import AggregateMetrics, CaseEvaluationResult, GoldenCase, RetrievedChunk
+from .models import (
+    AggregateMetrics,
+    CaseEvaluationResult,
+    EndToEndAggregateMetrics,
+    EndToEndCaseEvaluationResult,
+    GoldenCase,
+    RetrievedChunk,
+)
 
 
 def _normalize_key(value: str) -> str:
@@ -17,11 +24,17 @@ def _normalize_key(value: str) -> str:
 def _safe_document_key(hit: Any) -> str:
     """내부 전체 경로 대신 artifact에 기록 가능한 파일명 key만 반환한다."""
 
-    file_name = str(getattr(hit, "file_name", "") or "").strip()
+    file_name = str(_hit_value(hit, "file_name", "") or "").strip()
     if file_name:
         return file_name
-    file_path = str(getattr(hit, "file_path", "") or "").replace("\\", "/").rstrip("/")
+    file_path = str(_hit_value(hit, "file_path", "") or "").replace("\\", "/").rstrip("/")
     return file_path.rsplit("/", maxsplit=1)[-1]
+
+
+def _hit_value(hit: Any, key: str, default: Any) -> Any:
+    if isinstance(hit, Mapping):
+        return hit.get(key, default)
+    return getattr(hit, key, default)
 
 
 def build_retrieved_chunks(hits: Iterable[Any]) -> list[RetrievedChunk]:
@@ -30,13 +43,13 @@ def build_retrieved_chunks(hits: Iterable[Any]) -> list[RetrievedChunk]:
     results: list[RetrievedChunk] = []
     for rank, hit in enumerate(hits, start=1):
         document_key = _safe_document_key(hit)
-        chunk_index = int(getattr(hit, "chunk_index", 0))
+        chunk_index = int(_hit_value(hit, "chunk_index", 0))
         results.append(
             RetrievedChunk(
                 document_key=document_key,
                 chunk_key=f"{document_key}#{chunk_index}",
                 rank=rank,
-                similarity=float(getattr(hit, "similarity", 0.0)),
+                similarity=float(_hit_value(hit, "similarity", 0.0)),
             )
         )
     return results
@@ -129,4 +142,35 @@ def aggregate_case_results(results: list[CaseEvaluationResult]) -> AggregateMetr
         db_p95_ms=_percentile((result.db_ms for result in successful), 0.95),
         retrieval_p50_ms=_percentile((result.elapsed_ms for result in successful), 0.50),
         retrieval_p95_ms=_percentile((result.elapsed_ms for result in successful), 0.95),
+    )
+
+
+def aggregate_end_to_end_results(results: list[EndToEndCaseEvaluationResult]) -> EndToEndAggregateMetrics:
+    """실제 agent 응답 case를 전체 흐름 metric으로 집계한다."""
+
+    successful = [result for result in results if result.status == "ok"]
+    no_answer = [result.no_answer_correct for result in successful if result.no_answer_correct is not None]
+    facts = [result.fact_coverage for result in successful if result.fact_coverage is not None]
+    citations = [result.citation_match for result in successful if result.citation_match is not None]
+    total_count = len(results)
+    error_count = total_count - len(successful)
+    return EndToEndAggregateMetrics(
+        total_cases=total_count,
+        successful_cases=len(successful),
+        error_cases=error_count,
+        success_rate=len(successful) / total_count if total_count else 0.0,
+        error_rate=error_count / total_count if total_count else 0.0,
+        hit_at_k=_average(result.hit_at_k for result in successful),
+        recall_at_k=_average(result.recall_at_k for result in successful),
+        mrr=_average(result.reciprocal_rank for result in successful),
+        tool_exact_match=_average(result.tool_exact_match for result in results),
+        no_answer_accuracy=_average(no_answer) if no_answer else None,
+        fact_coverage=_average(facts) if facts else None,
+        citation_match=_average(citations) if citations else None,
+        latency_p50_ms=_percentile((result.elapsed_ms for result in successful), 0.50),
+        latency_p95_ms=_percentile((result.elapsed_ms for result in successful), 0.95),
+        over_budget_rate=(sum(result.over_budget for result in results) / total_count if total_count else 0.0),
+        avg_llm_calls=_average(float(result.llm_calls) for result in successful),
+        avg_total_tokens=_average(float(result.total_tokens) for result in successful),
+        total_tokens=sum(result.total_tokens for result in results),
     )

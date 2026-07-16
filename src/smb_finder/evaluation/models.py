@@ -145,3 +145,81 @@ class EvaluationReport(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     cases: list[CaseEvaluationResult]
     aggregate: AggregateMetrics
+
+
+class EndToEndCaseEvaluationResult(BaseModel):
+    """한 case의 실제 agent/tool/답변 전체 흐름 평가 결과."""
+
+    case_id: str
+    status: Literal["ok", "error"]
+    question: str
+    answer: str = ""
+    expected_tool_calls: list[str] = Field(default_factory=list)
+    actual_tool_calls: list[str] = Field(default_factory=list)
+    retrieved: list[RetrievedChunk] = Field(default_factory=list)
+    hit_at_k: float | None = None
+    recall_at_k: float | None = None
+    reciprocal_rank: float | None = None
+    tool_exact_match: float = 0.0
+    no_answer_correct: float | None = None
+    fact_coverage: float | None = None
+    citation_match: float | None = None
+    agent_steps: int = 0
+    llm_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    elapsed_ms: float = 0.0
+    over_budget: bool = False
+    error_code: str = ""
+    error_message: str = ""
+
+
+class EndToEndAggregateMetrics(BaseModel):
+    """MLflow에 기록할 실제 문서 챗봇 전체 흐름 집계값."""
+
+    total_cases: int
+    successful_cases: int
+    error_cases: int
+    success_rate: float = 0.0
+    error_rate: float = 0.0
+    hit_at_k: float = 0.0
+    recall_at_k: float = 0.0
+    mrr: float = 0.0
+    tool_exact_match: float = 0.0
+    no_answer_accuracy: float | None = None
+    fact_coverage: float | None = None
+    citation_match: float | None = None
+    latency_p50_ms: float = 0.0
+    latency_p95_ms: float = 0.0
+    over_budget_rate: float = 0.0
+    avg_llm_calls: float = 0.0
+    avg_total_tokens: float = 0.0
+    total_tokens: int = 0
+
+    def as_mlflow_metrics(self) -> dict[str, float]:
+        """None을 제외하고 MLflow metric 숫자로 변환한다."""
+
+        values = self.model_dump()
+        return {key: float(value) for key, value in values.items() if value is not None}
+
+
+class EndToEndEvaluationReport(BaseModel):
+    """agent/tool/검색/생성을 모두 포함한 Phase 2 evaluation run 결과."""
+
+    mode: Literal["end-to-end"] = "end-to-end"
+    dataset_name: str
+    dataset_version: str
+    dataset_fingerprint: str
+    corpus: CorpusSnapshot
+    provider: str
+    model: str
+    skill_id: str
+    skill_fingerprint: str = ""
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    cases: list[EndToEndCaseEvaluationResult]
+    aggregate: EndToEndAggregateMetrics
+    trace_errors: list[str] = Field(default_factory=list)
+
+
+EvaluationReportLike = EvaluationReport | EndToEndEvaluationReport

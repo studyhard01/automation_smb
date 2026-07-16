@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -66,6 +68,37 @@ class FakeConnect:
     def __call__(self, **kwargs) -> FakeConnection:
         self.kwargs = kwargs
         return FakeConnection(self.cursor)
+
+
+class RecordingSpan:
+    def __init__(self, record: dict[str, Any]) -> None:
+        self.record = record
+
+    def set_attributes(self, attributes: dict[str, Any]) -> None:
+        self.record.setdefault("attributes", {}).update(attributes)
+
+    def set_outputs(self, outputs: Any) -> None:
+        self.record["outputs"] = outputs
+
+
+class RecordingObserver:
+    include_content = False
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    @contextmanager
+    def span(
+        self,
+        *,
+        name: str,
+        span_type: str,
+        inputs: Any | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> Iterator[RecordingSpan]:
+        record = {"name": name, "span_type": span_type, "inputs": inputs, "attributes": attributes or {}}
+        self.records.append(record)
+        yield RecordingSpan(record)
 
 
 def _settings(**kwargs) -> Settings:
@@ -142,6 +175,38 @@ def test_vector_search_rejects_embedding_dimension_mismatch():
 
     assert exc.value.code == "embedding_dimension_mismatch"
     assert "기대 3" in exc.value.message
+
+
+def test_vector_search_emits_retriever_embedding_and_db_spans_without_content():
+    rows = [
+        {
+            "chunk_id": 10,
+            "document_id": 2,
+            "chunk_index": 4,
+            "content": "trace에 기본 노출하지 않는 합성 본문",
+            "similarity": 0.8,
+            "file_name": "alpha.md",
+            "file_path": "C:/hidden/alpha.md",
+        }
+    ]
+    observer = RecordingObserver()
+    searcher = RagVectorSearcher(
+        _settings(),
+        embedding_client=FakeEmbeddingClient([0.1, 0.2, 0.3]),
+        connect=FakeConnect(rows),
+        trace_observer=observer,
+    )
+
+    searcher.search("Alpha 질문")
+
+    assert [record["name"] for record in observer.records] == [
+        "rag.vector_search",
+        "query_embedding",
+        "rag.pgvector_query",
+    ]
+    retriever = observer.records[0]
+    assert "query" not in retriever["inputs"]
+    assert retriever["outputs"] == [{"doc_uri": "alpha.md", "chunk_id": 10, "similarity": 0.8}]
 
 
 def test_openai_compatible_client_adds_nomic_search_query_prefix(monkeypatch):

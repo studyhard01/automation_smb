@@ -2,11 +2,15 @@
 
 from .datasets import load_golden_dataset
 from .document_chatbot import capture_corpus_snapshot, run_retrieval_evaluation
+from .end_to_end import run_end_to_end_evaluation
 from .models import (
     AggregateMetrics,
     CaseEvaluationResult,
     CorpusSnapshot,
     EvaluationReport,
+    EndToEndAggregateMetrics,
+    EndToEndCaseEvaluationResult,
+    EndToEndEvaluationReport,
     GoldenCase,
     GoldenDataset,
 )
@@ -16,9 +20,13 @@ __all__ = [
     "CaseEvaluationResult",
     "CorpusSnapshot",
     "EvaluationReport",
+    "EndToEndAggregateMetrics",
+    "EndToEndCaseEvaluationResult",
+    "EndToEndEvaluationReport",
     "GoldenCase",
     "GoldenDataset",
     "capture_corpus_snapshot",
     "load_golden_dataset",
     "run_retrieval_evaluation",
+    "run_end_to_end_evaluation",
 ]

@@ -14,6 +14,7 @@ import ipaddress
 import httpx
 
 from smb_finder.config import Settings
+from smb_finder.telemetry import NoopTraceObserver, TraceObserver
 
 from .models import (
     AgentDecision,
@@ -188,9 +189,15 @@ def _limit_text(value: str, limit: int) -> str:
 class PlaygroundAgent:
     """선택된 read tool만 사용하는 제한형 tool-use agent."""
 
-    def __init__(self, settings: Settings, skill_store: SkillStore | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        skill_store: SkillStore | None = None,
+        trace_observer: TraceObserver | None = None,
+    ):
         self.settings = settings
         self.skill_store = skill_store or SkillStore(settings.playground_skills_dir)
+        self.trace_observer = trace_observer or NoopTraceObserver()
 
     def _resolve_llm_connection(
         self,
@@ -347,7 +354,7 @@ class PlaygroundAgent:
             connection=connection,
             session_id=f"pg-direct-{uuid.uuid4()}",
         )
-        return handler.execute(arguments, context=context)
+        return self._execute_handler_traced(handler, arguments, context=context)
 
     def run(
         self,
@@ -696,7 +703,11 @@ class PlaygroundAgent:
                     )
                 )
                 try:
-                    result = handler.execute(planned_call.arguments, context=tool_context)
+                    result = self._execute_handler_traced(
+                        handler,
+                        planned_call.arguments,
+                        context=tool_context,
+                    )
                     status = result.status
                     result_text = result.result_text
                     result_payload = result.result_payload
@@ -839,7 +850,7 @@ class PlaygroundAgent:
         arguments = {"query": request.message, "limit": self.settings.rag_db_default_limit}
         trace_started = time.perf_counter()
         try:
-            result = handler.execute(arguments)
+            result = self._execute_handler_traced(handler, arguments)
         except Exception:  # noqa: BLE001 - 공개 응답에는 내부 예외 대신 안정된 코드만 반환한다.
             result = ToolExecutionResult(
                 status="error",
@@ -1366,6 +1377,58 @@ class PlaygroundAgent:
         safe = self._redact_text(json.dumps(arguments, ensure_ascii=False))
         return _limit_text(safe, 500)
 
+    def _execute_handler_traced(
+        self,
+        handler: ToolHandler,
+        arguments: dict[str, Any],
+        *,
+        context: ToolExecutionContext | None = None,
+    ) -> ToolExecutionResult:
+        """tool 실행을 공통 span으로 감싸되 서비스 기본 경로에는 의존성을 추가하지 않는다."""
+
+        trace_inputs: dict[str, Any] = {
+            "tool_id": handler.definition.id,
+            "argument_keys": sorted(arguments),
+        }
+        if "query" in arguments:
+            trace_inputs["query_length"] = len(str(arguments.get("query") or ""))
+        if "limit" in arguments:
+            trace_inputs["limit"] = arguments.get("limit")
+        if self.trace_observer.include_content:
+            trace_inputs["arguments"] = arguments
+
+        with self.trace_observer.span(
+            name=f"playground.tool.{handler.definition.id}",
+            span_type="TOOL",
+            inputs=trace_inputs,
+            attributes={"tool.id": handler.definition.id},
+        ) as span:
+            result = handler.execute(arguments, context=context)
+            result_count = 0
+            if isinstance(result.result_payload, dict):
+                raw_count = result.result_payload.get("result_count")
+                if isinstance(raw_count, int):
+                    result_count = raw_count
+                elif isinstance(result.result_payload.get("hits"), list):
+                    result_count = len(result.result_payload["hits"])
+            span.set_attributes(
+                {
+                    "tool.status": result.status,
+                    "tool.error_code": result.error_code,
+                    "tool.result_count": result_count,
+                }
+            )
+            outputs: dict[str, Any] = {
+                "status": result.status,
+                "error_code": result.error_code,
+                "result_count": result_count,
+            }
+            if self.trace_observer.include_content:
+                outputs["result_text"] = result.result_text
+                outputs["result_payload"] = result.result_payload
+            span.set_outputs(outputs)
+            return result
+
     def _tool_call_key(self, planned_call: PlannedToolCall) -> str:
         arguments = json.dumps(planned_call.arguments, ensure_ascii=False, sort_keys=True, default=str)
         return f"{planned_call.tool_id}:{arguments}"
@@ -1414,19 +1477,49 @@ class PlaygroundAgent:
                 return response.json()
 
         try:
-            response_json = trace_openai_chat_completion(
-                settings=self.settings,
-                provider=provider,
-                model=model,
-                purpose=purpose,
-                session_id=session_id,
-                message_count=len(request_messages),
-                messages=request_messages,
-                call=post_json,
-                usage_metadata=lambda body: self._langsmith_usage_metadata(body, provider, model),
-                request_id=request_id,
-            )
-            usage = self._token_usage_from_response(response_json, provider, model)
+            trace_inputs: dict[str, Any] = {
+                "provider": provider,
+                "model": model,
+                "purpose": purpose,
+                "message_count": len(request_messages),
+            }
+            if self.trace_observer.include_content:
+                trace_inputs["messages"] = request_messages
+            with self.trace_observer.span(
+                name="playground.llm_generation",
+                span_type="LLM",
+                inputs=trace_inputs,
+                attributes={
+                    "llm.provider": provider,
+                    "llm.model": model,
+                    "llm.purpose": purpose,
+                },
+            ) as span:
+                response_json = trace_openai_chat_completion(
+                    settings=self.settings,
+                    provider=provider,
+                    model=model,
+                    purpose=purpose,
+                    session_id=session_id,
+                    message_count=len(request_messages),
+                    messages=request_messages,
+                    call=post_json,
+                    usage_metadata=lambda body: self._langsmith_usage_metadata(body, provider, model),
+                    request_id=request_id,
+                )
+                usage = self._token_usage_from_response(response_json, provider, model)
+                usage_output = usage.model_dump() if usage is not None else {}
+                span.set_attributes(
+                    {
+                        "llm.prompt_tokens": usage.prompt_tokens if usage is not None else 0,
+                        "llm.completion_tokens": usage.completion_tokens if usage is not None else 0,
+                        "llm.total_tokens": usage.total_tokens if usage is not None else 0,
+                    }
+                )
+                span_outputs: dict[str, Any] = {"usage": usage_output}
+                if self.trace_observer.include_content:
+                    span_outputs["response"] = response_json
+                span.set_outputs(span_outputs)
             if usage is not None and usage_calls is not None:
                 usage_calls.append(usage)
             raw_value = response_json["choices"][0]["message"].get("content")

@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel, Field
 
 from .config import Settings
+from .telemetry import NoopTraceObserver, TraceObserver
 
 
 class RagChunkHit(BaseModel):
@@ -149,12 +150,57 @@ class RagVectorSearcher:
         *,
         embedding_client: EmbeddingClient | None = None,
         connect: Callable[..., Any] | None = None,
+        trace_observer: TraceObserver | None = None,
     ) -> None:
         self._settings = settings
         self._embedding_client = embedding_client or OpenAICompatibleEmbeddingClient(settings)
         self._connect = connect or psycopg.connect
+        self._trace_observer = trace_observer or NoopTraceObserver()
 
     def search(self, query: str, limit: int | None = None) -> RagSearchResponse:
+        """벡터 검색 전체를 retriever span으로 관측하고 민감한 본문은 기본적으로 제외한다."""
+
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            raise RagSearchError("empty_query", "DB에서 검색할 질문을 입력하세요.")
+        result_limit = max(1, min(int(limit or self._settings.rag_db_default_limit), self._settings.rag_db_max_limit))
+        trace_inputs: dict[str, Any] = {
+            "query_length": len(normalized_query),
+            "top_k": result_limit,
+            "embedding_model": self._settings.rag_embedding_model,
+        }
+        if self._trace_observer.include_content:
+            trace_inputs["query"] = normalized_query
+
+        with self._trace_observer.span(
+            name="rag.vector_search",
+            span_type="RETRIEVER",
+            inputs=trace_inputs,
+            attributes={"retriever.top_k": result_limit},
+        ) as span:
+            response = self._search_impl(normalized_query, result_limit)
+            documents = [
+                {
+                    "doc_uri": hit.file_name,
+                    "chunk_id": hit.chunk_id,
+                    "similarity": hit.similarity,
+                    **({"page_content": hit.content} if self._trace_observer.include_content else {}),
+                }
+                for hit in response.hits
+            ]
+            span.set_attributes(
+                {
+                    "retriever.result_count": response.result_count,
+                    "retriever.embedding_ms": response.embedding_ms,
+                    "retriever.db_ms": response.db_ms,
+                    "retriever.elapsed_ms": response.elapsed_ms,
+                    "retriever.over_budget": response.over_budget,
+                }
+            )
+            span.set_outputs(documents)
+            return response
+
+    def _search_impl(self, query: str, limit: int | None = None) -> RagSearchResponse:
         """자연어 질의와 가까운 chunk를 반환하고 단계별 소요 시간을 기록한다."""
 
         started = time.perf_counter()
@@ -164,11 +210,22 @@ class RagVectorSearcher:
         result_limit = max(1, min(int(limit or self._settings.rag_db_default_limit), self._settings.rag_db_max_limit))
 
         embedding_started = time.perf_counter()
-        try:
-            embedding = self._embedding_client.embed_query(normalized_query)
-        except RagSearchError as exc:
-            exc.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-            raise
+        embedding_inputs: dict[str, Any] = {"query_length": len(normalized_query)}
+        if self._trace_observer.include_content:
+            embedding_inputs["query"] = normalized_query
+        with self._trace_observer.span(
+            name="query_embedding",
+            span_type="EMBEDDING",
+            inputs=embedding_inputs,
+            attributes={"embedding.model": self._settings.rag_embedding_model},
+        ) as embedding_span:
+            try:
+                embedding = self._embedding_client.embed_query(normalized_query)
+            except RagSearchError as exc:
+                exc.elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                raise
+            embedding_span.set_attributes({"embedding.dimensions": len(embedding)})
+            embedding_span.set_outputs({"dimensions": len(embedding)})
         if len(embedding) != self._settings.rag_embedding_dimensions:
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
             raise RagSearchError(
@@ -190,32 +247,40 @@ class RagVectorSearcher:
         vector_literal = "[" + ",".join(format(value, ".9g") for value in embedding) + "]"
 
         db_started = time.perf_counter()
-        try:
-            connect_timeout_sec = max(1, math.ceil(self._settings.rag_db_connect_timeout_ms / 1000))
-            options = (
-                "-c default_transaction_read_only=on "
-                f"-c statement_timeout={self._settings.rag_db_query_timeout_ms}"
-            )
-            with self._connect(
-                host=self._settings.rag_db_host,
-                port=self._settings.rag_db_port,
-                dbname=self._settings.rag_db_name,
-                user=self._settings.rag_db_user,
-                password=self._settings.rag_db_password,
-                connect_timeout=connect_timeout_sec,
-                application_name="automation_smb_rag_search",
-                options=options,
-            ) as connection:
-                with connection.cursor(row_factory=dict_row) as cursor:
-                    cursor.execute(self._SEARCH_SQL, (vector_literal, vector_literal, result_limit))
-                    rows = cursor.fetchall()
-        except Exception as exc:
-            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-            raise RagSearchError(
-                "rag_db_unavailable",
-                "로컬 RAG DB 벡터 검색에 실패했습니다. PostgreSQL 실행 상태와 RAG_DB_* 설정을 확인하세요.",
-                elapsed_ms,
-            ) from exc
+        with self._trace_observer.span(
+            name="rag.pgvector_query",
+            span_type="TASK",
+            inputs={"top_k": result_limit},
+            attributes={"db.system": "postgresql", "db.operation": "vector_search"},
+        ) as db_span:
+            try:
+                connect_timeout_sec = max(1, math.ceil(self._settings.rag_db_connect_timeout_ms / 1000))
+                options = (
+                    "-c default_transaction_read_only=on "
+                    f"-c statement_timeout={self._settings.rag_db_query_timeout_ms}"
+                )
+                with self._connect(
+                    host=self._settings.rag_db_host,
+                    port=self._settings.rag_db_port,
+                    dbname=self._settings.rag_db_name,
+                    user=self._settings.rag_db_user,
+                    password=self._settings.rag_db_password,
+                    connect_timeout=connect_timeout_sec,
+                    application_name="automation_smb_rag_search",
+                    options=options,
+                ) as connection:
+                    with connection.cursor(row_factory=dict_row) as cursor:
+                        cursor.execute(self._SEARCH_SQL, (vector_literal, vector_literal, result_limit))
+                        rows = cursor.fetchall()
+                db_span.set_attributes({"db.result_count": len(rows)})
+                db_span.set_outputs({"result_count": len(rows)})
+            except Exception as exc:
+                elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+                raise RagSearchError(
+                    "rag_db_unavailable",
+                    "로컬 RAG DB 벡터 검색에 실패했습니다. PostgreSQL 실행 상태와 RAG_DB_* 설정을 확인하세요.",
+                    elapsed_ms,
+                ) from exc
         db_ms = round((time.perf_counter() - db_started) * 1000, 1)
 
         hits = [self._row_to_hit(row) for row in rows]

@@ -90,7 +90,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `src/smb_finder/content_indexer.py` | SMB 파일 순회→추출→FTS5 적재 (관리/백그라운드) |
 | `src/smb_finder/content_search.py` | 내용 검색 오케스트레이터 (토큰화→검색, 시간 측정) |
 | `src/smb_finder/rag_search.py` | 로컬 PostgreSQL 질의 임베딩→pgvector chunk 검색 (단계별 시간 측정) |
-| `src/smb_finder/evaluation/` | 합성 golden dataset 로더, retrieval scorer, corpus fingerprint, 선택적 MLflow 기록 adapter |
+| `src/smb_finder/evaluation/` | 합성 golden dataset, retrieval/end-to-end scorer, MLflow trace·기록 adapter |
 | `src/smb_finder/reports/` | 검사 보고서 업무 보조 tool — LLM 기반 ISCN 요약 + 로컬 후보 문서 검색/체크리스트 |
 | `src/smb_finder/tooling/` | 검색 도구 공통 Pydantic 계약·불변 catalog·timeout/동시 실행/감사 로그 executor |
 | `src/smb_finder/mcp_server.py` | 읽기 전용 MCP 검색 도구 등록과 HTTP transport 설정 |
@@ -225,8 +225,9 @@ request ID로 입력 messages와 응답/토큰 사용량을 함께 조회할 수
 
 ## MLflow 문서 챗봇 평가
 
-MLflow는 Playground 요청 경로와 분리된 선택적 오프라인 평가 계층이다. Phase 1에서는 15개 합성 golden case로
-`RagVectorSearcher`를 직접 실행해 Hit@K, Recall@K, MRR, no-answer 정확도와 embedding/DB/retrieval p50·p95를 계산한다.
+MLflow는 Playground 요청 경로와 분리된 선택적 오프라인 평가 계층이다. Phase 1은 15개 합성 golden case로
+`RagVectorSearcher`를 직접 실행하고, Phase 2는 실제 `PlaygroundAgent`를 재사용해 tool 선택·검색·답변·token·전체 지연을
+평가한다. Phase 2 trace는 `workflow → agent → tool → retriever → embedding/DB`와 생성 LLM span을 한 run에서 보여준다.
 평가 결과는 `automation-smb-doc-chatbot` experiment의 metric, parameter, JSON artifact로 기록하며 MLflow가 없어도
 Playground 서비스 import와 채팅 동작에는 영향이 없다.
 
@@ -244,12 +245,21 @@ uv run --no-sync python .\scripts\run_mlflow_doc_eval.py `
   --dataset .\data\evaluation\document_chatbot_golden.jsonl `
   --top-k 5
 
+# 실제 agent end-to-end 평가(먼저 1건 smoke 후 --max-cases를 제거해 전체 실행)
+uv run --no-sync python .\scripts\run_mlflow_doc_eval.py `
+  --mode end-to-end `
+  --provider openai `
+  --model gpt-4.1-mini `
+  --top-k 5 `
+  --max-cases 1
+
 # MLflow 없이 로컬 지표만 확인
 uv run --no-sync python .\scripts\run_mlflow_doc_eval.py --top-k 5 --no-mlflow
 ```
 
-결과 UI는 `http://127.0.0.1:5000`에서 확인한다. golden fixture의 문서 key는 전체 내부 경로가 아닌 파일명 기반이며,
-평가 artifact에는 chunk 본문을 포함하지 않는다. 자세한 단계별 계획과 baseline은
+결과 UI는 `http://127.0.0.1:5000`에서 확인한다. golden fixture의 문서 key는 전체 내부 경로가 아닌 파일명 기반이다.
+trace에는 기본적으로 질문·답변·chunk 본문을 넣지 않으며, 합성 데이터 디버깅이 필요할 때만
+`--include-trace-content`를 명시한다. 자세한 단계별 계획과 baseline은
 [`docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md`](docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md)를 참고한다.
 
 ## 설치 · 실행

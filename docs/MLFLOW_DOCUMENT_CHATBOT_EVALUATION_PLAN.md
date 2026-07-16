@@ -1,6 +1,6 @@
 # MLflow 문서 챗봇 평가 최종 개발 계획
 
-> 상태: Phase 0·1 구현 및 MLflow 실측 완료, Phase 2 진행 예정
+> 상태: Phase 0·1 완료, Phase 2 구현 및 1-case MLflow 실측 완료, Phase 3 진행 예정
 > 기준일: 2026-07-16
 > 대상: `search_rag_chunks`를 사용하는 Playground 문서 챗봇
 > 실행 환경: 실제 의료 환경과 무관한 합성·더미 데이터 전용 로컬 테스트
@@ -248,7 +248,7 @@ Backend/Test:
 - no-answer accuracy 0%: 유사도 cutoff가 없어 답이 없는 질문에도 상위 chunk를 반환하는 현재 한계를 확인
 - MLflow run `499673fd79be4b1285edbf87b09ef318`에서 metric 19개, parameter 12개와 JSON artifact 2개 확인
 
-### Phase 2. 전체 문서 챗봇 trace
+### Phase 2. 전체 문서 챗봇 trace — 완료
 
 Backend:
 
@@ -258,6 +258,19 @@ Backend:
 - telemetry 예외 격리, 짧은 timeout, 비동기 export 또는 circuit breaker
 
 완료 기준: 한 case에서 span 부모·자식 관계, retrieval 결과, 답변, token과 지연을 확인한다.
+
+구현·실측 결과:
+
+- 서비스 core에는 MLflow를 import하지 않고 `TraceObserver` 계약과 기본 no-op 구현만 추가했다.
+- 실제 `PlaygroundAgent`와 `search_rag_chunks`를 재사용하는 `--mode end-to-end` runner를 추가했다.
+- `document_chatbot.evaluate_case → playground.agent → playground.tool.search_rag_chunks → rag.vector_search` 아래에
+  `query_embedding`, `rag.pgvector_query`를 기록하고, 답변 생성은 agent 아래 `playground.llm_generation`으로 기록한다.
+- root span에 request/case ID, skill fingerprint, corpus fingerprint를 남기며 MLflow가 Git commit/branch tag를 자동 기록한다.
+- trace 본문은 기본 미포함이고 `--include-trace-content`를 명시한 합성 평가에서만 포함한다.
+- telemetry 실패는 `trace_errors`로 수집하고 실제 agent 실행은 계속한다. Phase 2 평가 중 LangSmith 중복 tracing은 끈다.
+- 2026-07-16 최종 합성 1-case smoke run `45f2e20b81904310bd418aea187a04d5`: trace 1개, span 7개,
+  Hit@5/Recall@5/MRR/tool exact/fact coverage/citation match 모두 1.0, end-to-end 3,023.3ms,
+  LLM 1회, 1,406 token.
 
 ### Phase 3. GenAI judge와 비교 run
 
