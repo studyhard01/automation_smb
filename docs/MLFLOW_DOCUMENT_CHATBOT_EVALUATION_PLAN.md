@@ -154,6 +154,27 @@ no-answer RAG 1건, clarification/general behavioral 2건으로 구성되어 있
 candidate는 corpus chunk에서 질문·기대 사실·참고 답변을 만든 검토 대기 항목이다. 다음 조건을 모두 만족한 행만 golden으로
 이동하고 `review_status=validated`로 바꾼다: source hash 재확인, 질문-근거 단독 답변 가능성 확인, 기대 사실 표현 검토,
 유사 문서 오답 가능성 확인, retrieval smoke 결과 확인. 승격 시 golden version과 fingerprint를 함께 갱신한다.
+사람 검토는 `scripts/review_evaluation_candidate.py`로 `provenance.review_decision`에
+`approve`·`revise`·`reject` 결정을 먼저 기록한다. 이 결정은 진행률과 검토 근거일 뿐 baseline 승격이 아니며,
+승인 또는 수정 완료 case를 golden으로 옮기는 변경은 별도 검증한다.
+
+```powershell
+# 전체 queue와 현재 결정을 확인
+uv run --no-sync python .\scripts\review_evaluation_candidate.py
+
+# 한 case의 질문·기대 근거·참고 답변 확인
+uv run --no-sync python .\scripts\review_evaluation_candidate.py `
+  --case-id synthetic-candidate-skills-packaging-022
+
+# 사람이 근거를 확인한 뒤 결정만 기록
+uv run --no-sync python .\scripts\review_evaluation_candidate.py `
+  --case-id synthetic-candidate-skills-packaging-022 `
+  --decision revise `
+  --notes "기대 chunk가 top-5에 들지 않는 원인을 확인하고 질문 범위를 좁힐 것"
+```
+
+첫 검토 순서는 기존 retrieval에서 top-5를 놓친 `skills-packaging-022`, `golden-design-023`,
+`scope-risk-026` 세 건이다. 이후 multi-fact 18건, single-hop 3건 순으로 진행한다.
 
 2026-07-16 자동 근거 사전 검토에서는 candidate 25건 모두 source chunk가 존재했고 저장된 `content_hash`와 일치했으며,
 질문·기대 사실·reference answer가 해당 합성 chunk 본문에 근거했다. 별도 candidate retrieval run(top-k 5)은 Hit@5/Recall@5

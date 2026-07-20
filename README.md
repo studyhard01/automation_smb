@@ -102,6 +102,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `scripts/start_remote_embedding_tunnel.ps1` | PuTTY 저장 세션으로 원격 온프레미스 embedding 서버를 `127.0.0.1:18080/v1`에 연결 |
 | `scripts/run_mlflow_doc_eval.py` | 문서 RAG retrieval/end-to-end golden evaluation과 선택적 LLM judge CLI |
 | `scripts/register_mlflow_eval_dataset.py` | golden/candidate JSONL을 로컬 MLflow Evaluation Dataset으로 등록 |
+| `scripts/review_evaluation_candidate.py` | candidate 사람 검토 결정을 기록하고 golden 승격과 분리 |
 | `scripts/evaluate_quality.py` | 저장소 전용 100점 rubric과 hard gate를 로컬/CI에서 동일하게 평가 |
 | `scripts/check_development_lessons.py` | commit/push 전 짧은 개발 교훈 문서와 명시적 검토 상태를 검사 |
 | `scripts/enable_quality_hook.ps1` | 추적된 pre-commit hook을 현재 clone에 활성화 |

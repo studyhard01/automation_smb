@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -50,6 +50,7 @@ class CaseProvenance(BaseModel):
     generation_method: Literal["manual", "corpus-derived"]
     source_chunk_hashes: dict[str, str] = Field(default_factory=dict)
     reviewed_on: str = ""
+    review_decision: Literal["", "approve", "revise", "reject"] = ""
     notes: str = ""
 
     @model_validator(mode="after")
@@ -62,6 +63,13 @@ class CaseProvenance(BaseModel):
                 raise ValueError("source_chunk_hashes는 chunk key와 64자리 SHA-256 hash여야 합니다.")
         if self.source_kind == "behavioral" and self.source_chunk_hashes:
             raise ValueError("behavioral case에는 corpus chunk hash를 넣지 않습니다.")
+        if self.review_status == "candidate" and bool(self.review_decision) != bool(self.reviewed_on):
+            raise ValueError("review_decision과 reviewed_on은 함께 기록해야 합니다.")
+        if self.reviewed_on:
+            try:
+                date.fromisoformat(self.reviewed_on)
+            except ValueError as exc:
+                raise ValueError("reviewed_on은 YYYY-MM-DD 형식의 실제 날짜여야 합니다.") from exc
         return self
 
 

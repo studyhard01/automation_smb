@@ -418,7 +418,8 @@
           "RAG_SYNTHESIS_MAX_TOKENS",
           "rag_grounding.decision=insufficient_evidence",
           "docs/PRODUCTION_ARCHITECTURE.md",
-          "docs/DEVELOPMENT_LESSONS.md"
+          "docs/DEVELOPMENT_LESSONS.md",
+          "scripts/review_evaluation_candidate.py"
         ],
         "forbidden_tokens": [
           "studio_observer.py",
@@ -528,6 +529,8 @@
           "RAG_SIMILARITY_CUTOFF",
           "RAG_SYNTHESIS_EVIDENCE_CHARS",
           "RAG_SYNTHESIS_MAX_TOKENS",
+          "scripts/review_evaluation_candidate.py",
+          "review_decision",
           "0.284",
           "0.490"
         ],

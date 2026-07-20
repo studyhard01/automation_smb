@@ -318,6 +318,14 @@ def check_synthetic_fixtures(repo_root: Path, policy: dict[str, Any]) -> CheckOu
                 r"\d{4}-\d{2}-\d{2}", str((provenance or {}).get("reviewed_on", ""))
             ):
                 errors.append(_fixture_error(relative, line_number, "reviewed_on 누락/형식 오류"))
+            review_decision = str((provenance or {}).get("review_decision", ""))
+            reviewed_on = str((provenance or {}).get("reviewed_on", ""))
+            if review_decision not in {"", "approve", "revise", "reject"}:
+                errors.append(_fixture_error(relative, line_number, "review_decision 값 오류"))
+            if contract["tier"] == "candidate" and bool(review_decision) != bool(
+                re.fullmatch(r"\d{4}-\d{2}-\d{2}", reviewed_on)
+            ):
+                errors.append(_fixture_error(relative, line_number, "review_decision과 reviewed_on은 함께 기록해야 함"))
             document_keys = (expectations or {}).get("expected_document_keys", [])
             if not isinstance(document_keys, list) or any(
                 not isinstance(key, str) or "/" in key or "\\" in key or Path(key).is_absolute()
@@ -353,7 +361,7 @@ def check_candidate_review_progress(repo_root: Path, policy: dict[str, Any]) -> 
         total += 1
         case = json.loads(raw)
         provenance = case.get("provenance", {})
-        if provenance.get("review_status") in {"validated", "revised", "rejected"} and provenance.get("reviewed_on"):
+        if provenance.get("review_decision") in {"approve", "revise", "reject"} and provenance.get("reviewed_on"):
             reviewed += 1
     fraction = reviewed / total if total else 0.0
     return CheckOutcome(

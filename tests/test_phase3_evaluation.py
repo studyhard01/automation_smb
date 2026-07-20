@@ -77,6 +77,7 @@ def test_managed_dataset_records_use_mlflow_reserved_expectation_keys():
     assert records[0]["expectations"]["expected_facts"] == ["7월"]
     assert records[0]["expectations"]["expected_response"] == "Alpha 일정은 7월입니다."
     assert records[0]["tags"]["review_status"] == "validated"
+    assert records[0]["tags"]["review_decision"] == ""
 
 
 def test_repository_golden_and_candidate_files_are_physically_separated():

@@ -46,6 +46,8 @@ def build_managed_dataset_records(dataset: GoldenDataset) -> list[dict[str, Any]
                     "category": case.tags.get("category", ""),
                     "difficulty": case.tags.get("difficulty", ""),
                     "review_status": case.provenance.review_status,
+                    "review_decision": case.provenance.review_decision,
+                    "reviewed_on": case.provenance.reviewed_on,
                     "source_kind": case.provenance.source_kind,
                 },
             }

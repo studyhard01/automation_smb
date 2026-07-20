@@ -168,3 +168,36 @@ def test_mlflow_is_single_persisted_evaluation_trace_contract() -> None:
 
     stack_source = (REPO_ROOT / "scripts" / "start_local_stack.ps1").read_text(encoding="utf-8")
     assert '[string]$Profile = "Playground"' in stack_source
+
+
+def test_candidate_review_progress_counts_separate_human_decisions(
+    quality_module: ModuleType,
+    tmp_path: Path,
+) -> None:
+    relative = "data/evaluation/candidates.jsonl"
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "provenance": {
+                            "review_status": "candidate",
+                            "review_decision": "approve",
+                            "reviewed_on": "2026-07-20",
+                        }
+                    }
+                ),
+                json.dumps({"provenance": {"review_status": "candidate"}}),
+            ]
+        ),
+        encoding="utf-8",
+    )
+    policy = {"fixture_contracts": [{"tier": "candidate", "path": relative}]}
+
+    outcome = quality_module.check_candidate_review_progress(tmp_path, policy)
+
+    assert outcome.passed is False
+    assert outcome.fraction == 0.5
+    assert outcome.summary == "Candidate 사람 검토: 1/2건"

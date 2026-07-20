@@ -55,6 +55,56 @@ function Test-LocalPort {
     }
 }
 
+function ConvertTo-PuTTYRegistryKeyName {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $ansiCodePage = [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage
+    $encoding = [System.Text.Encoding]::GetEncoding($ansiCodePage)
+    $encoded = [System.Text.StringBuilder]::new()
+    foreach ($byte in $encoding.GetBytes($Name)) {
+        $character = [char]$byte
+        if ($character -match "^[A-Za-z0-9_.-]$") {
+            $null = $encoded.Append($character)
+        }
+        else {
+            $null = $encoded.Append(("%{0:X2}" -f $byte))
+        }
+    }
+    return $encoded.ToString()
+}
+
+function Get-PuTTYSessionConnection {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $sessionRoot = "Registry::HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions"
+    if (-not (Test-Path -LiteralPath $sessionRoot)) {
+        return $null
+    }
+    $keyNames = @($Name, (ConvertTo-PuTTYRegistryKeyName -Name $Name)) | Select-Object -Unique
+    foreach ($keyName in $keyNames) {
+        $sessionPath = Join-Path $sessionRoot $keyName
+        if (-not (Test-Path -LiteralPath $sessionPath)) {
+            continue
+        }
+        $session = Get-ItemProperty -LiteralPath $sessionPath
+        $hostName = [string]$session.HostName
+        $portNumber = [int]$session.PortNumber
+        if ($hostName.Contains('"') -or [string]::IsNullOrWhiteSpace($hostName)) {
+            throw "PuTTY 저장 세션의 HostName이 비어 있거나 안전하지 않습니다."
+        }
+        if ($portNumber -lt 1 -or $portNumber -gt 65535) {
+            throw "PuTTY 저장 세션의 port가 유효하지 않습니다."
+        }
+        return [PSCustomObject]@{
+            HostName = $hostName
+            PortNumber = $portNumber
+            UserName = [string]$session.UserName
+            PublicKeyFile = [Environment]::ExpandEnvironmentVariables([string]$session.PublicKeyFile)
+        }
+    }
+    return $null
+}
+
 $plinkCandidates = @(
     (Get-Command plink.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source),
     "C:\Program Files\PuTTY\plink.exe",
@@ -79,6 +129,25 @@ $arguments = @(
     "-N",
     "-L", $forward
 )
+$storedConnection = Get-PuTTYSessionConnection -Name $SessionName
+if ($null -ne $storedConnection) {
+    # 한글 저장 세션명이 registry에서 ANSI percent-encoding된 경우 plink가 -load를 놓칠 수 있다.
+    # 연결 필수값을 명령행 fallback으로만 전달하며 값은 로그나 저장소에 기록하지 않는다.
+    if (-not $storedConnection.HostName.Contains("@") -and [string]::IsNullOrWhiteSpace($storedConnection.UserName)) {
+        throw "PuTTY 저장 세션에 Auto-login username을 설정해야 batch 터널을 시작할 수 있습니다."
+    }
+    $arguments += @("-P", [string]$storedConnection.PortNumber)
+    if (-not [string]::IsNullOrWhiteSpace($storedConnection.UserName)) {
+        $arguments += @("-l", "`"$($storedConnection.UserName)`"")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($storedConnection.PublicKeyFile)) {
+        if (-not (Test-Path -LiteralPath $storedConnection.PublicKeyFile -PathType Leaf)) {
+            throw "PuTTY 저장 세션의 private key 파일을 찾을 수 없습니다."
+        }
+        $arguments += @("-i", "`"$($storedConnection.PublicKeyFile)`"")
+    }
+    $arguments += "`"$($storedConnection.HostName)`""
+}
 
 if ($Foreground) {
     & $plink @arguments
