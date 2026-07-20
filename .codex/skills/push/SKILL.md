@@ -22,23 +22,31 @@ Push only reviewed, committed work and create a Pull Request. This repository ha
    - If the branch has an upstream, inspect ahead/behind state with `git status -sb` or equivalent.
    - If the branch is behind its upstream, stop and report the blocker rather than rebasing or merging without permission.
 
-3. Run pre-push validation.
+3. Review development lessons.
+   - Read `docs/DEVELOPMENT_LESSONS.md` before publishing and inspect the outgoing diff plus problems encountered while developing.
+   - If a problem produced a reusable rule, update the document using the short `상황` / `교훈` / `다음 적용` format before committing.
+   - Determine the outgoing Git range and run
+     `uv run --no-sync python scripts/check_development_lessons.py --diff-range "<base>...HEAD"`.
+   - If no reusable lesson exists, rerun the same command with `--reviewed-no-change`; do not add filler entries.
+   - If the lessons document is invalid or the review is not explicit, do not push.
+
+4. Run pre-push validation.
    - Run the relevant non-integration test command for this repo: `uv run --native-tls pytest -m "not integration" -p no:cacheprovider`.
    - If `uv` cache or TLS fails because of the local corporate environment, retry with a writable cache such as `UV_CACHE_DIR=C:\tmp\uv-cache` and request escalation when required.
    - If tests fail, do not push unless the user explicitly asks to push despite the failure. Report the failing command and short failure summary.
 
-4. Run a security gate before network actions.
+5. Run a security gate before network actions.
    - Inspect committed content and pending status for forbidden files: `.env`, `.env.*` except `.env.example`, cache directories, generated index/database files, `__pycache__`, `*.pyc`, `.pytest_cache`, `.ruff_cache`, `.venv`, and local tool state.
    - Scan the commits that will be pushed for obvious secrets and sensitive data patterns: SMB passwords, API keys, tokens, internal IPs, UNC paths, real shared-folder paths, patient names, specimen/test identifiers, and copied file listings.
    - Do not print secret or patient-like values. Report only the file, line, and issue type.
    - If sensitive data is found, stop. Do not push, create a PR, or send Slack until the leak is removed.
 
-5. Push the branch.
+6. Push the branch.
    - Push only after the user request itself authorizes `/push` or `$push`.
    - Use `git push -u origin HEAD` for a new branch, otherwise `git push`.
    - Do not force-push, amend, reset, rebase, or delete remote branches unless the user explicitly requested that operation.
 
-6. Create the Pull Request.
+7. Create the Pull Request.
    - Prefer the GitHub connector/app if available; otherwise use `gh pr create`.
    - Create a draft PR by default unless the user explicitly asks for a ready-for-review PR.
    - Write the PR title in Korean and keep it concise.
@@ -46,12 +54,13 @@ Push only reviewed, committed work and create a Pull Request. This repository ha
      - summary of functional changes,
      - validation commands and results,
      - security/privacy checks performed,
+     - development lessons updated or reviewed with no reusable addition,
      - deployment or runtime notes,
      - known risks or follow-up items.
    - Do not include credentials, internal IPs, real SMB paths, patient/specimen/test identifiers, or raw shared-folder listings.
    - After creation, capture the PR URL, branch name, commit range or top commit, draft/ready status, and validation summary.
 
-7. Report to Slack.
+8. Report to Slack.
    - Use Slack tools only after the PR exists.
    - Target the AI Solution Lab workspace channel named `진검파트`.
    - If multiple matching channels exist or the workspace cannot be confirmed, ask the user before sending.
@@ -67,7 +76,7 @@ Push only reviewed, committed work and create a Pull Request. This repository ha
      ```
    - Never include secrets, internal IPs, UNC paths, patient/specimen/test identifiers, or shared-folder file lists in Slack.
 
-8. Final user report.
+9. Final user report.
    - Report the pushed branch, PR URL, Slack channel report status, validation result, and any warnings.
    - Mention if Slack sending was skipped, drafted, blocked, or required user confirmation.
 

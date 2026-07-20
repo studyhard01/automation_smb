@@ -275,7 +275,6 @@ class ToolExecutor:
             settings.mcp_api_token,
             settings.llm_api_key,
             settings.openai_api_key,
-            settings.langsmith_api_key,
         ]
 
         for value in values:

@@ -33,7 +33,7 @@
 | 지연·성능 | 인덱스 우선 4(H), timeout·elapsed 계약 4(H), 실측 freshness 2(A), retrieval p95 3(A), E2E p95 7(A) |
 | 코드·계약 | Ruff 4(H), Python/uv 규약 2(H), API/tool 계약 2(H), RAG 품질 실측 7(A) |
 | 문서·맥락 | Markdown 상대 링크 4(H), 핵심 문서 정합성 6(H) |
-| 운영·관측성 | hook/CI 자동화 6(H), 안전한 관측성 계약 4(H) |
+| 운영·관측성 | hook/CI 자동화 4(H), 개발 교훈 기록·검토 2(H), 안전한 관측성 계약 4(H) |
 
 `H`는 hard gate, `A`는 advisory다. 저장된 실측 metric은 목표 충족 시 해당 점수를 모두 얻고, 미달하면 0점이다.
 RAG 품질 7점은 Hit@5·no-answer·groundedness 세 목표의 충족 비율로 나누며, candidate 검토 5점은 실제 검토
@@ -101,6 +101,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable_quality
 기준은 advisory로 표시한다. 외부 서비스가 필요한 현재 측정 근거를 score 때문에 임의로 재실행하지 않으며,
 release-readiness 판단 때 `--strict-score`를 명시적으로 실행한다. CI에서는 실제 SMB, 원격 embedding/로컬 DB, 외부
 judge 자격증명을 요구하지 않는다.
+
+같은 pre-commit은 `scripts/check_development_lessons.py --staged`도 먼저 실행한다. 문서 형식·최대 12개·필수
+필드는 hard gate이며, 코드·설정 변경에 교훈 문서가 없으면 commit 시 검토 알림을 낸다. push 전에는 outgoing
+diff에 대해 `--diff-range "<base>...HEAD"`를 실행한다. 재사용 가능한 문제가 있었다면
+[`DEVELOPMENT_LESSONS.md`](DEVELOPMENT_LESSONS.md)를 갱신하고, 없었다면 `--reviewed-no-change`를 명시해
+형식적인 항목 추가를 막는다.
 
 에이전트와 개발자는 hook 실행 여부와 무관하게 변경 후 evaluator를 직접 실행하고, 완료 보고에 다음을 남긴다.
 

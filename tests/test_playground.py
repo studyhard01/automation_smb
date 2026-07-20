@@ -22,13 +22,6 @@ from smb_finder.playground.models import (
     PlannedToolCall,
     ToolDefinition,
 )
-from smb_finder.playground.tracing import (
-    _hide_langsmith_outputs_preserve_usage,
-    _langsmith_trace_inputs,
-    _langsmith_trace_metadata,
-    _langsmith_trace_outputs,
-    is_langsmith_tracing_enabled,
-)
 from smb_finder.playground.tools import PlaygroundRuntime, ToolExecutionContext, build_tool_registry
 from smb_finder.rag_search import RagChunkHit, RagSearchError, RagSearchResponse
 
@@ -960,7 +953,7 @@ def test_openai_tool_observation_receives_tool_result(monkeypatch):
 
 
 def test_openai_chat_response_exposes_token_usage(monkeypatch):
-    agent = PlaygroundAgent(Settings(openai_model="gpt-test", openai_api_key="", langsmith_tracing=False))
+    agent = PlaygroundAgent(Settings(openai_model="gpt-test", openai_api_key=""))
 
     class FakeResponse:
         def raise_for_status(self):  # noqa: ANN201
@@ -1034,7 +1027,7 @@ def test_chat_json_reuses_http_client_and_closes_it(monkeypatch):
             self.closed = True
 
     monkeypatch.setattr("smb_finder.playground.agent.httpx.Client", FakeClient)
-    agent = PlaygroundAgent(Settings(_env_file=None, langsmith_tracing=False))
+    agent = PlaygroundAgent(Settings(_env_file=None))
     messages = [{"role": "user", "content": "synthetic keep-alive check"}]
 
     first = agent._chat_json(messages, model="test-model", base_url="http://localhost:8080/v1", max_tokens=64)
@@ -1045,76 +1038,3 @@ def test_chat_json_reuses_http_client_and_closes_it(monkeypatch):
     assert second == {"ok": True}
     assert len(created_clients) == 1
     assert created_clients[0].closed is True
-
-
-def test_langsmith_tracing_requires_openai_and_key():
-    assert is_langsmith_tracing_enabled(Settings(_env_file=None), "openai") is False
-    assert (
-        is_langsmith_tracing_enabled(
-            Settings(_env_file=None, langsmith_tracing=True, langsmith_api_key="ls-test-key"),
-            "local",
-        )
-        is False
-    )
-    assert (
-        is_langsmith_tracing_enabled(
-            Settings(_env_file=None, langsmith_tracing=True, langsmith_api_key="ls-test-key"),
-            "openai",
-        )
-        is True
-    )
-
-
-def test_langsmith_output_hiding_preserves_usage_metadata_only():
-    hidden = _hide_langsmith_outputs_preserve_usage(
-        {
-            "raw_response": "do not send",
-            "usage_metadata": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11},
-        }
-    )
-
-    assert hidden == {"usage_metadata": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11}}
-
-
-def test_langsmith_trace_body_visibility_follows_settings():
-    messages = [{"role": "user", "content": "synthetic aurora folder"}]
-    output = {
-        "response": {"choices": [{"message": {"content": "synthetic summary"}}]},
-        "usage_metadata": {"input_tokens": 7, "output_tokens": 4, "total_tokens": 11},
-    }
-    hidden_settings = Settings(_env_file=None, langsmith_hide_inputs=True, langsmith_hide_outputs=True)
-    visible_settings = Settings(_env_file=None)
-
-    hidden_inputs = _langsmith_trace_inputs(
-        hidden_settings,
-        model="gpt-test",
-        purpose="chat_json",
-        message_count=1,
-        messages=messages,
-    )
-    visible_inputs = _langsmith_trace_inputs(
-        visible_settings,
-        model="gpt-test",
-        purpose="chat_json",
-        message_count=1,
-        messages=messages,
-    )
-
-    assert "messages" not in hidden_inputs
-    assert visible_inputs["messages"] == messages
-    assert _langsmith_trace_outputs(hidden_settings, output) == {"usage_metadata": output["usage_metadata"]}
-    assert _langsmith_trace_outputs(visible_settings, output) == output
-
-
-def test_langsmith_trace_metadata_correlates_request_and_synthesis():
-    metadata = _langsmith_trace_metadata(
-        model="gpt-test",
-        purpose="rag_grounded_synthesis",
-        session_id="pg-session",
-        request_id="req-123",
-        message_count=2,
-    )
-
-    assert metadata["request_id"] == "req-123"
-    assert metadata["purpose"] == "rag_grounded_synthesis"
-    assert metadata["session_id"] == "pg-session"

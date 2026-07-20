@@ -4048,10 +4048,6 @@ studio = [
     { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "langgraph-cli", extra = ["inmem"] },
-    { name = "langsmith" },
-]
-tracing = [
-    { name = "langsmith" },
 ]
 
 [package.metadata]
@@ -4062,8 +4058,6 @@ requires-dist = [
     { name = "langchain-openai", marker = "extra == 'studio'", specifier = ">=0.2" },
     { name = "langgraph", marker = "extra == 'studio'", specifier = ">=0.2.50" },
     { name = "langgraph-cli", extras = ["inmem"], marker = "extra == 'studio'", specifier = ">=0.1.55" },
-    { name = "langsmith", marker = "extra == 'studio'", specifier = ">=0.1.98" },
-    { name = "langsmith", marker = "extra == 'tracing'", specifier = ">=0.1.98" },
     { name = "litellm", marker = "extra == 'evaluation'", specifier = "==1.79.1" },
     { name = "mcp", specifier = ">=1.28.1,<2" },
     { name = "mlflow", extras = ["genai"], marker = "extra == 'evaluation'", specifier = ">=3.9,<4" },
@@ -4076,7 +4070,7 @@ requires-dist = [
     { name = "smbprotocol", specifier = ">=1.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
-provides-extras = ["dev", "tracing", "evaluation", "studio", "pdf"]
+provides-extras = ["dev", "evaluation", "studio", "pdf"]
 
 [[package]]
 name = "smbprotocol"

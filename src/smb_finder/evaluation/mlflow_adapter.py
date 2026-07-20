@@ -19,15 +19,6 @@ class MlflowEvaluationError(RuntimeError):
     """평가 CLI에서 사용자에게 표시할 MLflow 연결·기록 오류."""
 
 
-class NoopEvaluationLogger:
-    """정상 서비스 경로에서 사용할 수 있는 명시적 no-op logger."""
-
-    enabled = False
-
-    def log_report(self, report: EvaluationReportLike, **kwargs: Any) -> str | None:  # noqa: ARG002
-        return None
-
-
 @dataclass
 class MlflowRunSession:
     """case 실행과 metric 기록이 같은 MLflow run을 공유하도록 하는 세션."""

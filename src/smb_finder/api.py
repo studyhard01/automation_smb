@@ -37,7 +37,6 @@ from .models import (
     RefreshIndexResponse,
 )
 from .playground.api import create_playground_router
-from .playground.studio_observer import StudioObserver
 from .playground.tools import PlaygroundRuntime
 from .rag_search import RagVectorSearcher
 
@@ -47,7 +46,6 @@ _logger = logging.getLogger(__name__)
 _settings = load_settings()
 _state: dict = {}
 _content_jobs = ContentIndexJobStore(_settings.content_index_job_retention)
-_studio_observer = StudioObserver(_settings)
 
 
 def _playground_runtime() -> PlaygroundRuntime:
@@ -152,8 +150,6 @@ async def lifespan(app: FastAPI):
             rag_searcher = RagVectorSearcher(_settings)
             stack.callback(rag_searcher.close)
             _state["rag_searcher"] = rag_searcher
-        await _studio_observer.start()
-        stack.push_async_callback(_studio_observer.stop)
         if _mcp_bundle is not None:
             await stack.enter_async_context(_mcp_bundle.server.session_manager.run())
         _logger.info(
@@ -180,7 +176,7 @@ if _mcp_bundle is not None:
     app.router.routes.append(McpExactRoute("/mcp", _mcp_bundle.app))
 
 
-app.include_router(create_playground_router(_playground_runtime, _studio_observer))
+app.include_router(create_playground_router(_playground_runtime))
 
 
 @app.get("/playground", include_in_schema=False)

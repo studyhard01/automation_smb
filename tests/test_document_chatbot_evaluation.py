@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
 from smb_finder.evaluation.datasets import GoldenDatasetError, load_golden_dataset
 from smb_finder.evaluation.document_chatbot import run_retrieval_evaluation
-from smb_finder.evaluation.mlflow_adapter import NoopEvaluationLogger
 from smb_finder.evaluation.models import CorpusSnapshot, GoldenDataset
 from smb_finder.rag_search import RagChunkHit, RagSearchError, RagSearchResponse
 
@@ -185,8 +183,3 @@ def test_retrieval_runner_counts_cutoff_abstention_as_correct_no_answer():
     assert report.cases[0].similarity_cutoff == 0.4
     assert report.cases[0].top_similarity == 0.284252
     assert report.cases[0].rejected_count == 5
-
-
-def test_noop_mlflow_logger_does_not_require_mlflow_package():
-    report = SimpleNamespace()
-    assert NoopEvaluationLogger().log_report(report) is None

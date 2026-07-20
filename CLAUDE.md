@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 현재 프로젝트의 개발 단계와 공통 작업 규칙은 [`AGENTS.md`](./AGENTS.md)가 기준 문서다. 이 문서는
 Claude Code 전용 진입점과 참고 구현 링크를 보완하며, 내용이 충돌하면 `AGENTS.md`를 우선한다.
+의미 있는 작업을 시작할 때는 [`docs/DEVELOPMENT_LESSONS.md`](docs/DEVELOPMENT_LESSONS.md)를 함께 읽고,
+실제 운영 토폴로지와 MinIO 경계는 [`docs/PRODUCTION_ARCHITECTURE.md`](docs/PRODUCTION_ARCHITECTURE.md)를 따른다.
 
 ## 이 프로젝트
 

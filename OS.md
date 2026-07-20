@@ -25,7 +25,7 @@
   구현돼 있다.
 - MCP는 로컬 읽기 전용 검색 도구 2개를 제공하는 **M0–M2 MVP까지 완료**됐다. LangGraph의 기존 HTTP wrapper를
   MCP client로 바꾸는 M3 이후 이관은 남아 있다.
-- LangGraph Studio 관찰 graph와 선택적 LangSmith trace, MLflow 오프라인 평가 **Phase 3**가 구현돼 있다.
+- MLflow 오프라인 평가 **Phase 3**와 필요할 때만 실행하는 LangGraph Studio `smb_agent` 개발 graph가 구현돼 있다.
   validated golden 15건의 현재 근거는 Hit@5 83.3%, no-answer accuracy 0%, judge Groundedness 92.3%,
   retrieval p95 195.6ms, end-to-end p95 4.91초다. candidate 25건은 사람 승인 전이라 baseline에 포함하지 않는다.
 
@@ -109,6 +109,9 @@
 ### L5. 데이터 / 인프라
 - 현재는 **SMB 공유폴더**(read-only 기본), 폴더 인덱스/JSON 캐시, **SQLite FTS5** 내용 인덱스,
   **PostgreSQL/pgvector** RAG, 로컬 LLM·임베딩 서버를 사용한다. STT는 아직 구현하지 않았다.
+- 운영 목표에서는 MLflow metadata를 PostgreSQL에, 허용된 평가 artifact를 온프레미스 **MinIO**에 분리한다.
+  MinIO는 온라인 검색 hot path나 원본 SMB 복제 저장소가 아니다. 자세한 목표 토폴로지와 전환 순서는
+  [`docs/PRODUCTION_ARCHITECTURE.md`](docs/PRODUCTION_ARCHITECTURE.md)를 따른다.
 
 ## 5. 성공 케이스: 공유 폴더 찾기 (end-to-end)
 
@@ -167,12 +170,16 @@
 - **오케스트레이션 전략** — 정면은 *자체 얇은 디스패처*(단발/선형). 다단계 LLM 워크플로는 *Dify* 백엔드에 위임(사용자 정면 노출 X). 스케줄/비-LLM 잡은 *n8n* 유지. ([L3 상세](#l3-오케스트레이션--실행))
 - **공유폴더 탐색 전략** — 요청 경로는 사전 인덱스 우선, SMB 순회는 시작/갱신과 제한된 fallback에서만 수행.
 - **첫 수직 슬라이스** — *텍스트 명령 → 공유폴더 찾기*와 Playground tool 호출까지 구현 완료.
+- **운영 MLflow 저장소 방향** — 현재 로컬 SQLite/`.cache`는 개발 전용이다. 운영 pilot에서는 metadata를
+  PostgreSQL로, 허용된 artifact를 MinIO로 옮기되 실제 원본 SMB 파일·경로 목록은 저장하지 않는다.
 
 **아직 미확정 (임의 확정 금지)**
 - **STT 엔진/모델** — `whisper.cpp` vs `faster-whisper`, 모델 크기(정확도↔CPU 비용), 한국어+검사 용어 처리.
 - **자체 디스패처 → Dify 승격 기준** — 어느 복잡도부터 Dify로 넘길지의 구체 임계선(분기 수, 상태 유지 여부 등).
 - **운영 인증·권한 모델** — 현재 MCP는 loopback bearer token MVP이며, 사내 다중 사용자 OAuth/SSO와 역할 기반 권한은
   운영 전환 전에 설계한다.
+- **MinIO 운영 수준** — 가용성 구성, bucket quota/lifecycle, backup·복원 목표와 파생 chunk/index 저장 허용 범위는
+  인프라·데이터 보호 요구를 확인한 뒤 확정한다.
 
 현재 우선순위는 similarity cutoff/no-answer 판정, 문서 검색 품질·지연 개선, candidate 사람 검토다.
 그 뒤 HWP/HWPX, 로컬 STT, Dify 연동, 운영 인증·보안 검토를 순차로 진행한다.

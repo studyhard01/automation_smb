@@ -4,7 +4,7 @@ param(
     [string]$Action = "Start",
 
     [ValidateSet("Playground", "Mlflow", "Studio", "All")]
-    [string]$Profile = "All",
+    [string]$Profile = "Playground",
 
     [switch]$NoReload,
     [switch]$Visible

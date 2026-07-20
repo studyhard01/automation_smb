@@ -449,12 +449,21 @@ def check_docs_alignment(repo_root: Path, policy: dict[str, Any]) -> CheckOutcom
 
 
 def check_automation_wiring(repo_root: Path, policy: dict[str, Any]) -> CheckOutcome:
-    """CI와 로컬 hook이 동일 평가기를 호출하는지 검사한다."""
+    """CI, 로컬 hook, push skill과 개발 교훈 검사가 연결됐는지 검사한다."""
 
     contract = policy["automation_contract"]
     command = contract["required_command"]
     errors: list[str] = []
-    for key in ("workflow", "hook", "hook_enabler", "gitattributes"):
+    for key in (
+        "workflow",
+        "hook",
+        "hook_enabler",
+        "gitattributes",
+        "lessons_document",
+        "lessons_checker",
+        "push_skill",
+        "agent_guide",
+    ):
         relative = contract[key]
         if not (repo_root / relative).is_file():
             errors.append(f"{relative}: 자동화 파일 누락")
@@ -468,7 +477,40 @@ def check_automation_wiring(repo_root: Path, policy: dict[str, Any]) -> CheckOut
     attributes = repo_root / contract["gitattributes"]
     if attributes.is_file() and ".githooks/* text eol=lf" not in attributes.read_text(encoding="utf-8"):
         errors.append(f"{contract['gitattributes']}: hook LF 고정 누락")
-    return CheckOutcome(not errors, "CI와 pre-commit이 동일 evaluator를 사용합니다." if not errors else "품질 자동화 연결이 불완전합니다.", details=tuple(errors))
+    hook = repo_root / contract["hook"]
+    if hook.is_file() and contract["lessons_staged_command"] not in hook.read_text(encoding="utf-8"):
+        errors.append(f"{contract['hook']}: staged 개발 교훈 검사 명령 누락")
+    push_skill = repo_root / contract["push_skill"]
+    if push_skill.is_file() and contract["lessons_push_command"] not in push_skill.read_text(encoding="utf-8"):
+        errors.append(f"{contract['push_skill']}: outgoing diff 개발 교훈 검사 명령 누락")
+    agent_guide = repo_root / contract["agent_guide"]
+    if agent_guide.is_file() and contract["lessons_document"] not in agent_guide.read_text(encoding="utf-8"):
+        errors.append(f"{contract['agent_guide']}: 작업 시작 시 개발 교훈 참조 누락")
+    return CheckOutcome(
+        not errors,
+        "CI·pre-commit·push 절차가 품질 평가와 개발 교훈 검사에 연결돼 있습니다."
+        if not errors
+        else "품질 자동화 연결이 불완전합니다.",
+        details=tuple(errors),
+    )
+
+
+def check_development_lessons(repo_root: Path, command_runner: CommandRunner) -> CheckOutcome:
+    """전용 검사기로 간결한 개발 교훈 문서 계약을 검증한다."""
+
+    checker = repo_root / "scripts" / "check_development_lessons.py"
+    if not checker.is_file():
+        return CheckOutcome(False, "개발 교훈 검사기가 없습니다.")
+    environment = os.environ.copy()
+    result = command_runner([sys.executable, str(checker)], repo_root, environment)
+    if result.returncode == 0:
+        summary = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else "개발 교훈 문서가 유효합니다."
+        return CheckOutcome(True, summary)
+    return CheckOutcome(
+        False,
+        f"개발 교훈 문서 검사가 실패했습니다(return code {result.returncode}).",
+        details=("명령: python scripts/check_development_lessons.py",),
+    )
 
 
 def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: str | None = None) -> dict[str, list[str]]:
@@ -662,6 +704,7 @@ def evaluate_project(
         "markdown_links": lambda: check_markdown_links(repo_root, tracked_files),
         "docs_alignment": lambda: check_docs_alignment(repo_root, policy),
         "automation_wiring": lambda: check_automation_wiring(repo_root, policy),
+        "development_lessons": lambda: check_development_lessons(repo_root, command_runner),
         "observability_architecture": lambda: check_architecture_markers(
             repo_root, policy, "observability", "관측성"
         ),

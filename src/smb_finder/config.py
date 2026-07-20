@@ -6,11 +6,7 @@
 
 from __future__ import annotations
 
-import ipaddress
-from typing import Literal
-from urllib.parse import urlparse
-
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -128,17 +124,7 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4.1-mini", description="Playground OpenAI 기본 모델명")
     openai_api_key: str = Field(default="", description="OpenAI API 키. UI 요청 값이 우선")
 
-    # ── LangSmith 관측성 (기본 OFF, OpenAI provider 호출만 추적) ──
-    langsmith_tracing: bool = Field(default=False, description="LangSmith tracing 활성화 여부")
-    langsmith_api_key: str = Field(default="", description="LangSmith API key. .env에만 저장")
-    langsmith_project: str = Field(default="automation-smb-playground", description="LangSmith project 이름")
-    langsmith_endpoint: str = Field(default="", description="self-hosted LangSmith endpoint. 비우면 LangSmith Cloud")
-    langsmith_hide_inputs: bool = Field(default=False, description="LangSmith trace에서 LLM 입력 본문 숨김")
-    langsmith_hide_outputs: bool = Field(default=False, description="LangSmith trace에서 LLM 출력 본문 숨김")
-
-    # ── MLflow 문서 챗봇 오프라인 평가 (서비스 경로 기본 OFF) ──
-    mlflow_evaluation_enabled: bool = Field(default=False, description="MLflow 오프라인 평가 기능 활성화 여부")
-    mlflow_tracing_enabled: bool = Field(default=False, description="MLflow 서비스 tracing 활성화 여부")
+    # ── MLflow 문서 챗봇 오프라인 평가 ──
     mlflow_tracking_uri: str = Field(default="http://127.0.0.1:5000", description="MLflow Tracking Server URL")
     mlflow_experiment_name: str = Field(
         default="automation-smb-doc-chatbot",
@@ -148,32 +134,6 @@ class Settings(BaseSettings):
     mlflow_judge_enabled: bool = Field(default=False, description="MLflow LLM judge 활성화 여부")
     mlflow_judge_model: str = Field(default="openai:/gpt-4.1-mini", description="MLflow judge model URI")
     mlflow_trace_include_content: bool = Field(default=False, description="합성 평가 trace에 chunk 본문 포함 여부")
-
-    # ── 로컬 LangGraph Studio 관측기 (기본 OFF, 안전한 메타데이터만 전송) ──
-    langgraph_studio_observer_enabled: bool = Field(
-        default=False,
-        description="로컬 LangGraph Studio에 Playground 실행 메타데이터를 비동기로 전달할지 여부",
-    )
-    langgraph_studio_observer_url: str = Field(
-        default="http://127.0.0.1:2024",
-        description="loopback 전용 LangGraph API URL",
-    )
-    langgraph_studio_observer_graph_id: Literal["playground_observer"] = Field(
-        default="playground_observer",
-        description="안전한 관측 이벤트만 받는 고정 LangGraph graph ID",
-    )
-    langgraph_studio_observer_timeout_ms: int = Field(
-        default=300,
-        ge=50,
-        le=2000,
-        description="관측 이벤트 전달 timeout(ms)",
-    )
-    langgraph_studio_observer_queue_size: int = Field(
-        default=100,
-        ge=1,
-        le=1000,
-        description="응답 경로와 분리된 관측 이벤트 메모리 큐 상한",
-    )
 
     # ── Playground 제한형 agent/debug ──
     playground_agent_max_steps: int = Field(default=3, description="Playground agent 최대 판단 단계 수")
@@ -192,31 +152,6 @@ class Settings(BaseSettings):
         description="한 요청에서 system prompt에 주입할 전체 skill 지침 글자 수 상한",
     )
     playground_debug_preview_chars: int = Field(default=4000, description="raw LLM debug preview 최대 글자 수")
-    @field_validator("langgraph_studio_observer_url")
-    @classmethod
-    def validate_langgraph_studio_observer_url(cls, value: str) -> str:
-        """Studio 관측 대상은 userinfo나 부가 URL 요소가 없는 loopback HTTP만 허용한다."""
-
-        normalized = value.strip().rstrip("/")
-        parsed = urlparse(normalized)
-        if (
-            parsed.scheme != "http"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-            or parsed.path not in {"", "/"}
-        ):
-            raise ValueError("LANGGRAPH_STUDIO_OBSERVER_URL은 부가 경로가 없는 loopback HTTP URL이어야 합니다.")
-        hostname = parsed.hostname.lower()
-        try:
-            is_loopback = ipaddress.ip_address(hostname).is_loopback
-        except ValueError:
-            is_loopback = hostname == "localhost"
-        if not is_loopback:
-            raise ValueError("LANGGRAPH_STUDIO_OBSERVER_URL은 loopback 주소만 허용합니다.")
-        return normalized
 
     @property
     def smb_root(self) -> str:

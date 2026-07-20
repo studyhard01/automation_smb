@@ -1,6 +1,6 @@
 {
   "rubric_id": "automation-smb-project-quality",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "title": "automation_smb 프로젝트 품질 Rubric",
   "target_score": 85,
   "scoring_policy": {
@@ -171,9 +171,16 @@
         {
           "id": "quality_automation_wiring",
           "title": "동일 평가기의 CI·pre-commit 연결",
-          "points": 6,
+          "points": 4,
           "hard_gate": true,
           "check": "automation_wiring"
+        },
+        {
+          "id": "development_lessons_contract",
+          "title": "개발 교훈의 간결한 기록·검토 계약",
+          "points": 2,
+          "hard_gate": true,
+          "check": "development_lessons"
         },
         {
           "id": "safe_observability_contract",
@@ -373,6 +380,16 @@
           "ApiErrorResponse",
           "internal_error",
           "type(exc).__name__"
+        ],
+        "src/smb_finder/evaluation/mlflow_adapter.py": [
+          "class MlflowEvaluationLogger",
+          "MLFLOW_HTTP_REQUEST_TIMEOUT",
+          "evaluation_run"
+        ],
+        "scripts/run_mlflow_doc_eval.py": [
+          "MlflowEvaluationLogger",
+          "MlflowTraceObserver",
+          "--no-mlflow"
         ]
       }
     },
@@ -399,9 +416,15 @@
           "RAG_SIMILARITY_CUTOFF",
           "RAG_SYNTHESIS_EVIDENCE_CHARS",
           "RAG_SYNTHESIS_MAX_TOKENS",
-          "rag_grounding.decision=insufficient_evidence"
+          "rag_grounding.decision=insufficient_evidence",
+          "docs/PRODUCTION_ARCHITECTURE.md",
+          "docs/DEVELOPMENT_LESSONS.md"
         ],
-        "forbidden_tokens": []
+        "forbidden_tokens": [
+          "studio_observer.py",
+          "playground_observer",
+          "LANGSMITH_TRACING"
+        ]
       },
       "AGENTS.md": {
         "required_tokens": [
@@ -410,7 +433,9 @@
           "인덱스 우선",
           "Python 3.11",
           "p50 < 300ms",
-          "p95 < 1s"
+          "p95 < 1s",
+          "docs/DEVELOPMENT_LESSONS.md",
+          "docs/PRODUCTION_ARCHITECTURE.md"
         ],
         "forbidden_tokens": []
       },
@@ -420,7 +445,9 @@
           "합성 데이터 전용 챗봇 테스트",
           "인덱스 우선",
           "p50 < 300ms",
-          "p95 < 1s"
+          "p95 < 1s",
+          "docs/DEVELOPMENT_LESSONS.md",
+          "docs/PRODUCTION_ARCHITECTURE.md"
         ],
         "forbidden_tokens": [
           "p95 < 12s",
@@ -433,10 +460,14 @@
           "현재 구현",
           "합성 데이터",
           "인덱스 우선",
-          "read-only"
+          "read-only",
+          "docs/PRODUCTION_ARCHITECTURE.md",
+          "MinIO"
         ],
         "forbidden_tokens": [
-          "작업 규칙은 [`CLAUDE.md`](./CLAUDE.md)에 둔다"
+          "작업 규칙은 [`CLAUDE.md`](./CLAUDE.md)에 둔다",
+          "LangSmith trace",
+          "관찰 graph"
         ]
       },
       "docs/MCP_IMPLEMENTATION_PLAN.md": {
@@ -456,7 +487,9 @@
           "find_folder",
           "search_content"
         ],
-        "forbidden_tokens": []
+        "forbidden_tokens": [
+          "LANGSMITH_TRACING"
+        ]
       },
       "docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md": {
         "required_tokens": [
@@ -498,13 +531,38 @@
           "0.284",
           "0.490"
         ],
-        "forbidden_tokens": []
+        "forbidden_tokens": [
+          "MLFLOW_EVALUATION_ENABLED",
+          "MLFLOW_TRACING_ENABLED",
+          "LangSmith"
+        ]
       },
       "docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md": {
         "required_tokens": [
           "운영 전환 단계까지 보류",
           "합성 데이터 전용 일반 챗봇 기능 테스트",
-          "실제 환자/검사 데이터는 OpenAI/LangSmith Cloud로 보내지 않습니다"
+          "실제 환자/검사 데이터는 외부 OpenAI 또는 외부 관측 서비스로 보내지 않습니다"
+        ],
+        "forbidden_tokens": []
+      },
+      "docs/PRODUCTION_ARCHITECTURE.md": {
+        "required_tokens": [
+          "운영 토폴로지는 아직 미구축",
+          "PostgreSQL",
+          "MinIO",
+          "hot path",
+          "실제 SMB 원본 파일",
+          "MLFLOW_S3_ENDPOINT_URL"
+        ],
+        "forbidden_tokens": []
+      },
+      "docs/DEVELOPMENT_LESSONS.md": {
+        "required_tokens": [
+          "현재 교훈",
+          "최대 12개",
+          "다음 적용",
+          "MinIO",
+          "설치 전에"
         ],
         "forbidden_tokens": []
       },
@@ -523,7 +581,10 @@
           "search_content",
           "http://127.0.0.1:2024"
         ],
-        "forbidden_tokens": []
+        "forbidden_tokens": [
+          "playground_observer",
+          "LANGSMITH_API_KEY"
+        ]
       }
     },
     "automation_contract": {
@@ -531,7 +592,13 @@
       "hook": ".githooks/pre-commit",
       "hook_enabler": "scripts/enable_quality_hook.ps1",
       "gitattributes": ".gitattributes",
-      "required_command": "python scripts/evaluate_quality.py"
+      "required_command": "python scripts/evaluate_quality.py",
+      "lessons_document": "docs/DEVELOPMENT_LESSONS.md",
+      "lessons_checker": "scripts/check_development_lessons.py",
+      "push_skill": ".codex/skills/push/SKILL.md",
+      "agent_guide": "AGENTS.md",
+      "lessons_staged_command": "python scripts/check_development_lessons.py --staged",
+      "lessons_push_command": "python scripts/check_development_lessons.py --diff-range"
     }
   },
   "measured_evidence": {

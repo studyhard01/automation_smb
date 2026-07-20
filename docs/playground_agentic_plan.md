@@ -52,9 +52,8 @@ agent loop, 결과 표시, trace와 지연 측정이 하나의 경로에서 동�
 
 ## LangGraph Studio
 
-Studio는 단일 `.env.studio`와 `langgraph.json` 경로를 사용한다. 실행 전 fail-closed 검사와 별도
-`synthetic_trace` 프로필은 사용하지 않는다. LangSmith trace는 표준 환경변수로 선택적으로 켜며 Studio 시작을
-차단하지 않는다.
+Studio는 단일 `.env.studio`와 `langgraph.json` 경로로 `smb_agent`를 수동 실행하는 개발 도구다. Playground 요청을
+별도 observer graph로 복제하지 않으며, 평가·run 비교·보존 trace는 MLflow를 단일 기준점으로 사용한다.
 
 ## MLflow 문서 챗봇 평가
 
@@ -78,5 +77,4 @@ MLflow는 선택 설치하는 오프라인 평가 계층이며, 정상 Playgroun
 - 변경 전 합성 문서 질의: 11,542.5ms, LLM 2회.
 - RAG fast path 적용 후 3회 중앙값: 4,183.8ms, 매 요청 LLM 1회, 모두 10초 예산 이내.
 - 검색 단계 실측: embedding 약 88~123ms, DB 약 90~109ms.
-- 합성 입력으로 LangSmith에서 `request_id` 상관관계, `purpose=rag_grounded_synthesis`, 입력 messages,
-  응답과 token usage 기록을 확인했다.
+- 합성 1-case smoke에서 MLflow trace 1개와 workflow·agent·tool·retriever·LLM span 7개 기록을 확인했다.

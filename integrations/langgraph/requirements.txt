@@ -5,6 +5,5 @@ langgraph>=0.2.50
 langgraph-cli[inmem]>=0.1.55   # `langgraph dev` (로컬 Studio 서버) 제공
 langchain-openai>=0.2          # 온프레미스 OpenAI 호환 LLM 호출
 langchain-core>=0.3
-langsmith>=0.1.98              # Studio trace/token usage logging
 httpx>=0.27
 pydantic-settings>=2.2

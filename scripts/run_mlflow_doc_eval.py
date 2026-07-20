@@ -177,7 +177,6 @@ def main(argv: list[str] | None = None) -> int:
             eval_settings = settings.model_copy(
                 update={
                     "rag_db_default_limit": args.top_k,
-                    "langsmith_tracing": False,
                 }
             )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
@@ -32,7 +33,7 @@ def rubric(quality_module: ModuleType) -> dict:
 
 
 def test_rubric_is_versioned_100_points_with_exact_category_weights(rubric: dict) -> None:
-    assert rubric["version"] == "1.0.0"
+    assert rubric["version"] == "1.1.0"
     assert rubric["target_score"] == 85
     assert [category["weight"] for category in rubric["categories"]] == [25, 20, 20, 15, 10, 10]
     assert sum(category["weight"] for category in rubric["categories"]) == 100
@@ -99,8 +100,9 @@ def test_command_orchestration_uses_workspace_basetemp_without_recursive_executi
         rubric,
         command_runner=fake_runner,
     )
-    calls_by_tool = {command[2]: (command, cwd, env) for command, cwd, env in calls}
+    calls_by_tool = {command[2]: (command, cwd, env) for command, cwd, env in calls if len(command) > 2}
     assert set(calls_by_tool) == {"ruff", "pytest"}
+    assert any(command[1].endswith("check_development_lessons.py") for command, _cwd, _env in calls)
     pytest_command = calls_by_tool["pytest"][0]
     basetemp_arg = next(item for item in pytest_command if item.startswith("--basetemp="))
     assert str(REPO_ROOT / ".tmp" / "quality") in basetemp_arg
@@ -133,5 +135,36 @@ def test_json_report_contract_is_machine_readable(quality_module: ModuleType, ru
     output = tmp_path / "quality.json"
     quality_module._write_json_report(output, report)
     loaded = json.loads(output.read_text(encoding="utf-8"))
-    assert loaded["rubric_version"] == "1.0.0"
+    assert loaded["rubric_version"] == "1.1.0"
     assert "hard_gates_passed" in loaded
+
+
+def test_mlflow_is_single_persisted_evaluation_trace_contract() -> None:
+    """중복 observer와 직접 LangSmith 의존성이 평가 경로에 다시 들어오지 않게 한다."""
+
+    graph_config = json.loads((REPO_ROOT / "integrations" / "langgraph" / "langgraph.json").read_text(encoding="utf-8"))
+    assert graph_config["graphs"] == {"smb_agent": "./smb_agent/graph.py:graph"}
+
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    optional_dependencies = project["project"]["optional-dependencies"]
+    assert "tracing" not in optional_dependencies
+    assert all(
+        "langsmith" not in dependency.lower()
+        for dependencies in optional_dependencies.values()
+        for dependency in dependencies
+    )
+
+    removed_paths = (
+        REPO_ROOT / "src" / "smb_finder" / "playground" / "studio_observer.py",
+        REPO_ROOT / "src" / "smb_finder" / "playground" / "tracing.py",
+        REPO_ROOT / "integrations" / "langgraph" / "smb_agent" / "observer_graph.py",
+    )
+    assert not any(path.exists() for path in removed_paths)
+
+    settings_source = (REPO_ROOT / "src" / "smb_finder" / "config.py").read_text(encoding="utf-8").lower()
+    assert "langsmith" not in settings_source
+    assert "mlflow_evaluation_enabled" not in settings_source
+    assert "mlflow_tracing_enabled" not in settings_source
+
+    stack_source = (REPO_ROOT / "scripts" / "start_local_stack.ps1").read_text(encoding="utf-8")
+    assert '[string]$Profile = "Playground"' in stack_source

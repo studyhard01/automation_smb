@@ -179,7 +179,7 @@ ReportRequest(
 - selected source가 없으면 보고서를 생성하지 않거나 "근거 없음" 안내만 반환합니다.
 - 기본 provider는 local/on-prem입니다.
 - OpenAI provider는 사용자가 Settings에 API key를 직접 저장/입력한 경우에만 활성화합니다.
-- 실제 환자/검사 데이터는 OpenAI/LangSmith Cloud로 보내지 않습니다.
+- 실제 환자/검사 데이터는 외부 OpenAI 또는 외부 관측 서비스로 보내지 않습니다.
 
 ---
 
@@ -250,7 +250,7 @@ automation_smb 치환:
 automation_smb 권장:
 
 - 기본은 off 또는 local evaluator만 사용합니다.
-- 외부 tracing이 켜져 있어도 환자/검사 데이터는 LangSmith Cloud로 보내지 않습니다.
+- 외부 관측 서비스를 도입하더라도 환자/검사 데이터는 전송하지 않습니다.
 - guardrail 항목은 최소한 다음을 포함합니다.
   - 선택 근거 밖의 주장 금지
   - 환자 식별정보 노출 금지
@@ -425,7 +425,7 @@ automation_smb 보고서 tool에서는 아래 순서를 강제합니다.
 1. `local/on-prem LLM`을 기본 provider로 사용합니다.
 2. OpenAI는 사용자가 Settings에 API key를 넣고 provider를 명시 선택한 경우만 허용합니다.
 3. OpenAI provider 선택 시에도 실제 환자/검사 데이터, SMB 파일 원문, 내부 경로, 내부 IP는 전송 금지입니다.
-4. LangSmith Cloud tracing에는 실제 환자/검사 데이터와 SMB 본문을 보내지 않습니다.
+4. 외부 관측 서비스에는 실제 환자/검사 데이터와 SMB 본문을 보내지 않습니다.
 5. token usage는 provider 응답 metadata만 저장하고 prompt 원문 저장은 기본 off로 둡니다.
 
 권장 guard 함수:
@@ -481,7 +481,7 @@ automation_smb `/playground`에서는 최소 다음 표시가 필요합니다.
 
 요청된 다음 목표에 맞춘 권장 순서입니다.
 
-1. 현재 LangSmith/token usage 변경분 안정화 및 커밋
+1. 현재 MLflow 평가/token usage 계약 안정화 및 커밋
    - trace payload에 환자/검사 데이터가 들어가지 않는지 먼저 확인합니다.
    - token usage는 provider/model/call id/input token/output token 정도로 제한합니다.
 
@@ -522,7 +522,7 @@ automation_smb `/playground`에서는 최소 다음 표시가 필요합니다.
 
 - SMB credential이 로그, trace, response, git diff에 없다.
 - 내부 IP와 실제 SMB UNC path가 외부 provider prompt에 없다.
-- 환자명, 접수번호, 검사 원문은 OpenAI/LangSmith Cloud로 가지 않는다.
+- 환자명, 접수번호, 검사 원문은 외부 OpenAI 또는 외부 관측 서비스로 가지 않는다.
 - raw debug 토글 출력은 redaction 후 표시된다.
 - SMB 접근은 read-only다.
 

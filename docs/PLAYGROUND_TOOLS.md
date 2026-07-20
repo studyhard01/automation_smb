@@ -102,10 +102,9 @@ LLM 합성 HTTP client는 서비스 수명 동안 keep-alive 연결을 재사용
 - `debug_trace=true`: 응답에 agent 단계 표시
 - `debug_raw_llm=true`: 해당 요청의 raw LLM debug 표시
 - `PLAYGROUND_DEBUG_PREVIEW_CHARS`: raw preview 길이 제한
-- LangSmith trace: `LANGSMITH_TRACING=true`로 선택적 활성화
 
-raw LLM debug는 별도 서버 허용 gate 없이 요청 토글만으로 작동한다. 합성 테스트 기본값에서는 LangSmith input/output도
-숨기지 않는다.
+raw LLM debug는 별도 서버 허용 gate 없이 요청 토글만으로 작동한다. 반복 평가와 보존할 trace는 서비스 경로와
+분리된 MLflow 평가 runner에서 기록한다.
 
 ## 오류 계약
 

@@ -86,6 +86,18 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - 결정이 갈리면 옵션 나열 대신 **추천안 하나 제시 후 진행**, 막히면 짧게 묻는다.
 - 신규 파일/모듈이 늘면 README에 한 줄로 구조를 갱신해 따라잡기 쉽게 둔다.
 
+## 개발 교훈 기록
+
+의미 있는 작업을 시작할 때 [`docs/DEVELOPMENT_LESSONS.md`](docs/DEVELOPMENT_LESSONS.md)의 `현재 교훈`을 먼저
+읽는다. commit/push 전에는 staged/outgoing diff와 작업 중 발생한 오류·권한·지연·운영 문제를 다시 보고, 다른
+작업에서도 재사용할 수 있는 교훈이 있으면 같은 문서에 `상황`·`교훈`·`다음 적용`을 짧게 갱신한다.
+
+- 새 교훈이 없으면 형식적인 항목을 만들지 않고 push 검사에서 `--reviewed-no-change`로 검토 사실을 명시한다.
+- 최신순 최대 12개를 유지하고 중복 원인은 기존 항목에 합친다.
+- 자격증명, 내부 주소, 실제 SMB 경로·목록, 환자·검체 식별자를 기록하지 않는다.
+- 문서 형식은 `uv run --no-sync python scripts/check_development_lessons.py`로 검사한다.
+- 현재 운영 목표와 MinIO의 범위는 [`docs/PRODUCTION_ARCHITECTURE.md`](docs/PRODUCTION_ARCHITECTURE.md)를 따른다.
+
 ## 변경 후 품질 점검
 
 코드·설정·문서를 변경한 뒤에는 `uv run --no-sync python scripts/evaluate_quality.py`를 실행한다.

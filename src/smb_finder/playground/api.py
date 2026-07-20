@@ -30,15 +30,11 @@ from .models import (
 )
 from .skills import SkillStore, SkillStoreError
 from .tools import PlaygroundRuntime, build_tool_registry
-from .studio_observer import StudioObserver, build_studio_observer_event
 
 _logger = logging.getLogger(__name__)
 
 
-def create_playground_router(
-    runtime_getter: Callable[[], PlaygroundRuntime],
-    studio_observer: StudioObserver | None = None,
-) -> APIRouter:
+def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) -> APIRouter:
     """Playground API 라우터를 생성한다."""
 
     settings = runtime_getter().settings
@@ -213,11 +209,6 @@ def create_playground_router(
             response.over_budget,
             response.error_code or "none",
         )
-        if studio_observer is not None:
-            try:
-                studio_observer.enqueue(build_studio_observer_event(request, response))
-            except Exception:  # noqa: BLE001 - 관측 실패는 사용자 응답에 영향을 주지 않는다.
-                _logger.warning("LangGraph Studio observer event rejected")
         return response
 
     @router.post(

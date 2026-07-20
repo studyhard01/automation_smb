@@ -97,13 +97,13 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `src/smb_finder/mcp_server.py` | 읽기 전용 MCP 검색 도구 등록과 HTTP transport 설정 |
 | `src/smb_finder/api.py` | FastAPI 앱 — `POST /find`·`/search-content`·`/refresh*` (OpenAPI 도구) |
 | `src/smb_finder/playground/` | 자체 챗봇 Playground — 선택한 tool만 호출하는 local LLM 기반 채팅 API |
-| `src/smb_finder/playground/studio_observer.py` | Playground 실행 메타데이터를 로컬 LangGraph Studio 관찰 graph로 보내는 비동기·fail-open observer |
 | `src/smb_finder/web/` | `/playground` 정적 UI — tool 선택, 채팅, Tool Lab 초안 화면 |
-| `scripts/start_local_stack.ps1` | Playground·MLflow·LangGraph Studio 통합 Start/Stop/Status 실행기 |
+| `scripts/start_local_stack.ps1` | Playground 기본 실행과 MLflow·LangGraph Studio 선택 실행을 지원하는 Start/Stop/Status 실행기 |
 | `scripts/start_remote_embedding_tunnel.ps1` | PuTTY 저장 세션으로 원격 온프레미스 embedding 서버를 `127.0.0.1:18080/v1`에 연결 |
 | `scripts/run_mlflow_doc_eval.py` | 문서 RAG retrieval/end-to-end golden evaluation과 선택적 LLM judge CLI |
 | `scripts/register_mlflow_eval_dataset.py` | golden/candidate JSONL을 로컬 MLflow Evaluation Dataset으로 등록 |
 | `scripts/evaluate_quality.py` | 저장소 전용 100점 rubric과 hard gate를 로컬/CI에서 동일하게 평가 |
+| `scripts/check_development_lessons.py` | commit/push 전 짧은 개발 교훈 문서와 명시적 검토 상태를 검사 |
 | `scripts/enable_quality_hook.ps1` | 추적된 pre-commit hook을 현재 clone에 활성화 |
 | `config/project_quality_rubric.json` | 100점 배점·hard gate·합성 실측 evidence의 machine-readable 기준 |
 | `.githooks/pre-commit`, `.github/workflows/project-quality.yml` | 커밋과 push/PR에서 품질 hard gate 실행 |
@@ -115,6 +115,8 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `docs/playground_agentic_plan.md` | Playground 제한형 agent loop와 debug 토글 구현 계획 |
 | `docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md` | MLflow 기반 문서 RAG 검색·답변·지연 평가 최종 개발 계획 |
 | `docs/PROJECT_QUALITY_RUBRIC.md` | 코드 변경마다 적용하는 100점 품질 기준, hard gate, 로컬/CI 실행 계약 |
+| `docs/PRODUCTION_ARCHITECTURE.md` | 실제 온프레미스 운영 토폴로지, MinIO 범위, 장애·전환 계획 |
+| `docs/DEVELOPMENT_LESSONS.md` | 작업 중 반복 가능한 문제와 다음 적용 원칙을 최신 12개 이내로 유지 |
 | `integrations/langflow/` | 노코드 외피 — Langflow 컴포넌트 + `folder_search` 워크플로우 자동 생성기 ([README](integrations/langflow/README.md)) |
 | `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
 
@@ -199,16 +201,10 @@ Qwen3 계열은 기본 thinking이 JSON 응답 예산을 소진할 수 있어 Pl
 OpenAI-compatible 응답에 `usage`가 있으면 채팅 응답과 연결 확인 결과에 `token_usage`가 포함되어
 모델별 input/output/total token과 호출 수를 볼 수 있다.
 
-## LangGraph Studio · LangSmith trace
+## LangGraph Studio 개발 디버깅
 
-LangGraph Studio 연동은 서로 다른 두 graph를 제공한다.
-
-- `smb_agent`: Studio에서 직접 질문을 실행하는 기존 Agent graph다. 로컬 LLM과 `smb_finder` REST 도구를 호출한다.
-- `playground_observer`: `/playground`에서 이미 완료된 요청의 실행 메타데이터를 받는 관찰 graph다.
-  LLM·SMB·MCP를 호출하지 않으며 Studio가 꺼져도 Playground 응답에는 영향을 주지 않는다.
-
-observer에는 요청 ID, provider/model 식별자, 선택·실행된 tool ID, 상태·오류 코드, 지연·토큰 수치를 보낸다.
-기본값은 OFF이며, 켜면 Playground 응답과 무관한 fail-open 방식으로 동작한다.
+LangGraph Studio는 `smb_agent` graph를 수동 실행하고 상태·tool 호출을 확인하는 개발 도구다. Playground 실행을
+복제하거나 운영 trace를 저장하지 않으며, 평가·run 비교·trace의 기준점은 MLflow다. 필요할 때만 별도로 실행한다.
 
 ```powershell
 # 1. Studio 의존성 설치
@@ -220,27 +216,10 @@ cd integrations/langgraph
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start_local_studio.ps1
 ```
 
-루트 `.env`에서 observer를 명시적으로 켠 뒤 `smb_finder`를 재시작한다.
-
-```dotenv
-LANGGRAPH_STUDIO_OBSERVER_ENABLED=true
-LANGGRAPH_STUDIO_OBSERVER_URL=http://127.0.0.1:2024
-LANGGRAPH_STUDIO_OBSERVER_GRAPH_ID=playground_observer
-LANGGRAPH_STUDIO_OBSERVER_TIMEOUT_MS=300
-LANGGRAPH_STUDIO_OBSERVER_QUEUE_SIZE=100
-LANGSMITH_TRACING=false
-```
-
-Studio에서 `playground_observer` graph를 선택하면 Playground 응답 하단의 요청 ID와 같은 run을 찾을 수 있다.
-로컬 Agent Server의 in-memory run은 개발 서버 재시작 시 사라진다. LangSmith tracing은 같은 `.env.studio`에서
-표준 환경변수로 선택적으로 켤 수 있으며, 별도 안전 검사나 `synthetic_trace` 프로필 분기는 없다.
-OpenAI 호출 trace에는 Playground `request_id`와 호출 목적(`purpose`)이 metadata로 기록된다. RAG fast path의 합성 호출은
-`purpose=rag_grounded_synthesis`로 구분되며, `LANGSMITH_HIDE_INPUTS=false`, `LANGSMITH_HIDE_OUTPUTS=false`이면 같은
-request ID로 입력 messages와 응답/토큰 사용량을 함께 조회할 수 있다.
-
 ## MLflow 문서 챗봇 평가
 
-MLflow는 Playground 요청 경로와 분리된 선택적 오프라인 평가 계층이다. Phase 1은 검증 완료된 15개 합성 golden case로
+MLflow는 평가·실험 비교·trace의 단일 기준점이며 Playground 요청 경로와 분리된 선택적 오프라인 계층이다.
+Phase 1은 검증 완료된 15개 합성 golden case로
 `RagVectorSearcher`를 직접 실행하고, Phase 2는 실제 `PlaygroundAgent`를 재사용해 tool 선택·검색·답변·token·전체 지연을
 평가한다. Phase 2 trace는 `workflow → agent → tool → retriever → embedding/DB`와 생성 LLM span을 한 run에서 보여준다.
 평가 결과는 `automation-smb-doc-chatbot` experiment의 metric, parameter, JSON artifact로 기록하며 MLflow가 없어도
@@ -302,32 +281,36 @@ trace에는 기본적으로 질문·답변·chunk 본문을 넣지 않으며, �
 30초 timeout, retry 0을 기본으로 해 비용과 장시간 재시도를 제한한다. 자세한 단계별 계획과 baseline은
 [`docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md`](docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md)를 참고한다.
 
+현재 MLflow의 SQLite metadata와 `.cache/mlflow/artifacts`는 단일 개발 머신 전용이다. 실제 운영 pilot에서는
+metadata를 PostgreSQL로, 허용된 평가 artifact를 온프레미스 MinIO로 분리한다. MinIO는 검색 hot path나 실제
+원본 SMB 파일의 복제 저장소로 사용하지 않는다. 운영 경계는
+[`docs/PRODUCTION_ARCHITECTURE.md`](docs/PRODUCTION_ARCHITECTURE.md)를 참고한다.
+
 ## 설치 · 실행
 
 ### 통합 로컬 스택
 
 Playground, MLflow, LangGraph Studio는 별도 프로세스이지만 루트에서 한 스크립트로 필요한 조합을 실행할 수 있다.
-`Studio` 프로필은 HTTP tool 호출에 필요한 Playground도 함께 시작한다.
+인자 없이 실행하면 Playground만 시작한다. `Mlflow`는 평가할 때, `Studio`는 graph를 디버깅할 때 사용하며
+`Studio` 프로필은 HTTP tool 호출에 필요한 Playground도 함께 시작한다. `All`은 세 도구가 모두 필요할 때만 명시한다.
 
 ```powershell
 cd C:\Users\AI_team\Desktop\project\automation_smb
 
-# 실제 실행 전 명령 확인
+# 기본: Playground(:8010)만 실행
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
+  -Action Start
+
+# 전체 실행이 필요할 때 먼저 명령 확인
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
   -Action Plan -Profile All
 
 # Playground(:8010) + MLflow(:5000) + LangGraph Studio(:2024)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
   -Action Start -Profile All
-
-# 상태 확인과 종료
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
-  -Action Status -Profile All
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 `
-  -Action Stop -Profile All
 ```
 
-지원 프로필은 `Playground`, `Mlflow`, `Studio`, `All`이다. 기본은 숨김 프로세스로 실행하고
+지원 프로필은 `Playground`, `Mlflow`, `Studio`, `All`이다. 기본 프로필은 `Playground`이며 숨김 프로세스로 실행하고
 `.cache/local-stack/logs`에 stdout/stderr를 저장한다. 서비스별 콘솔 창이 필요하면 `-Visible`, Playground의
 reload를 끄려면 `-NoReload`를 추가한다. MLflow는 현재 선택 의존성이므로 첫 실행 시 `uv run --with`가
 `mlflow[genai]>=3.9,<4`를 로컬 uv cache에 준비한다.
@@ -401,6 +384,9 @@ curl -s http://localhost:8010/admin/content-index-jobs/<job_id> \
 
 # 테스트·린트·문서 링크·저장소 경계를 한 번에 평가
 uv run --no-sync python scripts/evaluate_quality.py
+
+# 개발 교훈 문서 형식과 개수 확인
+uv run --no-sync python scripts/check_development_lessons.py
 ```
 
 권장 품질 목표는 **hard gate 전부 통과 + 85점 이상**이다. JSON 결과는 `--json-output <path>`, 85점 미만도
@@ -408,6 +394,8 @@ uv run --no-sync python scripts/evaluate_quality.py
 `--static-only`는 실행 hard gate를 건너뛰므로 완료 판정에는 사용할 수 없다.
 현재 clone의 pre-commit hook은 다음 명령으로 한 번 활성화한다. push와 PR에서는 전체 평가와 hard gate를
 강제하고 점수는 advisory로 표시한다. release-readiness 확인 때 `--strict-score`를 별도로 실행한다.
+pre-commit은 staged 코드·설정 변경에 교훈 문서가 포함되지 않으면 검토 알림을 내며, push 절차에서는 outgoing
+diff에 대한 문서 갱신 또는 `--reviewed-no-change` 판단을 명시적으로 요구한다.
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable_quality_hook.ps1

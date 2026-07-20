@@ -37,7 +37,6 @@ from .models import (
     ToolExecutionResult,
 )
 from .skills import SkillStore, format_skills_help, format_tools_help
-from .tracing import trace_openai_chat_completion
 from .tools import ToolExecutionContext, ToolHandler
 
 
@@ -1627,18 +1626,7 @@ class PlaygroundAgent:
                     "llm.purpose": purpose,
                 },
             ) as span:
-                response_json = trace_openai_chat_completion(
-                    settings=self.settings,
-                    provider=provider,
-                    model=model,
-                    purpose=purpose,
-                    session_id=session_id,
-                    message_count=len(request_messages),
-                    messages=request_messages,
-                    call=post_json,
-                    usage_metadata=lambda body: self._langsmith_usage_metadata(body, provider, model),
-                    request_id=request_id,
-                )
+                response_json = post_json()
                 usage = self._token_usage_from_response(response_json, provider, model)
                 usage_output = usage.model_dump() if usage is not None else {}
                 span.set_attributes(
@@ -1710,16 +1698,6 @@ class PlaygroundAgent:
             total_tokens=total_tokens,
             calls=1,
         )
-
-    def _langsmith_usage_metadata(self, response_json: dict[str, Any], provider: str, model: str) -> dict[str, int]:
-        usage = self._token_usage_from_response(response_json, provider, model)
-        if usage is None:
-            return {}
-        return {
-            "input_tokens": usage.prompt_tokens,
-            "output_tokens": usage.completion_tokens,
-            "total_tokens": usage.total_tokens,
-        }
 
     def _aggregate_token_usage(
         self, usage_calls: list[TokenUsage], provider: str, model: str

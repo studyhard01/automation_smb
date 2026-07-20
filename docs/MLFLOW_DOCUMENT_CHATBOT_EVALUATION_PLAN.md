@@ -35,7 +35,7 @@ MLflow는 현재 서비스의 필수 런타임이 아니라 **선택 설치하�
 
 - MLflow 점수로 요청이나 배포를 자동 차단하지 않는다.
 - 이번 단계에서 Playground 평가 버튼, dashboard, iframe을 만들지 않는다.
-- 기존 LangSmith 연동을 제거하거나 대체하지 않는다.
+- 서비스 요청마다 별도 관측 시스템에 trace를 중복 기록하지 않는다.
 - 모델 재학습, 온라인 A/B 테스트, 운영 자동 모니터링은 포함하지 않는다.
 - 실제 환자·검사·SMB 원문을 평가 dataset, trace, artifact 또는 외부 judge에 넣지 않는다.
 
@@ -46,11 +46,11 @@ MLflow는 현재 서비스의 필수 런타임이 아니라 **선택 설치하�
 | `PlaygroundAgent` | agent step, tool trace, 전체 elapsed | case별 root/agent/tool span과 설정 비교 |
 | `RagVectorSearcher` | similarity, `embedding_ms`, `db_ms` | retrieval 지표와 `RETRIEVER` span |
 | OpenAI 호환 LLM | token usage, model | 생성 span과 답변 품질 평가 |
-| LangSmith | OpenAI LLM 호출 trace | 유지. LLM 호출 디버깅에 사용 |
-| MLflow | 없음 | 문서 RAG 전체 trace, golden evaluation, run 비교 |
+| 구조화 서비스 로그 | 요청 ID, agent/tool 단계, 지연, 오류 코드 | 온라인 장애 진단과 SLO 집계의 원본 |
+| MLflow | 평가 runner의 logical span | 문서 RAG 전체 trace, golden evaluation, run 비교 |
 
-LangSmith와 MLflow는 독립 플래그로 제어한다. 오프라인 평가에서는 MLflow를 켜고 LangSmith는 필요할 때만 켠다.
-동일 LLM 호출을 두 시스템이 중복 wrapping하지 않도록 MLflow는 전체 app의 논리 span을 수동 계측한다.
+MLflow를 평가·실험 비교·보존 trace의 단일 기준점으로 사용한다. 온라인 요청은 구조화 서비스 로그만 남기고,
+MLflow는 서비스 경로와 분리된 runner에서 전체 app의 논리 span을 수동 계측한다.
 
 ## 4. 목표 평가 구조
 
@@ -301,7 +301,8 @@ Backend:
   `query_embedding`, `rag.pgvector_query`를 기록하고, 답변 생성은 agent 아래 `playground.llm_generation`으로 기록한다.
 - root span에 request/case ID, skill fingerprint, corpus fingerprint를 남기며 MLflow가 Git commit/branch tag를 자동 기록한다.
 - trace 본문은 기본 미포함이고 `--include-trace-content`를 명시한 합성 평가에서만 포함한다.
-- telemetry 실패는 `trace_errors`로 수집하고 실제 agent 실행은 계속한다. Phase 2 평가 중 LangSmith 중복 tracing은 끈다.
+- telemetry 실패는 `trace_errors`로 수집하고 실제 agent 실행은 계속한다. 서비스 runtime과 분리된 runner에서만
+  MLflow trace를 기록한다.
 - 2026-07-16 최종 합성 1-case smoke run `45f2e20b81904310bd418aea187a04d5`: trace 1개, span 7개,
   Hit@5/Recall@5/MRR/tool exact/fact coverage/citation match 모두 1.0, end-to-end 3,023.3ms,
   LLM 1회, 1,406 token.
@@ -412,8 +413,6 @@ docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md
 예상 환경변수:
 
 ```dotenv
-MLFLOW_EVALUATION_ENABLED=false
-MLFLOW_TRACING_ENABLED=false
 MLFLOW_TRACKING_URI=http://127.0.0.1:5000
 MLFLOW_EXPERIMENT_NAME=automation-smb-doc-chatbot
 MLFLOW_JUDGE_ENABLED=false
@@ -497,7 +496,7 @@ Playground 서비스에는 영향을 주지 않는다.
 | MLflow export가 요청을 지연 | 기본 OFF, 평가 runner 분리, async/fail-open, 짧은 timeout과 circuit breaker |
 | judge 비용·비결정성 | 명시 opt-in, worker 1, code scorer 우선, 사람 표본으로 보정 |
 | DB 재적재·경로 변경으로 정답 key 변경 | corpus fingerprint와 dataset version을 함께 변경 |
-| LangSmith와 역할 중복 | LangSmith=LLM 디버깅, MLflow=RAG 전체 평가로 문서화 |
+| 관측 시스템 역할 중복 | 서비스 로그=온라인 진단, MLflow=오프라인 평가·보존 trace로 역할을 고정 |
 | MLflow UI에서 요청 식별 어려움 | `request_id`, case ID, run naming을 tag로 통일 |
 | 합성/실제 데이터 경계 혼동 | 파일명·tag에 synthetic 명시, offline include-content 옵션 기본 false |
 | 기존 미커밋 변경 충돌 | MLflow 구현은 별도 커밋으로 진행하고 skill-creator 변경을 되돌리지 않음 |
