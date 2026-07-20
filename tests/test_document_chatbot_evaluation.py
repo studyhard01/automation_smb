@@ -28,6 +28,12 @@ def _dataset() -> GoldenDataset:
                         "expected_tool_calls": [{"name": "search_rag_chunks"}],
                         "reference_answer": "Alpha 답변",
                     },
+                    "provenance": {
+                        "review_status": "validated",
+                        "source_kind": "corpus",
+                        "generation_method": "manual",
+                        "source_chunk_hashes": {"alpha.md#3": "a" * 64},
+                    },
                 },
                 {
                     "case_id": "general-002",
@@ -35,6 +41,11 @@ def _dataset() -> GoldenDataset:
                     "expectations": {
                         "expected_tool_calls": [],
                         "reference_answer": "안녕하세요",
+                    },
+                    "provenance": {
+                        "review_status": "validated",
+                        "source_kind": "behavioral",
+                        "generation_method": "manual",
                     },
                 },
             ],

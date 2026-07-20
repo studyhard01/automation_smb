@@ -42,6 +42,29 @@ class GoldenExpectations(BaseModel):
         return self
 
 
+class CaseProvenance(BaseModel):
+    """평가 case가 corpus 근거와 검토 단계를 거쳤는지 나타내는 출처 계약."""
+
+    review_status: Literal["candidate", "validated"]
+    source_kind: Literal["corpus", "behavioral"]
+    generation_method: Literal["manual", "corpus-derived"]
+    source_chunk_hashes: dict[str, str] = Field(default_factory=dict)
+    reviewed_on: str = ""
+    notes: str = ""
+
+    @model_validator(mode="after")
+    def validate_source_hashes(self) -> CaseProvenance:
+        """근거 hash 형식과 behavioral case의 비본문 계약을 검증한다."""
+
+        for chunk_key, content_hash in self.source_chunk_hashes.items():
+            normalized_hash = content_hash.strip().casefold()
+            if not chunk_key.strip() or len(normalized_hash) != 64 or any(ch not in "0123456789abcdef" for ch in normalized_hash):
+                raise ValueError("source_chunk_hashes는 chunk key와 64자리 SHA-256 hash여야 합니다.")
+        if self.source_kind == "behavioral" and self.source_chunk_hashes:
+            raise ValueError("behavioral case에는 corpus chunk hash를 넣지 않습니다.")
+        return self
+
+
 class GoldenCase(BaseModel):
     """JSONL 한 줄에 대응하는 합성 평가 case."""
 
@@ -49,6 +72,20 @@ class GoldenCase(BaseModel):
     inputs: GoldenInputs
     expectations: GoldenExpectations
     tags: dict[str, str] = Field(default_factory=dict)
+    provenance: CaseProvenance
+
+    @model_validator(mode="after")
+    def validate_validated_evidence(self) -> GoldenCase:
+        """검증 완료된 corpus case는 모든 기대 chunk의 내용 hash를 가져야 한다."""
+
+        if self.provenance.review_status != "validated" or self.provenance.source_kind != "corpus":
+            return self
+        expected = set(self.expectations.expected_chunk_keys)
+        recorded = set(self.provenance.source_chunk_hashes)
+        missing = sorted(expected - recorded)
+        if missing:
+            raise ValueError(f"validated corpus case에 source chunk hash가 없습니다: {', '.join(missing)}")
+        return self
 
 
 class GoldenDataset(BaseModel):
@@ -57,6 +94,7 @@ class GoldenDataset(BaseModel):
     name: str
     version: str
     fingerprint: str
+    tier: Literal["golden", "candidate"] = "golden"
     cases: list[GoldenCase]
 
 
@@ -204,6 +242,23 @@ class EndToEndAggregateMetrics(BaseModel):
         return {key: float(value) for key, value in values.items() if value is not None}
 
 
+class JudgeScorerResult(BaseModel):
+    """LLM judge 하나의 실행 또는 건너뜀 상태."""
+
+    name: str
+    status: Literal["completed", "failed", "skipped"]
+    error: str = ""
+
+
+class JudgeEvaluationSummary(BaseModel):
+    """비결정적·외부 호출인 Phase 3 judge의 fail-open 실행 요약."""
+
+    enabled: bool = False
+    status: Literal["disabled", "completed", "partial", "failed", "skipped"] = "disabled"
+    model: str = ""
+    scorers: list[JudgeScorerResult] = Field(default_factory=list)
+
+
 class EndToEndEvaluationReport(BaseModel):
     """agent/tool/검색/생성을 모두 포함한 Phase 2 evaluation run 결과."""
 
@@ -219,6 +274,7 @@ class EndToEndEvaluationReport(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     cases: list[EndToEndCaseEvaluationResult]
     aggregate: EndToEndAggregateMetrics
+    judge: JudgeEvaluationSummary = Field(default_factory=JudgeEvaluationSummary)
     trace_errors: list[str] = Field(default_factory=list)
 
 

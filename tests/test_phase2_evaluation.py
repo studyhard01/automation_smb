@@ -81,6 +81,11 @@ def _dataset() -> GoldenDataset:
                         "expected_facts": ["7월"],
                         "reference_answer": "Alpha 일정은 7월입니다.",
                     },
+                    "provenance": {
+                        "review_status": "candidate",
+                        "source_kind": "corpus",
+                        "generation_method": "corpus-derived",
+                    },
                 }
             ],
         }

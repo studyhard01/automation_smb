@@ -70,6 +70,11 @@ class MlflowEvaluationLogger:
             ) from exc
         return self._mlflow
 
+    def load_mlflow(self) -> Any:
+        """평가 전용 보조 모듈이 같은 optional MLflow client를 재사용하게 한다."""
+
+        return self._load_mlflow()
+
     def preflight(self) -> str:
         """client 설치와 Tracking Server 버전 endpoint를 확인한다."""
 

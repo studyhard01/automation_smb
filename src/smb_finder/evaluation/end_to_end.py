@@ -204,15 +204,16 @@ def run_end_to_end_evaluation(
 
             case_result = _case_result(case, response)
             results.append(case_result)
-            root_span.set_outputs(
-                {
-                    "status": case_result.status,
-                    "error_code": case_result.error_code,
-                    "tool_exact_match": case_result.tool_exact_match,
-                    "hit_at_k": case_result.hit_at_k,
-                    "elapsed_ms": case_result.elapsed_ms,
-                }
-            )
+            root_outputs: dict[str, Any] = {
+                "status": case_result.status,
+                "error_code": case_result.error_code,
+                "tool_exact_match": case_result.tool_exact_match,
+                "hit_at_k": case_result.hit_at_k,
+                "elapsed_ms": case_result.elapsed_ms,
+            }
+            if observer.include_content:
+                root_outputs["answer"] = case_result.answer
+            root_span.set_outputs(root_outputs)
 
     trace_errors = list(getattr(observer, "errors", []))
     return EndToEndEvaluationReport(

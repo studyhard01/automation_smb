@@ -16,6 +16,11 @@ def _case() -> GoldenCase:
                 "reference_answer": "합성 답변",
                 "should_answer": True,
             },
+            "provenance": {
+                "review_status": "candidate",
+                "source_kind": "corpus",
+                "generation_method": "corpus-derived",
+            },
         }
     )
 

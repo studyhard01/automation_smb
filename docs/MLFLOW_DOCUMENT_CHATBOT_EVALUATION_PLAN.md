@@ -1,6 +1,6 @@
 # MLflow 문서 챗봇 평가 최종 개발 계획
 
-> 상태: Phase 0·1 완료, Phase 2 구현 및 1-case MLflow 실측 완료, Phase 3 진행 예정
+> 상태: Phase 0~2 완료, Phase 3 Dataset 등록·judge smoke·baseline/top-k 비교 실측 완료, skill-off 재실행 대기
 > 기준일: 2026-07-16
 > 대상: `search_rag_chunks`를 사용하는 Playground 문서 챗봇
 > 실행 환경: 실제 의료 환경과 무관한 합성·더미 데이터 전용 로컬 테스트
@@ -133,6 +133,40 @@ Dataset 구성은 다음을 모두 포함한다.
 - 추가 질문이 필요한 모호한 요청
 - RAG tool을 호출하지 않아야 하는 일반 요청
 
+### 5.1 기존 15건 검토와 dataset 분리 결정
+
+2026-07-16 로컬 corpus의 6개 문서·115개 chunk를 읽기 전용으로 대조했다. 기존 15건은 답변 가능한 RAG 12건,
+no-answer RAG 1건, clarification/general behavioral 2건으로 구성되어 있었다.
+
+- 12건의 positive RAG case마다 기대 chunk의 `content_hash`를 provenance에 고정했다.
+- Parser Router와 chunking을 함께 묻는 case는 실제 2개 chunk 근거로 교정했다.
+- 로컬 실행환경 case는 구성요소를 직접 열거한 PPT `#1`로 기대 chunk를 교정했다.
+- Skills Registry case는 역할 정의가 직접 포함된 아키텍처 문서 `#2`로 교정했다.
+- no-answer·clarification·general case는 corpus hash를 가장하지 않고 `source_kind=behavioral`로 구분했다.
+
+물리 파일과 사용 목적은 다음처럼 고정한다.
+
+| 파일 | 상태 | 건수 | 기본 baseline 사용 |
+|---|---|---:|---:|
+| `document_chatbot_golden.jsonl` | `validated`, `synthetic-golden-v2` | 15 | 사용 |
+| `document_chatbot_candidates.jsonl` | `candidate`, `synthetic-candidates-v1` | 25 | 사용하지 않음 |
+
+candidate는 corpus chunk에서 질문·기대 사실·참고 답변을 만든 검토 대기 항목이다. 다음 조건을 모두 만족한 행만 golden으로
+이동하고 `review_status=validated`로 바꾼다: source hash 재확인, 질문-근거 단독 답변 가능성 확인, 기대 사실 표현 검토,
+유사 문서 오답 가능성 확인, retrieval smoke 결과 확인. 승격 시 golden version과 fingerprint를 함께 갱신한다.
+
+2026-07-16 자동 근거 사전 검토에서는 candidate 25건 모두 source chunk가 존재했고 저장된 `content_hash`와 일치했으며,
+질문·기대 사실·reference answer가 해당 합성 chunk 본문에 근거했다. 별도 candidate retrieval run(top-k 5)은 Hit@5/Recall@5
+88.0%, MRR 75.5%, retrieval p50 173.8ms, p95 188.3ms였다. `synthetic-candidate-skills-packaging-022`,
+`synthetic-candidate-golden-design-023`, `synthetic-candidate-scope-risk-026`은 기대 chunk가 top-5에 들지 않아 어려운 실패
+후보로 유지한다. 이 검사는 사람 검토를 대체하지 않으므로 25건 모두 `candidate` 상태이며 golden v3 승격은 보류한다.
+MLflow run은 `d167fde4f82b463a81c643e5cd269764`다.
+
+교정된 golden v2의 warm retrieval-only 실측(top-k 5)은 Hit@5 83.3%, Recall@5 75.0%, MRR 67.4%,
+retrieval p50 174.8ms, p95 195.6ms, 오류율 0%, over-budget 0%였다. MLflow run은
+`4af63b2a27dc49599469399f718c7d8e`다. 기존 v1보다 Recall/MRR이 낮아진 것은 잘못된 단일 chunk 정답을 더 엄격한
+2-chunk 근거로 교정한 영향이며, no-answer accuracy 0% 문제는 similarity cutoff가 없어 그대로 남아 있다.
+
 ## 6. Trace 계약
 
 ### Root span: `document_chatbot.evaluate_case`
@@ -204,11 +238,11 @@ judge model은 MLflow 기본값에 의존하지 않고 항상 명시한다. judg
 
 ## 8. 첫 비교 실험
 
-| Run | 생성 모델 | top-k | `rag-grounded-answer` | 목적 |
-|---|---|---:|---:|---|
-| baseline | gpt-4.1-mini | 5 | ON | 현재 기준선 |
-| retrieval-k3 | gpt-4.1-mini | 3 | ON | 검색 폭과 지연 비교 |
-| skill-off | gpt-4.1-mini | 5 | OFF | skill의 grounded answer 영향 |
+| Run | top-k | Skill | Hit/Recall/MRR | Correctness/Relevance/Groundedness | p50/p95 | 상태 |
+|---|---:|---:|---|---|---|---|
+| baseline `481644c3daca4c8b99012a98b4259620` | 5 | ON | 83.3/75.0/67.4% | 73.3/93.3/92.3% | 3.09/4.91s | 완료 |
+| retrieval-k3 `e5b0dd945bbc4d858307dcd70881a50c` | 3 | ON | 75.0/66.7/65.3% | 66.7/93.3/92.3% | 3.86/5.79s | 완료 |
+| skill-off | 5 | OFF | - | - | - | 실행 환경 분리 후 재실행 |
 
 첫 평가에서는 `MLFLOW_GENAI_EVAL_MAX_WORKERS=1`로 고정한다. 지연 baseline이 안정된 후 별도 throughput run에서만
 worker 수를 늘린다.
@@ -272,7 +306,7 @@ Backend:
   Hit@5/Recall@5/MRR/tool exact/fact coverage/citation match 모두 1.0, end-to-end 3,023.3ms,
   LLM 1회, 1,406 token.
 
-### Phase 3. GenAI judge와 비교 run
+### Phase 3. GenAI judge와 비교 run — Dataset/judge/baseline/top-k 실측 완료
 
 Backend/Test:
 
@@ -282,6 +316,34 @@ Backend/Test:
 - baseline/top-k/skill 비교 실행
 
 완료 기준: 코드 지표는 judge 실패와 무관하게 완료되고 세 run을 MLflow UI에서 비교할 수 있다.
+
+현재 구현:
+
+- validated golden과 candidate를 별도 MLflow Evaluation Dataset으로 idempotent 등록한다.
+- MLflow reserved expectation key인 `expected_facts`, `expected_response`와 기존 retrieval/tool 기대값을 함께 보존한다.
+- `Correctness`, `RelevanceToQuery`, `RetrievalGroundedness`를 scorer별로 격리해 실패/건너뜀/완료 상태를 기록한다.
+- judge는 `end-to-end + judge + trace content + external data confirmation` 네 조건이 모두 있어야 실행한다.
+- 외부 judge 전송 범위는 합성 질문·답변·reference/expected facts와 retriever trace의 합성 chunk 본문이다.
+- 직접 provider judge에 필요한 `litellm==1.79.1`을 evaluation extra에 고정했다. 세 scorer는 timeout 30초, 최대 256 output
+  token, retry 0으로 실행해 scorer 한 건이 수분 동안 재시도하는 것을 막는다.
+- `MLFLOW_GENAI_EVAL_MAX_WORKERS=1`을 기본으로 두며 judge 결과는 release gate로 사용하지 않는다.
+
+실측 결과:
+
+- golden/candidate Dataset은 각각 15/25 record로 등록됐고 동일 입력 재등록 시 갱신되는 것을 확인했다.
+- 1-case judge smoke `2449d8f5b69c4f9387f729e413ce1928`에서 세 scorer와 trace assessment 연결이 완료됐다.
+- baseline과 retrieval-k3는 validated 15건 모두 성공했고 위 비교표의 코드·judge 지표를 기록했다.
+- gpt-4.1-mini의 2026-07-16 공식 단가(input $0.40/1M, output $1.60/1M token)를 기준으로 실행 전 전체 작업을
+  $0.20~$0.60, 운영 상한 $1.00, 사용자 hard cap $2.00로 잡았다. MLflow usage/cost 메타데이터와 직접 진단 호출을 합친
+  기록 기반 비용은 약 $0.0857이며, 사용량이 남지 않은 timeout 시도를 보수적으로 포함해도 $0.10 미만으로 추정한다.
+  가격 기준: https://developers.openai.com/api/docs/models/gpt-4.1-mini
+
+남은 순서:
+
+1. 현재 tool sandbox와 외부 실행 권한을 분리한 뒤 skill-off 15건을 재실행한다.
+2. candidate 25건을 사람이 검토해 approve/revise/reject를 확정한다.
+3. 승인된 candidate만 별도 변경으로 golden v3에 승격하고 Dataset fingerprint를 갱신한다.
+4. similarity cutoff와 3초대 end-to-end 지연을 별도 최적화한다.
 
 ### Phase 4. 후속 선택 기능
 
@@ -308,9 +370,13 @@ src/smb_finder/evaluation/tracing.py
 src/smb_finder/evaluation/datasets.py
 src/smb_finder/evaluation/scorers.py
 src/smb_finder/evaluation/document_chatbot.py
+src/smb_finder/evaluation/managed_datasets.py
+src/smb_finder/evaluation/judges.py
 scripts/run_mlflow_doc_eval.py
+scripts/register_mlflow_eval_dataset.py
 scripts/start_local_stack.ps1
 data/evaluation/document_chatbot_golden.jsonl
+data/evaluation/document_chatbot_candidates.jsonl
 tests/test_mlflow_tracing.py
 tests/test_document_chatbot_scorers.py
 tests/test_document_chatbot_evaluation.py
@@ -353,6 +419,21 @@ uv run --extra evaluation python scripts/run_mlflow_doc_eval.py `
   --provider openai `
   --model gpt-4.1-mini `
   --top-k 5
+
+# MLflow Evaluation Dataset 등록
+uv run --extra evaluation python scripts/register_mlflow_eval_dataset.py --tier golden
+uv run --extra evaluation python scripts/register_mlflow_eval_dataset.py --tier candidate
+
+# 외부 judge 1-case smoke: 전송 범위를 확인한 경우에만 실행
+uv run --extra evaluation python scripts/run_mlflow_doc_eval.py `
+  --mode end-to-end `
+  --provider openai `
+  --model gpt-4.1-mini `
+  --top-k 5 `
+  --max-cases 1 `
+  --judge `
+  --include-trace-content `
+  --confirm-external-judge-data
 ```
 
 평가 runner는 시작 시 Tracking Server를 preflight한다. 서버에 연결할 수 없으면 명확한 CLI 오류로 종료하되,

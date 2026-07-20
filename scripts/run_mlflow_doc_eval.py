@@ -17,6 +17,7 @@ from smb_finder.evaluation.document_chatbot import (
     run_retrieval_evaluation,
 )
 from smb_finder.evaluation.end_to_end import run_end_to_end_evaluation
+from smb_finder.evaluation.judges import judge_metrics, run_llm_judges
 from smb_finder.evaluation.mlflow_adapter import MlflowEvaluationError, MlflowEvaluationLogger
 from smb_finder.evaluation.models import EndToEndEvaluationReport
 from smb_finder.evaluation.tracing import MlflowTraceObserver
@@ -37,16 +38,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="data/evaluation/document_chatbot_golden.jsonl",
         help="합성 golden JSONL 경로",
     )
-    parser.add_argument("--dataset-version", default="synthetic-smoke-v1")
+    parser.add_argument("--dataset-version", default="synthetic-golden-v2")
     parser.add_argument("--provider", choices=["openai", "local"], default="openai")
     parser.add_argument("--model", default="gpt-4.1-mini", help="비교 run metadata용 생성 모델")
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--skill-id", default="rag-grounded-answer")
+    parser.add_argument("--no-skill", action="store_true", help="비교 run에서 모든 skill 주입을 비활성화")
     parser.add_argument("--max-cases", type=int, default=0, help="0이면 전체, 양수면 앞에서부터 일부 case만 실행")
     parser.add_argument(
         "--include-trace-content",
         action="store_true",
         help="합성 평가 trace에 질문·답변·chunk 본문을 포함",
+    )
+    parser.add_argument("--judge", action="store_true", help="Phase 3 MLflow built-in LLM judge 실행")
+    parser.add_argument("--judge-model", default="", help="예: openai:/gpt-4.1-mini")
+    parser.add_argument("--judge-max-output-tokens", type=int, default=256)
+    parser.add_argument("--judge-request-timeout-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--confirm-external-judge-data",
+        action="store_true",
+        help="합성 질문·답변·정답·검색 chunk 본문을 외부 judge provider로 보내는 것을 명시 확인",
     )
     parser.add_argument("--tracking-uri", default="")
     parser.add_argument("--experiment-name", default="")
@@ -73,6 +84,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_cases < 0:
         print("--max-cases는 0 이상의 값이어야 합니다.", file=sys.stderr)
         return 2
+    if args.judge_max_output_tokens < 1 or args.judge_max_output_tokens > 1024:
+        print("--judge-max-output-tokens는 1~1024 범위여야 합니다.", file=sys.stderr)
+        return 2
+    if args.judge_request_timeout_seconds < 1 or args.judge_request_timeout_seconds > 120:
+        print("--judge-request-timeout-seconds는 1~120 범위여야 합니다.", file=sys.stderr)
+        return 2
+    judge_enabled = bool(args.judge or settings.mlflow_judge_enabled)
+    trace_content_included = bool(args.include_trace_content or settings.mlflow_trace_include_content)
+    skill_id = "" if args.no_skill else args.skill_id
+    if judge_enabled and args.mode != "end-to-end":
+        print("LLM judge는 --mode end-to-end에서만 실행할 수 있습니다.", file=sys.stderr)
+        return 2
+    if judge_enabled and args.no_mlflow:
+        print("LLM judge는 MLflow run과 trace가 필요하므로 --no-mlflow와 함께 쓸 수 없습니다.", file=sys.stderr)
+        return 2
+    if judge_enabled and not trace_content_included:
+        print("RetrievalGroundedness 실행에는 --include-trace-content가 필요합니다.", file=sys.stderr)
+        return 2
+    if judge_enabled and not args.confirm_external_judge_data:
+        print(
+            "외부 judge 전송 범위(합성 질문·답변·정답·검색 chunk 본문)를 확인한 뒤 "
+            "--confirm-external-judge-data를 추가하세요.",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         dataset = load_golden_dataset(args.dataset, version=args.dataset_version)
@@ -89,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             server_version = logger.preflight()
 
         corpus = capture_corpus_snapshot(settings)
-        skill = SkillStore(settings.playground_skills_dir).get(args.skill_id) if args.skill_id else None
+        skill = SkillStore(settings.playground_skills_dir).get(skill_id) if skill_id else None
         skill_fingerprint = (
             hashlib.sha256(skill.document.encode("utf-8")).hexdigest()[:16] if skill is not None else ""
         )
@@ -99,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
             "provider": args.provider,
             "model": args.model,
             "top_k": args.top_k,
-            "skill_id": args.skill_id,
+            "skill_id": skill_id,
             "skill_fingerprint": skill_fingerprint,
             "evaluated_case_count": len(dataset.cases),
             "dataset_name": dataset.name,
@@ -110,10 +146,11 @@ def main(argv: list[str] | None = None) -> int:
             "corpus_chunk_count": corpus.chunk_count,
             "embedding_models": ",".join(corpus.embedding_models),
             "mlflow_server_version": server_version,
-            "judge_enabled": False,
-            "trace_content_included": bool(
-                args.include_trace_content or settings.mlflow_trace_include_content
-            ),
+            "judge_enabled": judge_enabled,
+            "judge_model": args.judge_model or settings.mlflow_judge_model,
+            "judge_max_output_tokens": args.judge_max_output_tokens,
+            "judge_request_timeout_seconds": args.judge_request_timeout_seconds,
+            "trace_content_included": trace_content_included,
         }
         run_name = args.run_name or _default_run_name(args.mode, args.model, args.top_k)
 
@@ -157,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
                         corpus=corpus,
                         provider=args.provider,
                         model=args.model,
-                        skill_id=args.skill_id,
+                        skill_id=skill_id,
                         skill_fingerprint=skill_fingerprint,
                         openai_api_key=eval_settings.openai_api_key,
                         trace_observer=observer,
@@ -176,13 +213,26 @@ def main(argv: list[str] | None = None) -> int:
                     observer = MlflowTraceObserver(
                         session.mlflow,
                         run_id=session.run_id,
-                        include_content=bool(
-                            args.include_trace_content or settings.mlflow_trace_include_content
-                        ),
+                        include_content=trace_content_included,
                     )
                     report = execute_end_to_end(observer)
+                    if judge_enabled:
+                        flush = getattr(session.mlflow, "flush_trace_async_logging", None)
+                        if callable(flush):
+                            flush(terminate=False)
+                        judge = run_llm_judges(
+                            session.mlflow,
+                            dataset=dataset,
+                            report=report,
+                            run_id=session.run_id,
+                            model=args.judge_model or settings.mlflow_judge_model,
+                            max_output_tokens=args.judge_max_output_tokens,
+                            request_timeout_seconds=args.judge_request_timeout_seconds,
+                        )
+                        report = report.model_copy(update={"judge": judge})
                     session.log_report(report, artifact_name="end_to_end_evaluation_results.json")
                     session.mlflow.log_metric("trace_error_count", float(len(observer.errors)))
+                    session.mlflow.log_metrics(judge_metrics(report.judge))
                     run_id = session.run_id
                 trace_count = logger.trace_count(run_id)
 

@@ -356,7 +356,9 @@ $mlflowArtifactUri = [System.Uri]::new($mlflowArtifactRoot).AbsoluteUri
 $mlflowArtifactLiteral = ConvertTo-PowerShellLiteral $mlflowArtifactUri
 $mlflowDbUri = "sqlite:///" + ($mlflowDbPath -replace "\\", "/")
 $mlflowDbUriLiteral = ConvertTo-PowerShellLiteral $mlflowDbUri
-$reloadArgument = if ($NoReload) { "" } else { " --reload" }
+# MLflow DB/artifact와 사용자 skill은 .cache 아래에서 계속 변경된다. 저장소 전체를
+# 감시하면 uvicorn이 평가 실행 중 반복 재시작하므로 Python source만 감시한다.
+$reloadArgument = if ($NoReload) { "" } else { " --reload --reload-dir src" }
 
 $serviceCatalog = [ordered]@{
     playground = [pscustomobject]@{
@@ -364,7 +366,7 @@ $serviceCatalog = [ordered]@{
         DisplayName = "Playground"
         Port = 8010
         WorkDir = $repoRoot
-        Command = "& uv run --native-tls uvicorn smb_finder.api:app --host 127.0.0.1 --port 8010$reloadArgument"
+        Command = "& uv run --no-sync --native-tls uvicorn smb_finder.api:app --host 127.0.0.1 --port 8010$reloadArgument"
     }
     mlflow = [pscustomobject]@{
         Key = "mlflow"

@@ -90,7 +90,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `src/smb_finder/content_indexer.py` | SMB 파일 순회→추출→FTS5 적재 (관리/백그라운드) |
 | `src/smb_finder/content_search.py` | 내용 검색 오케스트레이터 (토큰화→검색, 시간 측정) |
 | `src/smb_finder/rag_search.py` | 로컬 PostgreSQL 질의 임베딩→pgvector chunk 검색 (단계별 시간 측정) |
-| `src/smb_finder/evaluation/` | 합성 golden dataset, retrieval/end-to-end scorer, MLflow trace·기록 adapter |
+| `src/smb_finder/evaluation/` | validated/candidate dataset, retrieval/end-to-end scorer, MLflow Dataset·judge·trace adapter |
 | `src/smb_finder/reports/` | 검사 보고서 업무 보조 tool — LLM 기반 ISCN 요약 + 로컬 후보 문서 검색/체크리스트 |
 | `src/smb_finder/tooling/` | 검색 도구 공통 Pydantic 계약·불변 catalog·timeout/동시 실행/감사 로그 executor |
 | `src/smb_finder/mcp_server.py` | 읽기 전용 MCP 검색 도구 등록과 HTTP transport 설정 |
@@ -99,8 +99,9 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `src/smb_finder/playground/studio_observer.py` | Playground 실행 메타데이터를 로컬 LangGraph Studio 관찰 graph로 보내는 비동기·fail-open observer |
 | `src/smb_finder/web/` | `/playground` 정적 UI — tool 선택, 채팅, Tool Lab 초안 화면 |
 | `scripts/start_local_stack.ps1` | Playground·MLflow·LangGraph Studio 통합 Start/Stop/Status 실행기 |
-| `scripts/run_mlflow_doc_eval.py` | 문서 RAG retrieval-only golden evaluation CLI |
-| `data/evaluation/` | 실제 환경과 무관한 합성 문서 챗봇 golden JSONL fixture |
+| `scripts/run_mlflow_doc_eval.py` | 문서 RAG retrieval/end-to-end golden evaluation과 선택적 LLM judge CLI |
+| `scripts/register_mlflow_eval_dataset.py` | golden/candidate JSONL을 로컬 MLflow Evaluation Dataset으로 등록 |
+| `data/evaluation/` | 검증 완료 golden 15건과 검토 전 corpus 기반 candidate 25건을 분리한 합성 JSONL fixture |
 | `docs/PLAYGROUND_TOOLS.md` | `/playground` 등록 tool별 입력·동작·테스트 계약 |
 | `docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md` | 세포유전 LLM 보고서 프로세스 이관 가이드 |
 | `docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md` | 공통 ToolSpec을 중심으로 REST·Playground·MCP·LangChain을 연결하는 목표 아키텍처와 흐름도 |
@@ -225,11 +226,17 @@ request ID로 입력 messages와 응답/토큰 사용량을 함께 조회할 수
 
 ## MLflow 문서 챗봇 평가
 
-MLflow는 Playground 요청 경로와 분리된 선택적 오프라인 평가 계층이다. Phase 1은 15개 합성 golden case로
+MLflow는 Playground 요청 경로와 분리된 선택적 오프라인 평가 계층이다. Phase 1은 검증 완료된 15개 합성 golden case로
 `RagVectorSearcher`를 직접 실행하고, Phase 2는 실제 `PlaygroundAgent`를 재사용해 tool 선택·검색·답변·token·전체 지연을
 평가한다. Phase 2 trace는 `workflow → agent → tool → retriever → embedding/DB`와 생성 LLM span을 한 run에서 보여준다.
 평가 결과는 `automation-smb-doc-chatbot` experiment의 metric, parameter, JSON artifact로 기록하며 MLflow가 없어도
 Playground 서비스 import와 채팅 동작에는 영향이 없다.
+
+Phase 3에서는 `document_chatbot_golden.jsonl`의 validated 15건만 baseline에 사용한다. corpus 6개 문서·115개 chunk에서
+확장한 25건은 `document_chatbot_candidates.jsonl`에 따로 두며 검토·승격 전에는 기본 평가에 들어가지 않는다. 두 파일은
+MLflow Evaluation Dataset으로 별도 등록할 수 있고, 동일 질문·`top_k` 입력은 MLflow의 input-hash 기준으로 갱신된다.
+2026-07-16 실측에서는 golden baseline(k=5)과 k=3 비교, 세 LLM judge가 완료됐다. candidate 사전 검토는 25건 모두
+chunk/hash 근거 일치를 통과했고 retrieval Hit@5/Recall@5 88.0%였지만, 사람 승인 전이므로 모두 candidate로 유지한다.
 
 ```powershell
 # 실행 중인 로컬 스택을 멈춘 상태에서 최초 1회
@@ -255,11 +262,30 @@ uv run --no-sync python .\scripts\run_mlflow_doc_eval.py `
 
 # MLflow 없이 로컬 지표만 확인
 uv run --no-sync python .\scripts\run_mlflow_doc_eval.py --top-k 5 --no-mlflow
+
+# validated golden과 candidate를 서로 다른 MLflow Dataset으로 등록
+uv run --no-sync python .\scripts\register_mlflow_eval_dataset.py --tier golden
+uv run --no-sync python .\scripts\register_mlflow_eval_dataset.py --tier candidate
+
+# 외부 LLM judge opt-in: 아래 네 항목을 모두 명시해야 실행
+# 전송 범위는 합성 질문·답변·정답과 검색된 합성 chunk 본문이다.
+# 먼저 --max-cases 1로 token/cost를 확인하고 전체 실행 여부를 결정한다.
+uv run --no-sync python .\scripts\run_mlflow_doc_eval.py `
+  --mode end-to-end `
+  --provider openai `
+  --model gpt-4.1-mini `
+  --top-k 5 `
+  --max-cases 1 `
+  --judge `
+  --include-trace-content `
+  --confirm-external-judge-data
 ```
 
 결과 UI는 `http://127.0.0.1:5000`에서 확인한다. golden fixture의 문서 key는 전체 내부 경로가 아닌 파일명 기반이다.
 trace에는 기본적으로 질문·답변·chunk 본문을 넣지 않으며, 합성 데이터 디버깅이 필요할 때만
-`--include-trace-content`를 명시한다. 자세한 단계별 계획과 baseline은
+`--include-trace-content`를 명시한다. `Correctness`, `RelevanceToQuery`, `RetrievalGroundedness` judge는 하나가 실패해도
+결정적 코드 지표와 나머지 scorer를 보존하며 release gate로 쓰지 않는다. judge 요청은 scorer당 최대 256 output token,
+30초 timeout, retry 0을 기본으로 해 비용과 장시간 재시도를 제한한다. 자세한 단계별 계획과 baseline은
 [`docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md`](docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md)를 참고한다.
 
 ## 설치 · 실행
