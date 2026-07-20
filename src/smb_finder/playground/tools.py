@@ -102,6 +102,13 @@ def _format_content_response(data: Any) -> str:
 def _format_rag_response(data: Any) -> str:
     hits = list(getattr(data, "hits", []))
     if not hits:
+        cutoff = float(getattr(data, "similarity_cutoff", 0.0) or 0.0)
+        top_similarity = getattr(data, "top_similarity", None)
+        if bool(getattr(data, "no_answer", False)) and top_similarity is not None:
+            return (
+                "답변할 만큼 충분한 문서 근거를 찾지 못했습니다. "
+                f"(최고 유사도 {float(top_similarity):.3f}, 기준 {cutoff:.3f})"
+            )
         return "DB 벡터 검색과 일치하는 chunk를 찾지 못했습니다."
     lines = [
         (
@@ -194,7 +201,9 @@ def build_tool_registry(runtime: PlaygroundRuntime) -> dict[str, ToolHandler]:
             result_payload=response.model_dump(),
             arguments_summary=(
                 f"query_len={len(query)} limit={limit} embedding_ms={response.embedding_ms} "
-                f"db_ms={response.db_ms} elapsed_ms={response.elapsed_ms}"
+                f"db_ms={response.db_ms} elapsed_ms={response.elapsed_ms} "
+                f"cutoff={response.similarity_cutoff} top_similarity={response.top_similarity} "
+                f"rejected_count={response.rejected_count}"
             ),
         )
 

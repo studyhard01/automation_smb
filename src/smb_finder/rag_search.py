@@ -42,6 +42,11 @@ class RagSearchResponse(BaseModel):
     query: str
     hits: list[RagChunkHit] = Field(default_factory=list)
     result_count: int = 0
+    candidate_count: int = 0
+    rejected_count: int = 0
+    similarity_cutoff: float = 0.0
+    top_similarity: float | None = None
+    no_answer: bool = False
     embedding_model: str
     embedding_ms: float = 0.0
     db_ms: float = 0.0
@@ -68,7 +73,7 @@ class EmbeddingClient(Protocol):
 
 
 class OpenAICompatibleEmbeddingClient:
-    """OpenAI 호환 `/embeddings` endpoint를 재사용하는 로컬 client."""
+    """OpenAI 호환 `/embeddings` endpoint 연결을 재사용하는 client."""
 
     def __init__(self, settings: Settings) -> None:
         self._model = settings.rag_embedding_model.strip()
@@ -188,15 +193,20 @@ class RagVectorSearcher:
                 }
                 for hit in response.hits
             ]
-            span.set_attributes(
-                {
-                    "retriever.result_count": response.result_count,
-                    "retriever.embedding_ms": response.embedding_ms,
-                    "retriever.db_ms": response.db_ms,
-                    "retriever.elapsed_ms": response.elapsed_ms,
-                    "retriever.over_budget": response.over_budget,
-                }
-            )
+            retriever_attributes: dict[str, Any] = {
+                "retriever.result_count": response.result_count,
+                "retriever.candidate_count": response.candidate_count,
+                "retriever.rejected_count": response.rejected_count,
+                "retriever.similarity_cutoff": response.similarity_cutoff,
+                "retriever.no_answer": response.no_answer,
+                "retriever.embedding_ms": response.embedding_ms,
+                "retriever.db_ms": response.db_ms,
+                "retriever.elapsed_ms": response.elapsed_ms,
+                "retriever.over_budget": response.over_budget,
+            }
+            if response.top_similarity is not None:
+                retriever_attributes["retriever.top_similarity"] = response.top_similarity
+            span.set_attributes(retriever_attributes)
             span.set_outputs(documents)
             return response
 
@@ -283,13 +293,21 @@ class RagVectorSearcher:
                 ) from exc
         db_ms = round((time.perf_counter() - db_started) * 1000, 1)
 
-        hits = [self._row_to_hit(row) for row in rows]
+        candidates = [self._row_to_hit(row) for row in rows]
+        cutoff = self._settings.rag_similarity_cutoff
+        hits = [hit for hit in candidates if hit.similarity >= cutoff]
+        top_similarity = max((hit.similarity for hit in candidates), default=None)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
         total_budget_ms = self._settings.rag_embedding_timeout_ms + self._settings.rag_db_query_timeout_ms
         return RagSearchResponse(
             query=normalized_query,
             hits=hits,
             result_count=len(hits),
+            candidate_count=len(candidates),
+            rejected_count=len(candidates) - len(hits),
+            similarity_cutoff=cutoff,
+            top_similarity=top_similarity,
+            no_answer=not hits,
             embedding_model=self._settings.rag_embedding_model,
             embedding_ms=embedding_ms,
             db_ms=db_ms,

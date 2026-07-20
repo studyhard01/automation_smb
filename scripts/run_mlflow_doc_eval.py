@@ -135,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
             "provider": args.provider,
             "model": args.model,
             "top_k": args.top_k,
+            "similarity_cutoff": settings.rag_similarity_cutoff,
             "skill_id": skill_id,
             "skill_fingerprint": skill_fingerprint,
             "evaluated_case_count": len(dataset.cases),

@@ -89,6 +89,7 @@ def _case_result(case: GoldenCase, response: ChatResponse) -> EndToEndCaseEvalua
     retrieval_scores = score_retrieval_case(case, retrieved, actual_tool_calls=actual_tools)
     expected_documents = case.expectations.expected_document_keys
     usage = response.token_usage
+    grounding = response.rag_grounding
     status = "error" if response.error_code else "ok"
     return EndToEndCaseEvaluationResult(
         case_id=case.case_id,
@@ -103,6 +104,9 @@ def _case_result(case: GoldenCase, response: ChatResponse) -> EndToEndCaseEvalua
         reciprocal_rank=retrieval_scores["reciprocal_rank"],
         tool_exact_match=float(retrieval_scores["tool_exact_match"] or 0.0),
         no_answer_correct=_no_answer_correct(case, response.assistant_message),
+        grounding_decision=grounding.decision if grounding is not None else "",
+        similarity_cutoff=grounding.similarity_cutoff if grounding is not None else 0.0,
+        top_similarity=grounding.top_similarity if grounding is not None else None,
         fact_coverage=_fact_coverage(response.assistant_message, case.expectations.expected_facts),
         citation_match=_text_fraction(response.assistant_message, expected_documents),
         agent_steps=len(response.agent_steps),
@@ -195,6 +199,9 @@ def run_end_to_end_evaluation(
                     "error_code": response.error_code,
                     "answer_length": len(response.assistant_message),
                     "tool_calls": [tool.tool_id for tool in response.tool_calls],
+                    "grounding_decision": (
+                        response.rag_grounding.decision if response.rag_grounding is not None else ""
+                    ),
                     "elapsed_ms": response.elapsed_ms,
                 }
                 if observer.include_content:

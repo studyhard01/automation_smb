@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 import logging
 import uuid
 
-from fastapi import APIRouter, Header, HTTPException, Response, status
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Response, status
 from fastapi.concurrency import run_in_threadpool
 
 from smb_finder.reports.models import (
@@ -40,7 +41,19 @@ def create_playground_router(
 ) -> APIRouter:
     """Playground API 라우터를 생성한다."""
 
-    router = APIRouter(tags=["playground"])
+    settings = runtime_getter().settings
+    shared_agent = PlaygroundAgent(settings, skill_store=SkillStore(settings.playground_skills_dir))
+
+    @asynccontextmanager
+    async def shared_agent_lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        """서비스 종료 시 재사용 중인 LLM HTTP 연결을 닫는다."""
+
+        try:
+            yield
+        finally:
+            shared_agent.close()
+
+    router = APIRouter(tags=["playground"], lifespan=shared_agent_lifespan)
 
     def skill_store() -> SkillStore:
         return SkillStore(runtime_getter().settings.playground_skills_dir)
@@ -130,9 +143,8 @@ def create_playground_router(
     ) -> CytogeneticsKaryotypeSummaryResponse:
         runtime = runtime_getter()
         handler = build_tool_registry(runtime)["cytogenetics_karyotype_summary"]
-        agent = PlaygroundAgent(runtime.settings, skill_store=skill_store())
         result = await run_in_threadpool(
-            agent.execute_tool_direct,
+            shared_agent.execute_tool_direct,
             handler,
             {"iscn": request.iscn},
             provider=request.provider,
@@ -182,10 +194,9 @@ def create_playground_router(
         unknown_skills = sorted(set(request.selected_skill_ids) - known_skill_ids)
         if unknown_skills:
             raise HTTPException(status_code=400, detail={"code": "unknown_skill", "skills": unknown_skills})
-        agent = PlaygroundAgent(runtime.settings, skill_store=store)
         request_id = str(uuid.uuid4())
         response = await run_in_threadpool(
-            agent.run,
+            shared_agent.run,
             request,
             registry,
             x_playground_openai_key,
@@ -219,9 +230,7 @@ def create_playground_router(
         request: ToolDraftRequest,
         x_playground_openai_key: str = Header(default="", alias="X-Playground-OpenAI-Key"),
     ) -> ToolDraftResponse:
-        runtime = runtime_getter()
-        agent = PlaygroundAgent(runtime.settings, skill_store=skill_store())
-        return await run_in_threadpool(agent.draft_tool, request, x_playground_openai_key)
+        return await run_in_threadpool(shared_agent.draft_tool, request, x_playground_openai_key)
 
     @router.post(
         "/api/playground/llm-status",
@@ -233,8 +242,6 @@ def create_playground_router(
         request: LlmStatusRequest,
         x_playground_openai_key: str = Header(default="", alias="X-Playground-OpenAI-Key"),
     ) -> LlmStatusResponse:
-        runtime = runtime_getter()
-        agent = PlaygroundAgent(runtime.settings, skill_store=skill_store())
-        return await run_in_threadpool(agent.check_llm, request, x_playground_openai_key)
+        return await run_in_threadpool(shared_agent.check_llm, request, x_playground_openai_key)
 
     return router

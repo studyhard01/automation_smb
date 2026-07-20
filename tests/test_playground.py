@@ -69,6 +69,9 @@ class FakeRagSearcher:
                 )
             ],
             result_count=1,
+            candidate_count=1,
+            similarity_cutoff=0.4,
+            top_similarity=0.91,
             embedding_model="nomic-embed-text-v2-moe",
             embedding_ms=4.0,
             db_ms=3.0,
@@ -410,10 +413,34 @@ def test_rag_grounded_fast_path_searches_directly_and_synthesizes_once(monkeypat
     assert len(llm_calls) == 1
     assert llm_calls[0]["purpose"] == "rag_grounded_synthesis"
     assert llm_calls[0]["request_id"] == "req-rag-fast-success"
+    assert llm_calls[0]["max_tokens"] == runtime.settings.rag_synthesis_max_tokens
+    synthesis_input = str(llm_calls[0]["messages"][1]["content"])
+    assert "프로젝트 오로라 일정은 7월입니다." in synthesis_input
+    assert len(synthesis_input) <= runtime.settings.rag_synthesis_evidence_chars + 200
     source_list = response.assistant_message.split("근거 문서:\n", maxsplit=1)[1]
     assert source_list == "- aurora.md / 일정"
     assert "imaginary.md" not in source_list
     assert [step.kind for step in response.agent_steps] == ["tool_call", "observation", "final"]
+
+
+def test_rag_synthesis_evidence_distributes_budget_across_all_hits():
+    agent = PlaygroundAgent(Settings(_env_file=None, rag_synthesis_evidence_chars=800))
+    hits = [
+        {
+            "file_name": f"synthetic-{index}.md",
+            "section_path": f"section-{index}",
+            "similarity": 0.9 - index / 100,
+            "content": f"evidence-{index}-" + ("x" * 500),
+        }
+        for index in range(1, 6)
+    ]
+
+    evidence = agent._rag_synthesis_evidence(hits)
+
+    assert len(evidence) <= 800
+    for index in range(1, 6):
+        assert f"synthetic-{index}.md" in evidence
+        assert f"evidence-{index}-" in evidence
 
 
 def test_rag_grounded_fast_path_stops_without_llm_when_search_errors(monkeypatch):
@@ -461,6 +488,11 @@ def test_rag_grounded_fast_path_returns_no_hit_without_synthesis(monkeypatch):
                 query=query,
                 hits=[],
                 result_count=0,
+                candidate_count=5,
+                rejected_count=5,
+                similarity_cutoff=0.4,
+                top_similarity=0.284252,
+                no_answer=True,
                 embedding_model="synthetic-embedding",
             )
 
@@ -493,8 +525,69 @@ def test_rag_grounded_fast_path_returns_no_hit_without_synthesis(monkeypatch):
 
     assert llm_call_count == 0
     assert response.error_code == ""
-    assert response.assistant_message == "DB 벡터 검색과 일치하는 chunk를 찾지 못했습니다."
+    assert response.assistant_message == (
+        "답변할 만큼 충분한 문서 근거를 찾지 못했습니다. (최고 유사도 0.284, 기준 0.400)"
+    )
     assert response.tool_calls[0].result_payload["result_count"] == 0
+    assert response.rag_grounding is not None
+    assert response.rag_grounding.decision == "insufficient_evidence"
+    assert response.rag_grounding.similarity_cutoff == 0.4
+    assert response.rag_grounding.top_similarity == 0.284252
+    assert response.rag_grounding.rejected_count == 5
+    assert "rag_insufficient_evidence" in response.warnings
+
+
+def test_general_agent_stops_without_second_decision_when_rag_cutoff_rejects_all_hits(monkeypatch):
+    class CutoffRagSearcher:
+        def search(self, query: str, limit: int) -> RagSearchResponse:  # noqa: ARG002
+            return RagSearchResponse(
+                query=query,
+                hits=[],
+                result_count=0,
+                candidate_count=2,
+                rejected_count=2,
+                similarity_cutoff=0.4,
+                top_similarity=0.31,
+                no_answer=True,
+                embedding_model="synthetic-embedding",
+            )
+
+    runtime = _runtime()
+    runtime = PlaygroundRuntime(
+        settings=runtime.settings,
+        finder=runtime.finder,
+        content_searcher=runtime.content_searcher,
+        rag_searcher=CutoffRagSearcher(),
+    )
+    registry = build_tool_registry(runtime)
+    agent = PlaygroundAgent(runtime.settings)
+    decision_count = 0
+
+    def decide(**kwargs):  # noqa: ANN003, ARG001
+        nonlocal decision_count
+        decision_count += 1
+        return AgentDecision(
+            action="tool_call",
+            tool_calls=[PlannedToolCall(tool_id="search_rag_chunks", arguments={"query": "합성 질문"})],
+        )
+
+    monkeypatch.setattr(agent, "_decide_next_action", decide)
+
+    response = agent.run(
+        ChatRequest(
+            message="답이 없는 합성 질문",
+            selected_tool_ids=["search_rag_chunks", "find_folder"],
+            debug_trace=True,
+        ),
+        registry,
+    )
+
+    assert decision_count == 1
+    assert response.error_code == ""
+    assert response.rag_grounding is not None
+    assert response.rag_grounding.decision == "insufficient_evidence"
+    assert response.token_usage is None
+    assert [step.kind for step in response.agent_steps] == ["decision", "tool_call", "observation", "final"]
 
 
 def test_general_agent_stops_after_tool_error_without_second_decision(monkeypatch):
@@ -915,6 +1008,43 @@ def test_openai_chat_response_exposes_token_usage(monkeypatch):
     assert response.token_usage.total_tokens == 15
     assert response.token_usage.calls == 1
     assert response.model_dump_json().find("provider-token") == -1
+
+
+def test_chat_json_reuses_http_client_and_closes_it(monkeypatch):
+    created_clients = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):  # noqa: ANN201
+            return None
+
+        def json(self):  # noqa: ANN201
+            return {"choices": [{"message": {"content": '{"ok":true}'}}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            self.closed = False
+            created_clients.append(self)
+
+        def post(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201
+            return FakeResponse()
+
+        def close(self):  # noqa: ANN201
+            self.closed = True
+
+    monkeypatch.setattr("smb_finder.playground.agent.httpx.Client", FakeClient)
+    agent = PlaygroundAgent(Settings(_env_file=None, langsmith_tracing=False))
+    messages = [{"role": "user", "content": "synthetic keep-alive check"}]
+
+    first = agent._chat_json(messages, model="test-model", base_url="http://localhost:8080/v1", max_tokens=64)
+    second = agent._chat_json(messages, model="test-model", base_url="http://localhost:8080/v1", max_tokens=64)
+    agent.close()
+
+    assert first == {"ok": True}
+    assert second == {"ok": True}
+    assert len(created_clients) == 1
+    assert created_clients[0].closed is True
 
 
 def test_langsmith_tracing_requires_openai_and_key():

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import re
+import threading
 import time
 import uuid
 from typing import Any
@@ -27,6 +28,7 @@ from .models import (
     LlmStatusResponse,
     PlannedToolCall,
     PlaygroundDebug,
+    RagGroundingMetadata,
     SkillDefinition,
     TokenUsage,
     ToolCallTrace,
@@ -198,6 +200,26 @@ class PlaygroundAgent:
         self.settings = settings
         self.skill_store = skill_store or SkillStore(settings.playground_skills_dir)
         self.trace_observer = trace_observer or NoopTraceObserver()
+        self._http_client: httpx.Client | None = None
+        self._http_client_lock = threading.Lock()
+
+    def close(self) -> None:
+        """재사용 중인 LLM HTTP 연결을 닫는다."""
+
+        with self._http_client_lock:
+            client = self._http_client
+            self._http_client = None
+        if client is not None:
+            client.close()
+
+    def _llm_http_client(self) -> httpx.Client:
+        """동일 agent의 LLM 호출에서 keep-alive 연결을 재사용한다."""
+
+        with self._http_client_lock:
+            if self._http_client is None:
+                timeout_s = max(0.1, self.settings.llm_timeout_ms / 1000)
+                self._http_client = httpx.Client(timeout=timeout_s)
+            return self._http_client
 
     def _resolve_llm_connection(
         self,
@@ -779,6 +801,28 @@ class PlaygroundAgent:
                         )
                     )
                     break
+                grounding = self._rag_grounding_from_payload(result_payload)
+                if (
+                    status == "ok"
+                    and handler.definition.id == "search_rag_chunks"
+                    and grounding is not None
+                    and grounding.decision == "insufficient_evidence"
+                ):
+                    if "rag_insufficient_evidence" not in warnings:
+                        warnings.append("rag_insufficient_evidence")
+                    final_answer = result_text
+                    all_steps.append(
+                        AgentStepTrace(
+                            step=step,
+                            kind="final",
+                            title="검색 근거 부족",
+                            detail=result_text,
+                            action="final_answer",
+                            tool_id=handler.definition.id,
+                            tool_name=handler.definition.display_name,
+                        )
+                    )
+                    break
                 if status == "ok" and handler.returns_final_answer:
                     final_answer = result_text
                     all_steps.append(
@@ -828,6 +872,7 @@ class PlaygroundAgent:
             warnings=warnings,
             error_code=response_error_code,
             over_budget=over_budget,
+            rag_grounding=self._rag_grounding_from_traces(traces),
             debug=PlaygroundDebug(llm_calls=debug_calls) if debug_allowed else None,
             token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
         )
@@ -911,7 +956,12 @@ class PlaygroundAgent:
         raw_hits = result_payload.get("hits")
         hits = raw_hits if isinstance(raw_hits, list) else []
         result_count = result_payload.get("result_count", len(hits))
-        if not hits or result_count == 0:
+        grounding = self._rag_grounding_from_payload(result_payload)
+        if not hits or result_count == 0 or (
+            grounding is not None and grounding.decision == "insufficient_evidence"
+        ):
+            if "rag_insufficient_evidence" not in warnings:
+                warnings.append("rag_insufficient_evidence")
             steps.append(
                 AgentStepTrace(
                     step=1,
@@ -934,11 +984,12 @@ class PlaygroundAgent:
                 agent_steps=steps if request.debug_trace else [],
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
                 warnings=warnings,
+                rag_grounding=grounding,
             )
 
         usage_calls: list[TokenUsage] = []
         debug_calls: list[LlmDebugCall] = []
-        skill_instructions = self._skill_system_instructions(active_skills)
+        synthesis_evidence = self._rag_synthesis_evidence(hits)
         try:
             synthesis = self._chat_json(
                 [
@@ -949,13 +1000,12 @@ class PlaygroundAgent:
                             "Cite the file name and section or location for every material claim. "
                             "If the evidence is insufficient, say so explicitly. "
                             "Never invent a document, location, or fact. Return only JSON: {\"answer\":\"...\"}."
-                            f"\n\n{skill_instructions}"
                         ),
                     },
                     {
                         "role": "user",
                         "content": json.dumps(
-                            {"question": request.message, "evidence": observation_text},
+                            {"question": request.message, "evidence": synthesis_evidence},
                             ensure_ascii=False,
                         ),
                     },
@@ -963,7 +1013,7 @@ class PlaygroundAgent:
                 model=connection.model,
                 base_url=connection.base_url,
                 api_key=connection.api_key,
-                max_tokens=500,
+                max_tokens=self.settings.rag_synthesis_max_tokens,
                 purpose="rag_grounded_synthesis",
                 provider=connection.provider,
                 session_id=session_id,
@@ -987,6 +1037,7 @@ class PlaygroundAgent:
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
                 warnings=warnings,
                 error_code="llm_response_invalid_json",
+                rag_grounding=grounding,
                 debug=PlaygroundDebug(llm_calls=debug_calls) if debug_calls else None,
                 token_usage=self._aggregate_token_usage(usage_calls, connection.provider, connection.model),
             )
@@ -1003,6 +1054,7 @@ class PlaygroundAgent:
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
                 warnings=warnings,
                 error_code="local_llm_failed",
+                rag_grounding=grounding,
                 debug=PlaygroundDebug(llm_calls=debug_calls) if debug_calls else None,
                 token_usage=self._aggregate_token_usage(usage_calls, connection.provider, connection.model),
             )
@@ -1035,6 +1087,7 @@ class PlaygroundAgent:
             elapsed_ms=elapsed_ms,
             warnings=warnings,
             over_budget=over_budget,
+            rag_grounding=grounding,
             debug=PlaygroundDebug(llm_calls=debug_calls) if debug_allowed else None,
             token_usage=self._aggregate_token_usage(usage_calls, connection.provider, connection.model),
         )
@@ -1056,6 +1109,86 @@ class PlaygroundAgent:
             if citation not in citations:
                 citations.append(citation)
         return citations
+
+    def _rag_synthesis_evidence(self, hits: list[Any]) -> str:
+        """검색 순서를 유지하면서 모든 hit에 본문 예산을 균등 배분한다."""
+
+        normalized: list[tuple[str, str]] = []
+        for rank, hit in enumerate(hits, start=1):
+            if not isinstance(hit, dict):
+                continue
+            file_name = str(hit.get("file_name", "")).strip()
+            if not file_name:
+                continue
+            location = str(
+                hit.get("section_path") or hit.get("location_label") or hit.get("location_type") or ""
+            ).strip()
+            try:
+                similarity = f"{float(hit.get('similarity', 0.0)):.3f}"
+            except (TypeError, ValueError):
+                similarity = "0.000"
+            header = f"[근거 {rank}] 파일={file_name} | 위치={location or '-'} | 유사도={similarity}"
+            normalized.append((header, str(hit.get("content", "")).strip()))
+
+        if not normalized:
+            return ""
+
+        max_chars = max(500, self.settings.rag_synthesis_evidence_chars)
+        separators_length = max(0, len(normalized) - 1) * 2
+        fixed_length = sum(len(header) + 1 for header, _content in normalized) + separators_length
+        if fixed_length >= max_chars:
+            return "\n\n".join(header for header, _content in normalized)[:max_chars]
+
+        content_budget = max_chars - fixed_length
+        base_share, remainder = divmod(content_budget, len(normalized))
+        blocks: list[str] = []
+        for index, (header, content) in enumerate(normalized):
+            share = base_share + (1 if index < remainder else 0)
+            content_slice = content if len(content) <= share else f"{content[: max(0, share - 1)]}…"
+            blocks.append(f"{header}\n{content_slice}")
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _rag_grounding_from_payload(payload: dict[str, Any] | None) -> RagGroundingMetadata | None:
+        """RAG tool payload를 공개 가능한 cutoff 판정으로 정규화한다."""
+
+        if not isinstance(payload, dict):
+            return None
+        raw_hits = payload.get("hits")
+        hits = raw_hits if isinstance(raw_hits, list) else []
+
+        def as_float(value: Any, default: float | None = 0.0) -> float | None:
+            try:
+                return float(value) if value is not None else default
+            except (TypeError, ValueError):
+                return default
+
+        def as_int(value: Any, default: int = 0) -> int:
+            try:
+                return max(0, int(value))
+            except (TypeError, ValueError):
+                return default
+
+        result_count = as_int(payload.get("result_count"), len(hits))
+        candidate_count = as_int(payload.get("candidate_count"), result_count)
+        candidate_count = max(candidate_count, result_count, len(hits))
+        rejected_count = as_int(payload.get("rejected_count"), max(0, candidate_count - result_count))
+        no_answer = bool(payload.get("no_answer")) or result_count == 0 or not hits
+        return RagGroundingMetadata(
+            decision="insufficient_evidence" if no_answer else "answerable",
+            similarity_cutoff=as_float(payload.get("similarity_cutoff"), 0.0) or 0.0,
+            top_similarity=as_float(payload.get("top_similarity"), None),
+            candidate_count=candidate_count,
+            rejected_count=rejected_count,
+        )
+
+    def _rag_grounding_from_traces(self, traces: list[ToolCallTrace]) -> RagGroundingMetadata | None:
+        """실행된 마지막 RAG tool의 cutoff 판정을 ChatResponse에 노출한다."""
+
+        for trace in reversed(traces):
+            if trace.tool_id == "search_rag_chunks":
+                return self._rag_grounding_from_payload(trace.result_payload)
+        return None
 
     def draft_tool(self, request: ToolDraftRequest, openai_api_key: str = "") -> ToolDraftResponse:
         connection = self._resolve_llm_connection(
@@ -1466,15 +1599,14 @@ class PlaygroundAgent:
         usage: TokenUsage | None = None
 
         def post_json() -> dict[str, Any]:
-            timeout_s = max(0.1, self.settings.llm_timeout_ms / 1000)
-            with httpx.Client(timeout=timeout_s) as client:
-                response = client.post(url, headers=headers, json=payload)
-                if "reasoning_effort" in payload and response.status_code in {400, 422}:
-                    fallback_payload = dict(payload)
-                    fallback_payload.pop("reasoning_effort", None)
-                    response = client.post(url, headers=headers, json=fallback_payload)
-                response.raise_for_status()
-                return response.json()
+            client = self._llm_http_client()
+            response = client.post(url, headers=headers, json=payload)
+            if "reasoning_effort" in payload and response.status_code in {400, 422}:
+                fallback_payload = dict(payload)
+                fallback_payload.pop("reasoning_effort", None)
+                response = client.post(url, headers=headers, json=fallback_payload)
+            response.raise_for_status()
+            return response.json()
 
         try:
             trace_inputs: dict[str, Any] = {
@@ -1619,10 +1751,8 @@ class PlaygroundAgent:
     def _list_models(self, base_url: str, api_key: str = "") -> list[str]:
         url = f"{base_url.rstrip('/')}/models"
         headers = self._headers_for(base_url, api_key=api_key)
-        timeout_s = max(0.1, self.settings.llm_timeout_ms / 1000)
-        with httpx.Client(timeout=timeout_s) as client:
-            response = client.get(url, headers=headers)
-            response.raise_for_status()
+        response = self._llm_http_client().get(url, headers=headers)
+        response.raise_for_status()
         data = response.json()
         models = data.get("data", [])
         return [str(item.get("id", "")).strip() for item in models if isinstance(item, dict) and item.get("id")]

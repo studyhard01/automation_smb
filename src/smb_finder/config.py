@@ -1,7 +1,7 @@
 """설정 로더 — .env 환경변수에서 SMB·인덱스·LLM 설정을 읽는다.
 
 비밀정보(자격증명·내부 IP)는 코드에 하드코딩하지 않고 .env에서만 주입한다.
-(CLAUDE.md 보안 규칙)
+(AGENTS.md 저장소 경계)
 """
 
 from __future__ import annotations
@@ -60,10 +60,28 @@ class Settings(BaseSettings):
     rag_db_query_timeout_ms: int = Field(default=1500, ge=100, description="RAG 벡터 SQL 시간 예산(ms)")
     rag_db_default_limit: int = Field(default=5, ge=1, le=20, description="RAG 기본 chunk 반환 수")
     rag_db_max_limit: int = Field(default=10, ge=1, le=50, description="RAG 최대 chunk 반환 수")
+    rag_similarity_cutoff: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description="이 cosine similarity 미만의 RAG chunk는 답변 근거에서 제외",
+    )
     rag_chunk_max_chars: int = Field(default=1200, ge=100, le=10000, description="chunk별 반환 본문 상한")
+    rag_synthesis_evidence_chars: int = Field(
+        default=1800,
+        ge=500,
+        le=10000,
+        description="RAG 합성 LLM에 균등 배분해 전달할 전체 근거 글자 수 상한",
+    )
+    rag_synthesis_max_tokens: int = Field(
+        default=256,
+        ge=64,
+        le=500,
+        description="RAG 근거 답변 합성의 최대 출력 token 수",
+    )
     rag_embedding_base_url: str = Field(
-        default="http://127.0.0.1:8081/v1",
-        description="nomic 임베딩용 OpenAI 호환 로컬 endpoint",
+        default="http://127.0.0.1:18080/v1",
+        description="원격 온프레미스 nomic 임베딩 서버로 연결하는 OpenAI 호환 endpoint",
     )
     rag_embedding_model: str = Field(default="nomic-embed-text-v2-moe", description="DB와 동일한 임베딩 모델")
     rag_embedding_api_key: str = Field(default="", description="로컬 임베딩 endpoint API key")

@@ -61,14 +61,20 @@ provider에서 같은 방식으로 선택할 수 있다.
 
 `search_rag_chunks`의 입력은 `query`와 선택적인 `limit`이다. 실행 흐름은 다음과 같다.
 
-1. `RAG_EMBEDDING_BASE_URL`의 OpenAI 호환 `/embeddings` endpoint에서 질의를 임베딩한다.
+1. `RAG_EMBEDDING_BASE_URL`의 OpenAI 호환 `/embeddings` endpoint에서 질의를 임베딩한다. 모델은 원격
+   온프레미스 Linux에서 `127.0.0.1:18080`에만 바인딩하고, Windows에서는 PuTTY 저장 세션과
+   `scripts/start_remote_embedding_tunnel.ps1`로 `http://127.0.0.1:18080/v1`에 연결한다.
 2. `document_chunks.embedding <=> query_vector` cosine distance로 상위 chunk를 조회한다.
 3. chunk 본문·문서 위치·유사도와 `embedding_ms`, `db_ms`, `elapsed_ms`를 반환한다.
-4. agent가 검색 결과를 observation으로 받아 최종 답변을 합성한다.
+4. agent가 상위 hit별로 균등 배분한 압축 근거를 받아 최종 답변을 합성한다. 기본 입력 상한은
+   `RAG_SYNTHESIS_EVIDENCE_CHARS=1800`, 출력 상한은 `RAG_SYNTHESIS_MAX_TOKENS=256`이다.
 
 현재 로컬 DB 계약은 database `rag_db_local_20260713`, 모델 `nomic-embed-text-v2-moe`, 차원 768이다.
+원격 서버에 설치할 GGUF 변형은 DB 적재에 사용한 것과 같은지 먼저 확인하며, 서버 CPU/RAM/디스크 점검 없이
+임의로 큰 모델을 설치하지 않는다.
 임베딩 endpoint가 꺼져 있거나 다른 차원을 반환하면 `embedding_unavailable` 또는
 `embedding_dimension_mismatch`로 즉시 표시한다. DB 연결·질의에는 각각 timeout이 있고 SQL 세션은 읽기 전용이다.
+LLM 합성 HTTP client는 서비스 수명 동안 keep-alive 연결을 재사용하고 종료 시 닫는다.
 
 ## 채팅 실행
 
@@ -81,7 +87,7 @@ provider에서 같은 방식으로 선택할 수 있다.
 5. LLM은 최종 선택된 tool schema와 활성 skill 지침만 받고 다음 행동을 JSON으로 반환한다.
 6. tool 결과를 observation으로 전달해 답변을 합성한다.
 7. `assistant_message`, `tool_calls`, `agent_steps`, `active_skill_ids`, `elapsed_ms`, `over_budget`,
-   `token_usage`를 반환한다.
+   `rag_grounding`, `token_usage`를 반환한다.
 
 기능 안정성을 위한 제한은 유지한다.
 
@@ -108,6 +114,8 @@ raw LLM debug는 별도 서버 허용 gate 없이 요청 토글만으로 작동�
 - 관리자 tool: chat 응답 `admin_api_only`
 - RAG 임베딩 endpoint 미가동: chat 응답 `embedding_unavailable`
 - RAG DB 연결/SQL 실패: chat 응답 `rag_db_unavailable`
+- RAG similarity 기준 미달: 오류가 아닌 `rag_grounding.decision=insufficient_evidence`,
+  warning `rag_insufficient_evidence`, 추가 LLM 호출 0회
 - 입력 또는 LLM 설정 오류: HTTP `400`
 - karyotype 입력 길이 오류: HTTP `422`
 - LLM 호출/응답 오류: HTTP `502`

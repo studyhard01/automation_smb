@@ -99,7 +99,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable_quality
 이 명령은 저장소의 hook 경로를 설정한다. 이후 코드·설정·문서 커밋 전에 evaluator가 실행되며 `--no-verify`로
 건너뛰지 않는다. GitHub workflow는 push와 pull request에서 전체 evaluator를 실행해 hard gate를 강제하고 85점
 기준은 advisory로 표시한다. 외부 서비스가 필요한 현재 측정 근거를 score 때문에 임의로 재실행하지 않으며,
-release-readiness 판단 때 `--strict-score`를 명시적으로 실행한다. CI에서는 실제 SMB, 로컬 embedding/DB, 외부
+release-readiness 판단 때 `--strict-score`를 명시적으로 실행한다. CI에서는 실제 SMB, 원격 embedding/로컬 DB, 외부
 judge 자격증명을 요구하지 않는다.
 
 에이전트와 개발자는 hook 실행 여부와 무관하게 변경 후 evaluator를 직접 실행하고, 완료 보고에 다음을 남긴다.
@@ -132,7 +132,8 @@ dataset 측정 기록을 읽는다. 현재 기준 근거는 2026-07-16 MLflow Ph
 측정 근거는 기능이나 dataset이 바뀌었다고 자동으로 새 값이 되지 않는다. 다음 절차로 갱신한다.
 
 1. `document_chatbot_golden.jsonl`의 `validated` 항목만 사용하고 dataset version/fingerprint를 기록한다.
-2. 로컬 embedding endpoint와 PostgreSQL/pgvector를 준비한 뒤 retrieval-only baseline을 재실행한다.
+2. 원격 온프레미스 embedding endpoint의 SSH 터널과 PostgreSQL/pgvector를 준비한 뒤 retrieval-only baseline을
+   재실행한다.
 3. end-to-end 또는 외부 judge가 필요하면 먼저 1건 smoke를 수행하고, 합성 질문·답변·chunk만 전송되는지 확인한다.
 4. 실행 명령과 근거를 확인한 뒤 `config/project_quality_rubric.json`의 `measured_evidence`에 `kind`, `advisory`,
    `recorded_on`, `max_age_days`, `source`, `run_fingerprint`, `dataset_fingerprint`, `metrics`를 함께 반영한다.

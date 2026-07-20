@@ -27,7 +27,7 @@ agent loop, 결과 표시, trace와 지연 측정이 하나의 경로에서 동�
     `create_playground_skill`을 자동으로 tool 범위에 추가한다.
   - 알 수 없는 tool ID는 `400 unknown_tool`로 거절한다.
   - 응답은 `assistant_message`, `tool_calls`, `agent_steps`, `active_skill_ids`, `elapsed_ms`, `over_budget`,
-    `token_usage`를 제공한다.
+    optional `rag_grounding`, `token_usage`를 제공한다.
 - `POST /api/playground/karyotype-summary`
   - 별도 합성 데이터 토글이나 provider 정책 `403` 없이 선택한 provider로 실행한다.
   - 입력·LLM 설정 오류는 `400`, 길이 오류는 `422`, provider 호출/응답 오류는 `502`로 반환한다.
@@ -37,8 +37,13 @@ agent loop, 결과 표시, trace와 지연 측정이 하나의 경로에서 동�
 - agent step, tool call 수, timeout, 전체 시간 예산은 항상 제한한다.
 - 선택 tool이 정확히 `search_rag_chunks`, 선택 skill이 정확히 `rag-grounded-answer`인 요청은 결정용 LLM을 생략하고
   RAG fast path로 실행한다.
-- RAG fast path는 검색 성공 시 근거 합성 LLM 1회만 호출한다. 검색 오류·무결과에서는 추가 LLM을 호출하지 않으며,
-  tool 오류 코드를 최상위 응답의 `error_code`에도 반영한다.
+- RAG fast path는 cutoff를 통과한 검색 성공 시 근거 합성 LLM 1회만 호출한다. 검색 오류·무결과·cutoff
+  미달에서는 추가 LLM을 호출하지 않으며 tool 오류 코드는 최상위 응답의 `error_code`에도 반영한다.
+- 일반 agent 경로도 RAG cutoff 미달 뒤 두 번째 판단 LLM을 호출하지 않고 `insufficient_evidence`로 종료한다.
+- RAG 합성 입력은 상위 hit마다 본문 예산을 균등 배분한 1800자 이하의 전용 근거로 압축하고 출력은 256 token으로
+  제한한다. API router는 thread-safe LLM HTTP client를 재사용하고 종료 시 연결을 닫는다.
+- 질의 embedding 기본 endpoint는 `http://127.0.0.1:18080/v1`로 고정한다. 모델은 원격 온프레미스
+  Linux의 loopback에만 기동하고 PuTTY/Plink SSH 터널로 연결한다. 로컬 PC에는 모델·서버 바이너리를 설치하지 않는다.
 - 근거 문서 표시는 LLM이 작성한 임의 출처가 아니라 실제 검색 hit의 파일명과 섹션/위치를 서버에서 조립한다.
 - 같은 tool/인자의 반복 호출은 막는다.
 - 내용 인덱싱처럼 무거운 관리자 동작은 Playground 자동 실행 대상이 아니다.

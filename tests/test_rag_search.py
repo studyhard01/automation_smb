@@ -140,6 +140,11 @@ def test_vector_search_uses_read_only_pgvector_query_and_clamps_limit():
 
     assert embedding_client.queries == ["프로젝트 일정은?"]
     assert response.result_count == 1
+    assert response.candidate_count == 1
+    assert response.rejected_count == 0
+    assert response.similarity_cutoff == 0.4
+    assert response.top_similarity == 0.876543
+    assert response.no_answer is False
     assert response.hits[0].content == f"{'1' * 100}…"
     assert response.hits[0].similarity == 0.876543
     assert response.embedding_ms >= 0
@@ -154,6 +159,71 @@ def test_vector_search_uses_read_only_pgvector_query_and_clamps_limit():
 
     searcher.close()
     assert embedding_client.closed is True
+
+
+def test_vector_search_filters_hits_below_similarity_cutoff():
+    rows = [
+        {
+            "chunk_id": 10,
+            "document_id": 2,
+            "chunk_index": 1,
+            "content": "충분한 합성 근거",
+            "similarity": 0.61,
+            "file_name": "alpha.md",
+            "file_path": "docs/alpha.md",
+        },
+        {
+            "chunk_id": 11,
+            "document_id": 3,
+            "chunk_index": 2,
+            "content": "기준 미달 합성 후보",
+            "similarity": 0.39,
+            "file_name": "beta.md",
+            "file_path": "docs/beta.md",
+        },
+    ]
+    searcher = RagVectorSearcher(
+        _settings(rag_similarity_cutoff=0.4),
+        embedding_client=FakeEmbeddingClient([0.1, 0.2, 0.3]),
+        connect=FakeConnect(rows),
+    )
+
+    response = searcher.search("합성 cutoff 질문", limit=2)
+
+    assert [hit.chunk_id for hit in response.hits] == [10]
+    assert response.result_count == 1
+    assert response.candidate_count == 2
+    assert response.rejected_count == 1
+    assert response.top_similarity == 0.61
+    assert response.no_answer is False
+
+
+def test_vector_search_marks_no_answer_when_all_candidates_are_below_cutoff():
+    rows = [
+        {
+            "chunk_id": 13,
+            "document_id": 4,
+            "chunk_index": 0,
+            "content": "관련 없는 합성 후보",
+            "similarity": 0.284252,
+            "file_name": "unrelated.md",
+            "file_path": "docs/unrelated.md",
+        }
+    ]
+    searcher = RagVectorSearcher(
+        _settings(rag_similarity_cutoff=0.4),
+        embedding_client=FakeEmbeddingClient([0.1, 0.2, 0.3]),
+        connect=FakeConnect(rows),
+    )
+
+    response = searcher.search("답이 없는 합성 질문")
+
+    assert response.hits == []
+    assert response.result_count == 0
+    assert response.candidate_count == 1
+    assert response.rejected_count == 1
+    assert response.top_similarity == 0.284252
+    assert response.no_answer is True
 
 
 def test_vector_search_rejects_empty_query_before_db_connection():
@@ -207,6 +277,8 @@ def test_vector_search_emits_retriever_embedding_and_db_spans_without_content():
     retriever = observer.records[0]
     assert "query" not in retriever["inputs"]
     assert retriever["outputs"] == [{"doc_uri": "alpha.md", "chunk_id": 10, "similarity": 0.8}]
+    assert retriever["attributes"]["retriever.similarity_cutoff"] == 0.4
+    assert retriever["attributes"]["retriever.no_answer"] is False
 
 
 def test_openai_compatible_client_adds_nomic_search_query_prefix(monkeypatch):

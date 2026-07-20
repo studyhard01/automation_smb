@@ -342,6 +342,25 @@
           "SEARCH_TOOL_SPECS",
           "allowed_surfaces",
           "MappingProxyType"
+        ],
+        "src/smb_finder/rag_search.py": [
+          "rag_similarity_cutoff",
+          "rejected_count",
+          "no_answer=not hits"
+        ],
+        "src/smb_finder/playground/models.py": [
+          "class RagGroundingMetadata(BaseModel)",
+          "rag_grounding: RagGroundingMetadata | None"
+        ],
+        "src/smb_finder/playground/agent.py": [
+          "rag_synthesis_evidence_chars",
+          "rag_synthesis_max_tokens",
+          "def _rag_synthesis_evidence",
+          "def _llm_http_client"
+        ],
+        "src/smb_finder/playground/api.py": [
+          "shared_agent",
+          "shared_agent_lifespan"
         ]
       },
       "observability": {
@@ -376,7 +395,11 @@
           "인덱스 우선",
           "읽기 전용",
           "src/smb_finder/mcp_server.py",
-          "scripts/evaluate_quality.py"
+          "scripts/evaluate_quality.py",
+          "RAG_SIMILARITY_CUTOFF",
+          "RAG_SYNTHESIS_EVIDENCE_CHARS",
+          "RAG_SYNTHESIS_MAX_TOKENS",
+          "rag_grounding.decision=insufficient_evidence"
         ],
         "forbidden_tokens": []
       },
@@ -468,7 +491,12 @@
           "92.3%",
           "195.6ms",
           "4.91s",
-          "481644c3daca4c8b99012a98b4259620"
+          "481644c3daca4c8b99012a98b4259620",
+          "RAG_SIMILARITY_CUTOFF",
+          "RAG_SYNTHESIS_EVIDENCE_CHARS",
+          "RAG_SYNTHESIS_MAX_TOKENS",
+          "0.284",
+          "0.490"
         ],
         "forbidden_tokens": []
       },

@@ -279,7 +279,7 @@ Backend/Test:
 - 15 case 중 retrieval 평가 13건, non-RAG 기대 case 2건은 retrieval-only runner에서 제외
 - Hit@5 83.3%, Recall@5 79.2%, MRR 69.4%
 - warm baseline retrieval p50 188.9ms, p95 204.3ms, 오류율 0%, over-budget 0%
-- no-answer accuracy 0%: 유사도 cutoff가 없어 답이 없는 질문에도 상위 chunk를 반환하는 현재 한계를 확인
+- no-answer accuracy 0%: 당시 유사도 cutoff가 없어 답이 없는 질문에도 상위 chunk를 반환한 baseline 한계를 확인
 - MLflow run `499673fd79be4b1285edbf87b09ef318`에서 metric 19개, parameter 12개와 JSON artifact 2개 확인
 
 ### Phase 2. 전체 문서 챗봇 trace — 완료
@@ -343,9 +343,33 @@ Backend/Test:
 1. 현재 tool sandbox와 외부 실행 권한을 분리한 뒤 skill-off 15건을 재실행한다.
 2. candidate 25건을 사람이 검토해 approve/revise/reject를 확정한다.
 3. 승인된 candidate만 별도 변경으로 golden v3에 승격하고 Dataset fingerprint를 갱신한다.
-4. similarity cutoff와 3초대 end-to-end 지연을 별도 최적화한다.
+4. 구현된 similarity cutoff를 실제 embedding/DB가 준비된 상태에서 재측정하고 3초대 end-to-end 지연을 최적화한다.
 
-### Phase 4. 후속 선택 기능
+### Phase 4. RAG 품질·지연 안정화 — cutoff·합성 지연 최적화 구현 완료, 재측정 대기
+
+- `RAG_SIMILARITY_CUTOFF`를 `0.0~1.0` 설정으로 추가하고 기본값을 `0.4`로 두었다.
+- Phase 1 저장 artifact에서 답변 가능 case의 최고 similarity 최솟값은 `0.490`, no-answer case의 최고값은
+  `0.284`였다. `0.4` replay는 Hit@5 83.3%·Recall@5 79.2%를 유지하고 no-answer 1건을 모두 거절했다.
+- 검색 결과에는 `candidate_count`, `rejected_count`, `similarity_cutoff`, `top_similarity`, `no_answer`를 기록한다.
+- Playground 응답에는 additive `rag_grounding` 메타데이터를 추가한다. cutoff 미달은 오류로 처리하지 않으며
+  fast path와 일반 agent 경로 모두 추가 LLM 호출 없이 `insufficient_evidence`로 끝난다.
+- 저장된 Phase 3 baseline의 RAG 13건은 평균 입력 1,150.6 token, 출력 185.2 token, end-to-end 3,597.3ms였고
+  최대 출력 357 token case는 6,407.0ms였다. 이를 근거로 합성 입력은 `RAG_SYNTHESIS_EVIDENCE_CHARS=1800`
+  안에서 상위 hit별로 균등 배분하고 출력은 `RAG_SYNTHESIS_MAX_TOKENS=256`으로 제한했다.
+- RAG 전용 system prompt에서 builtin skill의 중복 지침을 제거했다. 검색 payload와 서버 조립 인용 목록은 그대로
+  유지하며 LLM에 전달하는 본문만 압축한다.
+- 같은 Playground agent는 LLM HTTP client를 재사용해 keep-alive를 적용한다. API router도 요청마다 agent/client를
+  새로 만들지 않고 공유하며 서비스 종료 시 연결을 닫는다.
+- 2026-07-20 로컬 재측정은 embedding endpoint가 준비되지 않아 13건 모두 `embedding_unavailable`로 종료됐다.
+  따라서 저장된 품질 evidence와 rubric의 no-answer 0%는 새 성공 run 전까지 갱신하지 않는다.
+
+다음 순서:
+
+1. embedding endpoint와 pgvector를 준비해 retrieval/end-to-end 15건을 재실행한다.
+2. no-answer 95% 이상, Hit@5 90% 이상, Groundedness 유지와 입력·출력 token 감소 여부를 확인한다.
+3. end-to-end p95 1초에 미달하면 생성 model/서빙 설정과 hybrid/RRF 검색을 분리 실험한다.
+
+### Phase 5. 후속 선택 기능
 
 - 사람 평가/피드백을 trace에 연결
 - 실패 trace를 evaluation dataset에 승격
@@ -353,8 +377,8 @@ Backend/Test:
 - 필요할 때만 Playground에 작은 MLflow 외부 링크 또는 trace 링크 추가
 - 운영 전환 보안·보존·접근통제 별도 설계
 
-Frontend는 Phase 0~3에서 변경하지 않는다. MLflow UI를 평가 결과 화면으로 사용하고 `/api/playground/chat`과
-`ChatResponse` 계약을 그대로 유지한다.
+Frontend 화면은 Phase 0~4에서 별도 변경하지 않는다. MLflow UI를 평가 결과 화면으로 사용하고
+`/api/playground/chat`의 기존 필드는 유지하면서 Phase 4에 optional `rag_grounding`만 추가했다.
 
 ## 10. 예상 파일
 

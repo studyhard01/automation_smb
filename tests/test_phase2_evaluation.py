@@ -7,7 +7,7 @@ from typing import Any
 from smb_finder.evaluation.end_to_end import run_end_to_end_evaluation
 from smb_finder.evaluation.models import CorpusSnapshot, GoldenDataset
 from smb_finder.evaluation.tracing import MlflowTraceObserver
-from smb_finder.playground.models import ChatResponse, TokenUsage, ToolCallTrace
+from smb_finder.playground.models import ChatResponse, RagGroundingMetadata, TokenUsage, ToolCallTrace
 
 
 class FakeSpan:
@@ -146,6 +146,12 @@ def test_end_to_end_runner_scores_actual_agent_response():
                     )
                 ],
                 elapsed_ms=123,
+                rag_grounding=RagGroundingMetadata(
+                    decision="answerable",
+                    similarity_cutoff=0.4,
+                    top_similarity=0.9,
+                    candidate_count=1,
+                ),
                 token_usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15, calls=1),
             )
 
@@ -165,4 +171,7 @@ def test_end_to_end_runner_scores_actual_agent_response():
     assert report.aggregate.fact_coverage == 1
     assert report.aggregate.citation_match == 1
     assert report.aggregate.total_tokens == 15
+    assert report.cases[0].grounding_decision == "answerable"
+    assert report.cases[0].similarity_cutoff == 0.4
+    assert report.cases[0].top_similarity == 0.9
     assert "hidden" not in report.model_dump_json()

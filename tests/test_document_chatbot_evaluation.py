@@ -134,6 +134,59 @@ def test_retrieval_runner_keeps_search_error_as_case_result():
     assert report.cases[0].elapsed_ms == 12.5
 
 
+def test_retrieval_runner_counts_cutoff_abstention_as_correct_no_answer():
+    dataset = GoldenDataset.model_validate(
+        {
+            "name": "synthetic-no-answer.jsonl",
+            "version": "v1",
+            "fingerprint": "noanswer1",
+            "cases": [
+                {
+                    "case_id": "synthetic-no-answer-001",
+                    "inputs": {"question": "corpus에 없는 합성 질문", "top_k": 5},
+                    "expectations": {
+                        "expected_tool_calls": [{"name": "search_rag_chunks"}],
+                        "should_answer": False,
+                    },
+                    "provenance": {
+                        "review_status": "validated",
+                        "source_kind": "behavioral",
+                        "generation_method": "manual",
+                    },
+                }
+            ],
+        }
+    )
+
+    class CutoffSearcher:
+        def search(self, query: str, limit: int) -> RagSearchResponse:  # noqa: ARG002
+            return RagSearchResponse(
+                query=query,
+                hits=[],
+                result_count=0,
+                candidate_count=5,
+                rejected_count=5,
+                similarity_cutoff=0.4,
+                top_similarity=0.284252,
+                no_answer=True,
+                embedding_model="synthetic-embedding",
+            )
+
+    report = run_retrieval_evaluation(
+        dataset,
+        CutoffSearcher(),
+        corpus=CorpusSnapshot(fingerprint="corpus1"),
+    )
+
+    assert report.aggregate.no_answer_accuracy == 1
+    assert report.cases[0].no_answer_correct == 1
+    assert report.cases[0].retrieved == []
+    assert report.cases[0].no_answer is True
+    assert report.cases[0].similarity_cutoff == 0.4
+    assert report.cases[0].top_similarity == 0.284252
+    assert report.cases[0].rejected_count == 5
+
+
 def test_noop_mlflow_logger_does_not_require_mlflow_package():
     report = SimpleNamespace()
     assert NoopEvaluationLogger().log_report(report) is None

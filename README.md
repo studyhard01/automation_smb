@@ -100,6 +100,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `src/smb_finder/playground/studio_observer.py` | Playground 실행 메타데이터를 로컬 LangGraph Studio 관찰 graph로 보내는 비동기·fail-open observer |
 | `src/smb_finder/web/` | `/playground` 정적 UI — tool 선택, 채팅, Tool Lab 초안 화면 |
 | `scripts/start_local_stack.ps1` | Playground·MLflow·LangGraph Studio 통합 Start/Stop/Status 실행기 |
+| `scripts/start_remote_embedding_tunnel.ps1` | PuTTY 저장 세션으로 원격 온프레미스 embedding 서버를 `127.0.0.1:18080/v1`에 연결 |
 | `scripts/run_mlflow_doc_eval.py` | 문서 RAG retrieval/end-to-end golden evaluation과 선택적 LLM judge CLI |
 | `scripts/register_mlflow_eval_dataset.py` | golden/candidate JSONL을 로컬 MLflow Evaluation Dataset으로 등록 |
 | `scripts/evaluate_quality.py` | 저장소 전용 100점 rubric과 hard gate를 로컬/CI에서 동일하게 평가 |
@@ -168,11 +169,18 @@ frontmatter와 본문 지침은 채팅 요청의 agent system prompt에 실제�
 
 `search_rag_chunks`는 `rag_db_local_20260713.document_chunks`를 cosine 유사도로 검색한다. DB에 저장된
 `nomic-embed-text-v2-moe`와 동일한 768차원 모델 endpoint가 필요하며, 질의에는 모델 권장
-`search_query: ` prefix를 자동으로 붙인다. 연결은 `.env`의 `RAG_DB_*`, `RAG_EMBEDDING_*`로 바꿀 수 있다.
-찾은 chunk는 agent observation으로 전달되고 선택한 LLM이 근거 기반 최종 답변을 작성한다.
+`search_query: ` prefix를 자동으로 붙인다. 모델은 로컬 PC가 아니라 원격 온프레미스 Linux에서 실행하며,
+원격 서비스는 `127.0.0.1:18080`에만 바인딩한다. Windows의 PuTTY/Plink SSH 터널이 이를
+`http://127.0.0.1:18080/v1`로 전달한다. 연결은 `.env`의 `RAG_DB_*`, `RAG_EMBEDDING_*`로 바꿀 수 있다.
+`RAG_SIMILARITY_CUTOFF` 기본값은 저장된 합성 baseline으로 보정한 `0.4`다. 기준 미달 chunk는 답변 근거에서
+제외하며, 모두 미달이면 응답의 `rag_grounding.decision=insufficient_evidence`와 최고 similarity·기준값을 반환한다.
+기준을 통과한 chunk만 agent observation으로 전달되고 선택한 LLM이 근거 기반 최종 답변을 작성한다.
 `search_rag_chunks` tool과 `rag-grounded-answer` skill만 선택한 문서 챗봇 요청은 결정용 LLM 호출을 생략하는
-RAG fast path로 실행된다. 검색 성공 시 근거 합성 LLM을 1회만 호출하고, 검색 오류 또는 무결과이면 추가 LLM 호출 없이
-즉시 상태를 반환한다. Playground의 `문서 근거` 영역에서는 실제 검색 결과의 파일명, 섹션/위치, 유사도와
+RAG fast path로 실행된다. 검색 성공 시 근거 합성 LLM을 1회만 호출하고, 검색 오류·무결과·cutoff 미달이면
+추가 LLM 호출 없이 즉시 상태를 반환한다. 일반 agent 경로도 RAG cutoff 미달 뒤 두 번째 판단 LLM을 호출하지 않는다.
+합성 LLM에는 `RAG_SYNTHESIS_EVIDENCE_CHARS`(기본 1800) 안에서 상위 5개 근거 본문을 균등 배분해 전달하고,
+출력은 `RAG_SYNTHESIS_MAX_TOKENS`(기본 256)로 제한한다. 서비스 프로세스에서는 LLM HTTP keep-alive 연결을 재사용한다.
+Playground의 `문서 근거` 영역에서는 실제 검색 결과의 파일명, 섹션/위치, 유사도와
 embedding/DB 지연을 접어서 확인할 수 있다.
 보고서 tool은 문서를 자동 확정하지 않고, 로컬 내용 인덱스에서 관련 템플릿 후보를 찾은 뒤
 작성 체크리스트와 다음 행동을 제시한다. 결과 trace에는 구조화 payload가 포함되어 UI가 후보 문서와
@@ -336,8 +344,15 @@ Copy-Item .env.example .env                  # SMB 자격증명 입력 (실제 �
 # 서버 실행
 uv run --no-sync uvicorn smb_finder.api:app --host 127.0.0.1 --port 8010 --reload
 
-# 별도 터미널: DB 적재 때 사용한 동일 GGUF 모델을 embeddings 서버로 실행
-llama-server -m <nomic-embed-text-v2-moe.gguf> --embeddings --port 8081
+# PuTTY에서 원격 Linux 접속을 저장하고 먼저 대화형 로그인을 1회 확인
+# 원격 서버에는 DB 적재 때 사용한 정확한 모델 변형으로 embedding 서비스를
+# 127.0.0.1:18080에만 기동한다. 설치 전 CPU/RAM/디스크와 기존 포트 사용 여부를 확인한다.
+
+# 별도 터미널: 비밀번호 기반 PuTTY 세션은 대화형 foreground 터널로 시작
+powershell -ExecutionPolicy Bypass -File scripts\start_remote_embedding_tunnel.ps1 `
+  -SessionName "<PUTTY_SAVED_SESSION>" -Foreground
+
+# Pageant 또는 키 기반 비대화형 인증이 준비된 경우 -Foreground를 빼면 숨김 백그라운드로 실행
 
 # 폴더 찾기 요청 (이름·경로)
 curl -s -X POST http://localhost:8010/find \
@@ -403,9 +418,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable_quality
 
 ## 다음 단계
 
-- **no-answer cutoff**: 유사도 임계값과 답변 보류 계약을 구현해 현재 0%인 no-answer accuracy를 우선 개선한다.
-- **검색 품질·지연**: 이미 구현된 PostgreSQL/pgvector RAG와 FTS5를 기준으로 hybrid/RRF·reranking 필요성을
-  검증하고 Hit@5 90% 이상, retrieval p95 1초 미만과 end-to-end 지연 개선을 함께 추적한다.
+- **Phase 4 재측정**: 원격 온프레미스 embedding endpoint의 SSH 터널과 pgvector를 준비해 구현된
+  cutoff·압축 근거·256 token 상한·
+  HTTP keep-alive를 같은 15건으로 재측정하고 no-answer 95% 이상, end-to-end p95 1초 목표를 확인한다.
+- **검색 품질**: PostgreSQL/pgvector RAG와 FTS5를 기준으로 hybrid/RRF·reranking 필요성을 검증하고
+  Hit@5 90% 이상을 추적한다.
 - **candidate 검토**: 25건을 사람이 approve/revise/reject로 확정하고 승인된 항목만 golden v3로 승격한다.
 - `hwp`/`hwpx` 본문 추출 추가(로컬 파서, 선택 의존성).
 - 음성(STT) 입력 추가 — L1, 로컬 모델(`OS.md` 8장 미확정 항목).

@@ -14,6 +14,7 @@ AgentAction = Literal["tool_call", "final_answer", "clarify"]
 AgentStepKind = Literal["decision", "tool_call", "observation", "final", "blocked", "error"]
 LlmProvider = Literal["local", "openai"]
 SkillSource = Literal["builtin", "user"]
+RagGroundingDecision = Literal["answerable", "insufficient_evidence"]
 
 
 class ToolDefinition(BaseModel):
@@ -154,6 +155,16 @@ class TokenUsage(BaseModel):
     calls: int = 0
 
 
+class RagGroundingMetadata(BaseModel):
+    """RAG cutoff가 내린 답변 가능 여부와 공개 가능한 점수 요약."""
+
+    decision: RagGroundingDecision
+    similarity_cutoff: float = 0.0
+    top_similarity: float | None = None
+    candidate_count: int = 0
+    rejected_count: int = 0
+
+
 class ChatResponse(BaseModel):
     """Playground 채팅 실행 응답."""
 
@@ -169,6 +180,7 @@ class ChatResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     error_code: str = ""
     over_budget: bool = False
+    rag_grounding: RagGroundingMetadata | None = None
     debug: PlaygroundDebug | None = None
     token_usage: TokenUsage | None = None
 

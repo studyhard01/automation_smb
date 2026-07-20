@@ -124,6 +124,11 @@ class CaseEvaluationResult(BaseModel):
     reciprocal_rank: float | None = None
     tool_exact_match: float = 0.0
     no_answer_correct: float | None = None
+    candidate_count: int = 0
+    rejected_count: int = 0
+    similarity_cutoff: float = 0.0
+    top_similarity: float | None = None
+    no_answer: bool = False
     embedding_ms: float = 0.0
     db_ms: float = 0.0
     elapsed_ms: float = 0.0
@@ -200,6 +205,9 @@ class EndToEndCaseEvaluationResult(BaseModel):
     reciprocal_rank: float | None = None
     tool_exact_match: float = 0.0
     no_answer_correct: float | None = None
+    grounding_decision: str = ""
+    similarity_cutoff: float = 0.0
+    top_similarity: float | None = None
     fact_coverage: float | None = None
     citation_match: float | None = None
     agent_steps: int = 0
