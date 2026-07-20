@@ -10,7 +10,8 @@
 
 ## 핵심 설계 — 지연 최소화
 
-매 요청마다 SMB를 도는 대신, **폴더 트리를 미리 인덱싱(메모리+JSON 캐시)** 하고 **인메모리로 검색**한다.
+매 요청마다 SMB를 도는 대신, **인덱스 우선**으로 폴더 트리를 미리 구성(메모리+JSON 캐시)하고
+**인메모리로 검색**한다.
 자연어는 규칙 기반 fast-path로 키워드를 뽑고, 모호할 때만 로컬 LLM을 태운다(timeout 강제).
 
 ```
@@ -101,6 +102,10 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `scripts/start_local_stack.ps1` | Playground·MLflow·LangGraph Studio 통합 Start/Stop/Status 실행기 |
 | `scripts/run_mlflow_doc_eval.py` | 문서 RAG retrieval/end-to-end golden evaluation과 선택적 LLM judge CLI |
 | `scripts/register_mlflow_eval_dataset.py` | golden/candidate JSONL을 로컬 MLflow Evaluation Dataset으로 등록 |
+| `scripts/evaluate_quality.py` | 저장소 전용 100점 rubric과 hard gate를 로컬/CI에서 동일하게 평가 |
+| `scripts/enable_quality_hook.ps1` | 추적된 pre-commit hook을 현재 clone에 활성화 |
+| `config/project_quality_rubric.json` | 100점 배점·hard gate·합성 실측 evidence의 machine-readable 기준 |
+| `.githooks/pre-commit`, `.github/workflows/project-quality.yml` | 커밋과 push/PR에서 품질 hard gate 실행 |
 | `data/evaluation/` | 검증 완료 golden 15건과 검토 전 corpus 기반 candidate 25건을 분리한 합성 JSONL fixture |
 | `docs/PLAYGROUND_TOOLS.md` | `/playground` 등록 tool별 입력·동작·테스트 계약 |
 | `docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md` | 세포유전 LLM 보고서 프로세스 이관 가이드 |
@@ -108,6 +113,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `docs/MCP_IMPLEMENTATION_PLAN.md` | 검색 도구 2개부터 시작하는 MCP MVP의 작업 순서·테스트·롤백 계획 |
 | `docs/playground_agentic_plan.md` | Playground 제한형 agent loop와 debug 토글 구현 계획 |
 | `docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md` | MLflow 기반 문서 RAG 검색·답변·지연 평가 최종 개발 계획 |
+| `docs/PROJECT_QUALITY_RUBRIC.md` | 코드 변경마다 적용하는 100점 품질 기준, hard gate, 로컬/CI 실행 계약 |
 | `integrations/langflow/` | 노코드 외피 — Langflow 컴포넌트 + `folder_search` 워크플로우 자동 생성기 ([README](integrations/langflow/README.md)) |
 | `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
 
@@ -377,13 +383,29 @@ curl -s http://localhost:8010/admin/content-index-jobs/<job_id> \
 ```bash
 .venv/Scripts/python -m pytest tests/ -m "not integration"   # 라이브 SMB 불필요
 .venv/Scripts/python -m ruff check src tests integrations/langflow
+
+# 테스트·린트·문서 링크·저장소 경계를 한 번에 평가
+uv run --no-sync python scripts/evaluate_quality.py
 ```
+
+권장 품질 목표는 **hard gate 전부 통과 + 85점 이상**이다. JSON 결과는 `--json-output <path>`, 85점 미만도
+실패 처리하려면 `--strict-score`, Ruff/pytest 없이 빠른 정적 사전 점검만 하려면 `--static-only`를 사용한다.
+`--static-only`는 실행 hard gate를 건너뛰므로 완료 판정에는 사용할 수 없다.
+현재 clone의 pre-commit hook은 다음 명령으로 한 번 활성화한다. push와 PR에서는 전체 평가와 hard gate를
+강제하고 점수는 advisory로 표시한다. release-readiness 확인 때 `--strict-score`를 별도로 실행한다.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable_quality_hook.ps1
+```
+
+평가 항목, hard gate와 합성 실측 근거 갱신 방법은
+[`docs/PROJECT_QUALITY_RUBRIC.md`](docs/PROJECT_QUALITY_RUBRIC.md)를 참고한다.
 
 ## 다음 단계
 
-- **의미 검색(벡터) — 같은 SQLite에 추가**: 현재 키워드(FTS5) 위에, 표현이 달라도 의미가 가까운
-  검색을 위해 **로컬 임베딩 + 벡터**를 얹어 하이브리드(RRF)로 융합. 외부 전송 금지 원칙상 임베딩은
-  온프레미스 로컬 모델로. 실제 필요성 확인 후 진행.
-- `hwp`/`hwpx` 본문 추출 추가 (진단검사실에 흔함 — OLE/zip 파서, 선택 의존성)
-- 음성(STT) 입력 추가 — L1, 로컬 모델 (`OS.md` 8장 미확정 항목)
-- 실측으로 시간 예산(`FIND_BUDGET_MS`/`CONTENT_SEARCH_BUDGET_MS`) 조정
+- **no-answer cutoff**: 유사도 임계값과 답변 보류 계약을 구현해 현재 0%인 no-answer accuracy를 우선 개선한다.
+- **검색 품질·지연**: 이미 구현된 PostgreSQL/pgvector RAG와 FTS5를 기준으로 hybrid/RRF·reranking 필요성을
+  검증하고 Hit@5 90% 이상, retrieval p95 1초 미만과 end-to-end 지연 개선을 함께 추적한다.
+- **candidate 검토**: 25건을 사람이 approve/revise/reject로 확정하고 승인된 항목만 golden v3로 승격한다.
+- `hwp`/`hwpx` 본문 추출 추가(로컬 파서, 선택 의존성).
+- 음성(STT) 입력 추가 — L1, 로컬 모델(`OS.md` 8장 미확정 항목).

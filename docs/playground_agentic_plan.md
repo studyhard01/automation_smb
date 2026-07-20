@@ -23,9 +23,11 @@ agent loop, 결과 표시, trace와 지연 측정이 하나의 경로에서 동�
   - `enabled=true`이고 `execution_type`이 `code` 또는 `llm`인 tool만 UI에서 선택할 수 있다.
 - `POST /api/playground/chat`
   - local/OpenAI provider가 같은 tool 계약을 사용한다.
-  - 요청에서 선택하지 않은 tool은 실행하지 않는다.
+  - 요청에서 선택하지 않은 tool은 실행하지 않는다. 단, `skill-creator`가 활성화된 요청은
+    `create_playground_skill`을 자동으로 tool 범위에 추가한다.
   - 알 수 없는 tool ID는 `400 unknown_tool`로 거절한다.
-  - 응답은 `assistant_message`, `tool_calls`, `agent_steps`, `elapsed_ms`, `over_budget`, `token_usage`를 제공한다.
+  - 응답은 `assistant_message`, `tool_calls`, `agent_steps`, `active_skill_ids`, `elapsed_ms`, `over_budget`,
+    `token_usage`를 제공한다.
 - `POST /api/playground/karyotype-summary`
   - 별도 합성 데이터 토글이나 provider 정책 `403` 없이 선택한 provider로 실행한다.
   - 입력·LLM 설정 오류는 `400`, 길이 오류는 `422`, provider 호출/응답 오류는 `502`로 반환한다.
@@ -68,7 +70,8 @@ MLflow는 선택 설치하는 오프라인 평가 계층이며, 정상 Playgroun
 
 ## 2026-07-16 P0 실측
 
-- 변경 전 실제 문서 질의: 11,542.5ms, LLM 2회.
+- 변경 전 합성 문서 질의: 11,542.5ms, LLM 2회.
 - RAG fast path 적용 후 3회 중앙값: 4,183.8ms, 매 요청 LLM 1회, 모두 10초 예산 이내.
 - 검색 단계 실측: embedding 약 88~123ms, DB 약 90~109ms.
-- LangSmith에서 `request_id` 상관관계, `purpose=rag_grounded_synthesis`, 입력 messages, 응답과 token usage 기록을 확인했다.
+- 합성 입력으로 LangSmith에서 `request_id` 상관관계, `purpose=rag_grounded_synthesis`, 입력 messages,
+  응답과 token usage 기록을 확인했다.

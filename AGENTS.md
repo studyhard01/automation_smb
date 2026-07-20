@@ -85,6 +85,13 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - 과한 사전 추상화보다 **동작하는 수직 슬라이스 먼저**(연결 → 탐색 → 결과 반환), 리팩토링은 동작 확인 후.
 - 결정이 갈리면 옵션 나열 대신 **추천안 하나 제시 후 진행**, 막히면 짧게 묻는다.
 - 신규 파일/모듈이 늘면 README에 한 줄로 구조를 갱신해 따라잡기 쉽게 둔다.
+
+## 변경 후 품질 점검
+
+코드·설정·문서를 변경한 뒤에는 `uv run --no-sync python scripts/evaluate_quality.py`를 실행한다.
+완료 보고에는 총점, hard gate 통과 여부, 저장된 합성 evidence의 freshness와 목표 미달 항목을 함께 적는다.
+평가 기준과 strict mode는 [`docs/PROJECT_QUALITY_RUBRIC.md`](docs/PROJECT_QUALITY_RUBRIC.md)를 따른다.
+
 # dev-team 호출 시 최종 보고 필수 항목
 
 사용자가 `@dev-team` 또는 `dev-team`을 호출해 개발을 진행한 경우, 구현 완료 보고에는 아래 항목을 반드시 포함한다.

@@ -25,16 +25,20 @@
 내용 검색은 **두 컴포넌트가 짝**이다: 먼저 **DB화**로 원하는 폴더를 인덱싱하고, 그 뒤 **내용 검색**으로 찾는다.
 
 > **DB화는 폴더 단위**다. 공유폴더 전체를 한 번에 돌지 않고, 입력한 **경로 아래만** 인덱싱한다
-> (`검사결과/2026/OO검사` 처럼). 여러 폴더를 차례로 DB화하면 누적되고, 같은 폴더를 다시 DB화하면
+> (`synthetic/projects/aurora`처럼). 여러 폴더를 차례로 DB화하면 누적되고, 같은 폴더를 다시 DB화하면
 > 그 폴더만 갱신된다. 경로를 비우면 공유 전체(느림)가 대상이 된다.
 
-## 보안 (CLAUDE.md — 항상 우선)
+## 보안과 현재 합성 테스트 경계
 
-- 이 컴포넌트는 **사내 localhost의 smb-finder만** 호출한다(기본 `http://localhost:8010`). 폴더 경로·목록을 외부로 보내지 않는다.
+- 공통 작업·보안 규칙은 루트 [`AGENTS.md`](../../AGENTS.md)가 기준이며, `CLAUDE.md`는 Claude Code용 보조 문서다.
+- 이 컴포넌트는 **로컬/사내 smb-finder만** 호출한다(기본 `http://localhost:8010`). 폴더 경로·목록을 외부로 보내지 않는다.
 - `smb-finder 주소`를 외부 호스트로 바꾸지 말 것. Langflow도 **사내망에서만** 띄운다.
-- 같은 캔버스에 **외부 LLM 노드(OpenAI 등)를 두지 말 것** — 환자/검사 데이터가 외부로 나갈 수 있다. LLM이 필요하면 온프레미스 모델만.
+- 실제 SMB와 연결된 캔버스에는 **외부 LLM 노드(OpenAI 등)를 두지 않는다**. 실제 파일 본문·경로·목록은
+  온프레미스 경계를 벗어나면 안 된다.
 - 워크플로우 자동 생성기는 실제 SMB 경로·파일 목록·본문·자격증명을 프롬프트나 flow JSON에 넣지 않는다.
-  OpenAI는 `LANGFLOW_COMPOSER_ALLOW_OPENAI=true`와 `OPENAI_API_KEY`가 있을 때만 사용한다.
+  현재 합성 데이터 전용 테스트에서만 일반 합성 instruction을 대상으로
+  `LANGFLOW_COMPOSER_ALLOW_OPENAI=true`와 `OPENAI_API_KEY`를 모두 명시했을 때 OpenAI composer를 사용할 수 있다.
+  이 예외는 실제 데이터 전송이나 운영 사용을 허용하지 않는다.
 
 ## 실행
 
@@ -68,7 +72,7 @@ PYTHONPATH="$(pwd)" LANGFLOW_COMPONENTS_PATH="$(pwd)/components" langflow run --
 
 **워크플로우 자동 생성 (첫 템플릿: 공유폴더 찾기):**
 1. **SMB 워크플로우 자동 생성** 컴포넌트를 캔버스에 놓는다.
-2. `만들 워크플로우`에 "검사자가 채팅으로 공유폴더를 찾을 수 있는 workflow를 만들어줘"처럼 입력한다.
+2. `만들 워크플로우`에 "합성 프로젝트 자료 폴더를 찾는 workflow를 만들어줘"처럼 입력한다.
 3. **Langflow에 등록** 출력을 실행하면 현재 Langflow 서버에 flow를 생성하거나 같은 이름의 기존 flow를 갱신한다.
 4. 반환된 `flow_url`을 열어 생성된 캔버스를 확인한다. 등록 API가 인증 문제로 실패하면 `워크플로우 JSON` 출력값을 Import Flow로 가져온다.
 5. 생성된 flow의 **SMB 공유폴더 찾기** 컴포넌트에서 `smb-finder 주소`를 Docker 사용 시
@@ -99,7 +103,7 @@ CLI로도 같은 JSON을 만들 수 있다:
 ```bash
 cd ../..  # automation_smb 루트
 .venv/Scripts/python integrations/langflow/scripts/generate_flow.py \
-  --instruction "검사자가 공유폴더를 찾는 workflow를 만들어줘" \
+  --instruction "합성 프로젝트 자료 폴더를 찾는 workflow를 만들어줘" \
   --out integrations/langflow/flows/folder_search.json \
   --llm-provider rule
 ```
@@ -108,7 +112,7 @@ cd ../..  # automation_smb 루트
 
 ```bash
 .venv/Scripts/python integrations/langflow/scripts/generate_flow.py \
-  --instruction "검사자가 공유폴더를 찾는 workflow를 만들어줘" \
+  --instruction "합성 프로젝트 자료 폴더를 찾는 workflow를 만들어줘" \
   --out integrations/langflow/flows/folder_search.json \
   --llm-provider rule \
   --install \
@@ -118,7 +122,8 @@ cd ../..  # automation_smb 루트
 `--llm-provider auto`는 `LANGFLOW_COMPOSER_LOCAL_BASE_URL`과 `LANGFLOW_COMPOSER_LOCAL_MODEL`이 있으면
 로컬/사내 URL일 때만 LLM을 쓰고, 없거나 외부 URL이면 규칙 기반으로 즉시 생성한다. 생성된 `smb-finder 주소`도
 `localhost`, `host.docker.internal`, 사설 IP, 또는 `LANGFLOW_COMPOSER_ALLOWED_HOSTS`에 있는 사내 호스트만 허용한다.
-OpenAI를 쓰려면 `--llm-provider openai`와 함께 `LANGFLOW_COMPOSER_ALLOW_OPENAI=true`, `OPENAI_API_KEY`가 필요하다.
+OpenAI를 쓰려면 합성 instruction만 사용하고 `--llm-provider openai`와 함께
+`LANGFLOW_COMPOSER_ALLOW_OPENAI=true`, `OPENAI_API_KEY`를 명시해야 한다.
 
 Docker에서 LLM API key를 쓸 때도 `docker-compose.yml`에는 key를 넣지 않는다. `docker compose config`가
 환경변수를 평문 출력할 수 있으므로, 커밋하지 않는 `docker-compose.override.yml`에서만 주입한다.
@@ -138,14 +143,16 @@ services:
 ```
 
 **내용 검색 (DB화 → 검색, 2단계):**
-1. **SMB 폴더 내용 DB화** 끌어다 놓기 → `DB화할 폴더 경로`에 `검사결과/2026/OO검사` 입력 → 실행.
+1. **SMB 폴더 내용 DB화** 끌어다 놓기 → 합성 fixture의 `DB화할 폴더 경로`에
+   `synthetic/projects/aurora` 입력 → 실행.
    - `관리자 API 토큰 환경변수`에는 실제 토큰 값이 아니라 `ADMIN_API_TOKEN` 같은 환경변수 이름만 넣는다.
      실제 토큰은 커밋하지 않는 `docker-compose.override.yml` 또는 Langflow 실행 환경에만 둔다.
    - 결과 메시지에 `'…' DB화 완료: N개 파일 적재`가 뜨면 성공이고, 아직 실행 중이면 job id와 현재 상태가 반환된다.
-2. **SMB 파일 내용 검색** 끌어다 놓기 → `질의`에 "BRCA1 변이 보고서" → **요약 메시지**를 Chat Output에 연결 → 실행.
+2. **SMB 파일 내용 검색** 끌어다 놓기 → `질의`에 "orange widget revision" → **요약 메시지**를
+   Chat Output에 연결 → 실행.
 
 **폴더 찾기 (이름·경로):**
-- **SMB 공유폴더 찾기** → `질의`에 "OO검사 결과 폴더 찾아줘" → 실행.
+- **SMB 공유폴더 찾기** → `질의`에 "프로젝트 오로라 디자인 에셋 폴더 찾아줘" → 실행.
 
 > 각 컴포넌트의 입력은 `tool_mode`라 그대로 **에이전트 도구**가 된다. "폴더 찾기 + 내용 검색"을
 > 한 에이전트에 물리면 질의 성격에 따라 알아서 고른다. DB화 컴포넌트도 도구로 쓰면 에이전트가

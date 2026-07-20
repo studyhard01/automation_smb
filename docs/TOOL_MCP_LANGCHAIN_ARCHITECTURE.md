@@ -1,7 +1,7 @@
 # automation-smb 도구·LangChain·MCP 통합 아키텍처
 
-> 상태: 설계 기준 — 이 문서는 목표 구조를 정의하며, 상세 구현 순서와 완료 기준은
-> [MCP_IMPLEMENTATION_PLAN.md](MCP_IMPLEMENTATION_PLAN.md)를 따른다. 아직 MCP 서버 구현이 완료됐다는 뜻은 아니다.
+> 상태: M0–M2 로컬 MCP MVP 완료, M3 이후 이관 대기 — 이 문서는 완료된 공통 검색 계약·`/mcp`와 목표 구조를
+> 함께 정의한다. 상세 구현 순서와 검증 결과는 [MCP_IMPLEMENTATION_PLAN.md](MCP_IMPLEMENTATION_PLAN.md)를 따른다.
 >
 > 기준일: 2026-07-14
 
@@ -38,10 +38,10 @@ Playground와 LangGraph에 중복된다.
 | 구분 | 현재 | 목표 |
 |---|---|---|
 | 업무 함수 | `Finder`, `ContentSearcher`, `reports`에 분리됨 | 그대로 재사용 |
-| 도구 정의 | Playground와 LangGraph에 중복 | 공통 `ToolCatalog` 한 곳 |
-| 보안 정책 | 자체 Agent에 강하게 결합 | 공통 `ToolExecutor`에서 집행 |
+| 도구 정의 | 검색 2개는 공통 `ToolCatalog`, 나머지 Playground/LangGraph 정의는 잔존 | 전체 공통 `ToolCatalog` |
+| 보안 정책 | 검색 2개는 공통 `ToolExecutor`, 나머지는 기존 경계 | 공통 `ToolExecutor`에서 집행 |
 | LangGraph 도구 | 별도 `@tool` HTTP 래퍼 | MCP에서 동적 로드 |
-| 외부 AI 연결 | 서비스별 REST 계약 | 허용된 도구만 MCP로 공개 |
+| 외부 AI 연결 | REST + 로컬 MCP에 읽기 검색 2개 공개 | 허용된 도구만 MCP로 단계적 확장 |
 | 관리자 작업 | REST와 일부 LangGraph 도구에 존재 | 관리자 API로만 분리 |
 
 ## 3. 목표 전체 서비스 흐름도
@@ -60,7 +60,7 @@ flowchart TB
     subgraph interfaces["접근 인터페이스"]
         fastapi["FastAPI REST API<br/>현재"]
         playgroundApi["Playground Chat API<br/>현재"]
-        mcpServer["automation-smb MCP Server<br/>추가"]
+        mcpServer["automation-smb MCP Server<br/>현재 M0–M2"]
         adminApi["관리자 API<br/>현재·Agent 비공개"]
     end
 
@@ -309,7 +309,9 @@ LangChain middleware와 MCP handler는 정책을 각자 다시 구현하지 않�
 
 ## 7. 권장 코드 구조
 
-아래는 목표 구조이며, 첫 단계에서 기존 파일을 한꺼번에 이동할 필요는 없다.
+현재 공통 계약은 `src/smb_finder/tooling/`, MCP 진입점은 `src/smb_finder/mcp_server.py`, 회귀 검증은
+`tests/test_mcp_server.py`에 구현되어 있다. 아래 트리의 `adapters/`와 LangGraph MCP 주입은 후속 목표이며,
+기존 파일을 한꺼번에 이동하지 않는다.
 
 ```text
 src/smb_finder/
@@ -334,14 +336,14 @@ integrations/langgraph/
 
 ## 8. 단계적 이관 계획
 
-### 단계 1 — 공통 계약 정리
+### 단계 1 — 공통 계약 정리 (검색 2개 완료)
 
 - 기존 `ToolDefinition`과 `ToolExecutionResult` 동작을 보존한다.
 - 도구별 입력·출력 Pydantic 모델을 만든다.
 - 기존 함수 호출을 `ToolExecutor` 하나로 모은다.
 - 기존 Playground 테스트를 회귀 테스트로 유지한다.
 
-### 단계 2 — 읽기 전용 MCP 서버
+### 단계 2 — 읽기 전용 MCP 서버 (M0–M2 완료)
 
 - 공식 MCP Python SDK 안정 버전을 사용한다.
 - `find_folder`, `search_content` 두 도구만 먼저 공개한다.
@@ -351,21 +353,21 @@ integrations/langgraph/
 - MCP Inspector로 `tools/list`, `tools/call`, 입력 오류, timeout을 검증한다.
 - 관리자 도구가 목록에 나타나지 않는지 테스트한다.
 
-### 단계 3 — LangGraph 중복 도구 제거
+### 단계 3 — LangGraph 중복 도구 제거 (M3 예정)
 
 - `integrations/langgraph/smb_agent/tools.py`의 수동 HTTP 래퍼를 단계적으로 제거한다.
 - `langchain-mcp-adapters`로 automation-smb MCP 도구를 로드한다.
 - adapter 0.3 계열이 요구하는 LangChain Core 1.x 호환성 업그레이드는 MCP 서버 MVP와 분리한다.
 - 단순 검색은 기존 REST fast path를 유지하고, 모호한 요청만 Agent로 보낸다.
 
-### 단계 4 — 보고서·핵형요약 추가
+### 단계 4 — 보고서·핵형요약 추가 (후속)
 
 - 보고서 후보·체크리스트 결과에 정식 출력 스키마를 부여한다.
 - 핵형요약 MCP 도구는 서버 측 로컬 LLM 설정만 사용한다.
 - provider URL, 모델, API key를 MCP 도구 인자로 받지 않는다.
 - 합성·비식별 회귀 테스트와 실제 운영 정책을 분리한다.
 
-### 단계 5 — 운영용 remote MCP 검토
+### 단계 5 — 운영용 remote MCP 검토 (후속)
 
 - 로컬 `/mcp` 검증이 끝난 뒤 필요할 때만 사내망 remote 접근을 연다.
 - 사내망 바인딩, 인증, 사용자별 도구 allowlist, 요청 크기 제한을 적용한다.

@@ -1,0 +1,545 @@
+{
+  "rubric_id": "automation-smb-project-quality",
+  "version": "1.0.0",
+  "title": "automation_smb 프로젝트 품질 Rubric",
+  "target_score": 85,
+  "scoring_policy": {
+    "default_exit_policy": "hard_gates_only",
+    "strict_exit_policy": "hard_gates_and_target_score",
+    "advisory_evidence_never_blocks_default": true
+  },
+  "categories": [
+    {
+      "id": "security_data_boundary",
+      "title": "보안·데이터 경계",
+      "weight": 25,
+      "criteria": [
+        {
+          "id": "tracked_artifact_hygiene",
+          "title": "금지된 로컬·민감 산출물 비커밋",
+          "points": 7,
+          "hard_gate": true,
+          "check": "tracked_artifacts"
+        },
+        {
+          "id": "sensitive_value_hygiene",
+          "title": "자격증명·내부 주소·UNC·의료 식별자 비노출",
+          "points": 10,
+          "hard_gate": true,
+          "check": "sensitive_values"
+        },
+        {
+          "id": "smb_read_only_boundary",
+          "title": "SMB 및 RAG 데이터 접근 읽기 전용",
+          "points": 8,
+          "hard_gate": true,
+          "check": "read_only_architecture"
+        }
+      ]
+    },
+    {
+      "id": "functionality_regression",
+      "title": "기능·회귀",
+      "weight": 20,
+      "criteria": [
+        {
+          "id": "pytest_non_integration",
+          "title": "비통합 pytest 회귀",
+          "points": 10,
+          "hard_gate": true,
+          "check": "pytest"
+        },
+        {
+          "id": "synthetic_fixture_contract",
+          "title": "합성 Golden/Candidate fixture 계약",
+          "points": 5,
+          "hard_gate": true,
+          "check": "synthetic_fixtures"
+        },
+        {
+          "id": "candidate_review_progress",
+          "title": "Candidate 사람 검토 진행률",
+          "points": 5,
+          "hard_gate": false,
+          "check": "candidate_review_progress"
+        }
+      ]
+    },
+    {
+      "id": "latency_performance",
+      "title": "지연·성능",
+      "weight": 20,
+      "criteria": [
+        {
+          "id": "index_first_fast_path",
+          "title": "인덱스 우선 fast path",
+          "points": 4,
+          "hard_gate": true,
+          "check": "index_first_architecture"
+        },
+        {
+          "id": "timeout_elapsed_contract",
+          "title": "timeout·시간 예산·elapsed_ms 계약",
+          "points": 4,
+          "hard_gate": true,
+          "check": "timeout_elapsed_architecture"
+        },
+        {
+          "id": "evidence_provenance_freshness",
+          "title": "합성 RAG 실측 근거와 최신성",
+          "points": 2,
+          "hard_gate": false,
+          "check": "evidence_freshness"
+        },
+        {
+          "id": "measured_retrieval_latency",
+          "title": "합성 retrieval p95",
+          "points": 3,
+          "hard_gate": false,
+          "check": "retrieval_latency_evidence"
+        },
+        {
+          "id": "measured_end_to_end_latency",
+          "title": "합성 end-to-end p95",
+          "points": 7,
+          "hard_gate": false,
+          "check": "end_to_end_latency_evidence"
+        }
+      ]
+    },
+    {
+      "id": "code_contracts",
+      "title": "코드·계약",
+      "weight": 15,
+      "criteria": [
+        {
+          "id": "ruff",
+          "title": "Ruff 정적 검사",
+          "points": 4,
+          "hard_gate": true,
+          "check": "ruff"
+        },
+        {
+          "id": "python_runtime_conventions",
+          "title": "Python 3.11·uv·src·pytest·Ruff 규약",
+          "points": 2,
+          "hard_gate": true,
+          "check": "runtime_conventions"
+        },
+        {
+          "id": "api_tool_contracts",
+          "title": "Pydantic API와 읽기 전용 ToolCatalog 계약",
+          "points": 2,
+          "hard_gate": true,
+          "check": "api_tool_contracts"
+        },
+        {
+          "id": "measured_rag_quality",
+          "title": "합성 RAG Hit@5·no-answer·groundedness",
+          "points": 7,
+          "hard_gate": false,
+          "check": "rag_quality_evidence"
+        }
+      ]
+    },
+    {
+      "id": "docs_context",
+      "title": "문서·맥락",
+      "weight": 10,
+      "criteria": [
+        {
+          "id": "markdown_relative_links",
+          "title": "Markdown 상대 링크 무결성",
+          "points": 4,
+          "hard_gate": true,
+          "check": "markdown_links"
+        },
+        {
+          "id": "canonical_context_alignment",
+          "title": "목표·현행 구현·계획 문서 정합성",
+          "points": 6,
+          "hard_gate": true,
+          "check": "docs_alignment"
+        }
+      ]
+    },
+    {
+      "id": "operations_observability",
+      "title": "운영·관측성",
+      "weight": 10,
+      "criteria": [
+        {
+          "id": "quality_automation_wiring",
+          "title": "동일 평가기의 CI·pre-commit 연결",
+          "points": 6,
+          "hard_gate": true,
+          "check": "automation_wiring"
+        },
+        {
+          "id": "safe_observability_contract",
+          "title": "지연·예산·안전한 오류 관측",
+          "points": 4,
+          "hard_gate": true,
+          "check": "observability_architecture"
+        }
+      ]
+    }
+  ],
+  "policy": {
+    "forbidden_tracked_globs": [
+      ".env",
+      ".env.*",
+      "**/__pycache__/**",
+      "**/*.pyc",
+      "**/*.pyo",
+      ".venv/**",
+      "venv/**",
+      ".cache/**",
+      ".tmp/**",
+      ".pytest_cache/**",
+      ".ruff_cache/**",
+      "**/*.db",
+      "**/*.sqlite",
+      "**/*.sqlite3",
+      "mlruns/**",
+      "integrations/langflow/.langflow-data/**",
+      "integrations/langgraph/.langgraph_api/**",
+      "integrations/langflow/docker-compose.override.yml",
+      ".claude/settings.local.json"
+    ],
+    "allowed_tracked_paths": [
+      ".env.example",
+      "integrations/langgraph/.env.example"
+    ],
+    "text_scan_extensions": [
+      ".py",
+      ".js",
+      ".html",
+      ".css",
+      ".md",
+      ".toml",
+      ".yaml",
+      ".yml",
+      ".json",
+      ".jsonl",
+      ".ps1",
+      ".sh",
+      ".txt",
+      ".example"
+    ],
+    "safe_private_ip_literals": [
+      "10.20.30.40",
+      "10.0.0.5"
+    ],
+    "safe_unc_hosts": [
+      "host",
+      "internal-host"
+    ],
+    "fixture_contracts": [
+      {
+        "path": "data/evaluation/document_chatbot_golden.jsonl",
+        "tier": "golden",
+        "review_status": "validated",
+        "minimum_cases": 15,
+        "reviewed_on_required": true
+      },
+      {
+        "path": "data/evaluation/document_chatbot_candidates.jsonl",
+        "tier": "candidate",
+        "review_status": "candidate",
+        "minimum_cases": 25,
+        "reviewed_on_required": false
+      }
+    ],
+    "runtime": {
+      "project_name": "smb-finder",
+      "python_requirement": ">=3.11",
+      "python_ci_version": "3.11",
+      "ruff_line_length": 120,
+      "ruff_src": [
+        "src",
+        "tests"
+      ],
+      "pytest_marker": "integration",
+      "required_dependencies": [
+        "pydantic",
+        "smbprotocol"
+      ],
+      "lock_file": "uv.lock"
+    },
+    "architecture_markers": {
+      "index_first": {
+        "src/smb_finder/finder.py": [
+          "FolderIndex",
+          "self._index.search",
+          "source=\"index\""
+        ],
+        "src/smb_finder/content_search.py": [
+          "ContentIndex",
+          "self._index.search",
+          "elapsed_ms"
+        ],
+        "src/smb_finder/index.py": [
+          "인메모리",
+          "def search"
+        ],
+        "src/smb_finder/api.py": [
+          "load_or_build",
+          "run_in_threadpool(finder.find"
+        ]
+      },
+      "timeout_elapsed": {
+        "src/smb_finder/finder.py": [
+          "time.perf_counter",
+          "elapsed_ms",
+          "over_budget"
+        ],
+        "src/smb_finder/content_search.py": [
+          "time.perf_counter",
+          "elapsed_ms",
+          "over_budget"
+        ],
+        "src/smb_finder/rag_search.py": [
+          "timeout=",
+          "statement_timeout",
+          "elapsed_ms"
+        ],
+        "src/smb_finder/tooling/executor.py": [
+          "FutureTimeoutError",
+          "timeout_ms",
+          "elapsed_ms"
+        ]
+      },
+      "read_only": {
+        "src/smb_finder/smb_client.py": [
+          "mode=\"rb\"",
+          "register_session",
+          "reset_connection_cache"
+        ],
+        "src/smb_finder/rag_search.py": [
+          "default_transaction_read_only=on",
+          "statement_timeout"
+        ],
+        "src/smb_finder/tooling/catalog.py": [
+          "permission: Literal[\"read\"]",
+          "read_only: bool = True",
+          "destructive: bool = False"
+        ]
+      },
+      "api_tool_contracts": {
+        "src/smb_finder/api.py": [
+          "response_model=FindResponse",
+          "response_model=ContentSearchResponse",
+          "McpExactRoute"
+        ],
+        "src/smb_finder/tooling/contracts.py": [
+          "class FindFolderInput(BaseModel)",
+          "class FindFolderOutput(BaseModel)",
+          "class SearchContentInput(BaseModel)",
+          "class SearchContentOutput(BaseModel)"
+        ],
+        "src/smb_finder/tooling/catalog.py": [
+          "SEARCH_TOOL_SPECS",
+          "allowed_surfaces",
+          "MappingProxyType"
+        ]
+      },
+      "observability": {
+        "src/smb_finder/tooling/executor.py": [
+          "elapsed_ms",
+          "over_budget",
+          "_audit"
+        ],
+        "src/smb_finder/api.py": [
+          "ApiErrorResponse",
+          "internal_error",
+          "type(exc).__name__"
+        ]
+      }
+    },
+    "forbidden_smb_mutation_patterns": [
+      "smbclient.remove(",
+      "smbclient.rename(",
+      "smbclient.mkdir(",
+      "smbclient.rmdir(",
+      "smbclient.link(",
+      "smbclient.symlink(",
+      "mode=\"wb\"",
+      "mode=\"ab\"",
+      "mode=\"w\"",
+      "mode=\"a\""
+    ],
+    "canonical_documents": {
+      "README.md": {
+        "required_tokens": [
+          "합성 데이터",
+          "인덱스 우선",
+          "읽기 전용",
+          "src/smb_finder/mcp_server.py",
+          "scripts/evaluate_quality.py"
+        ],
+        "forbidden_tokens": []
+      },
+      "AGENTS.md": {
+        "required_tokens": [
+          "합성 데이터 전용 챗봇 테스트",
+          "SMB 읽기 전용",
+          "인덱스 우선",
+          "Python 3.11",
+          "p50 < 300ms",
+          "p95 < 1s"
+        ],
+        "forbidden_tokens": []
+      },
+      "CLAUDE.md": {
+        "required_tokens": [
+          "AGENTS.md",
+          "합성 데이터 전용 챗봇 테스트",
+          "인덱스 우선",
+          "p50 < 300ms",
+          "p95 < 1s"
+        ],
+        "forbidden_tokens": [
+          "p95 < 12s",
+          "LLM-first"
+        ]
+      },
+      "OS.md": {
+        "required_tokens": [
+          "AGENTS.md",
+          "현재 구현",
+          "합성 데이터",
+          "인덱스 우선",
+          "read-only"
+        ],
+        "forbidden_tokens": [
+          "작업 규칙은 [`CLAUDE.md`](./CLAUDE.md)에 둔다"
+        ]
+      },
+      "docs/MCP_IMPLEMENTATION_PLAN.md": {
+        "required_tokens": [
+          "M0–M2 로컬 MVP 구현 완료",
+          "src/smb_finder/mcp_server.py",
+          "tests/test_mcp_server.py",
+          "M3"
+        ],
+        "forbidden_tokens": []
+      },
+      "docs/PLAYGROUND_TOOLS.md": {
+        "required_tokens": [
+          "합성 데이터",
+          "create_playground_skill",
+          "active_skill_ids",
+          "find_folder",
+          "search_content"
+        ],
+        "forbidden_tokens": []
+      },
+      "docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md": {
+        "required_tokens": [
+          "src/smb_finder/tooling/",
+          "src/smb_finder/mcp_server.py",
+          "tests/test_mcp_server.py",
+          "M0",
+          "M2"
+        ],
+        "forbidden_tokens": [
+          "아직 MCP 서버 구현이 완료됐다는 뜻은 아니다"
+        ]
+      },
+      "docs/playground_agentic_plan.md": {
+        "required_tokens": [
+          "합성 데이터",
+          "create_playground_skill",
+          "active_skill_ids",
+          "RAG fast path",
+          "MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md"
+        ],
+        "forbidden_tokens": [
+          "변경 전 실제 문서 질의"
+        ]
+      },
+      "docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md": {
+        "required_tokens": [
+          "Phase 3",
+          "실측 완료",
+          "Hit@5 83.3%",
+          "no-answer accuracy 0%",
+          "92.3%",
+          "195.6ms",
+          "4.91s",
+          "481644c3daca4c8b99012a98b4259620"
+        ],
+        "forbidden_tokens": []
+      },
+      "docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md": {
+        "required_tokens": [
+          "운영 전환 단계까지 보류",
+          "합성 데이터 전용 일반 챗봇 기능 테스트",
+          "실제 환자/검사 데이터는 OpenAI/LangSmith Cloud로 보내지 않습니다"
+        ],
+        "forbidden_tokens": []
+      },
+      "integrations/langflow/README.md": {
+        "required_tokens": [
+          "합성 데이터 전용 테스트",
+          "합성 프로젝트 자료 폴더",
+          "--llm-provider openai"
+        ],
+        "forbidden_tokens": []
+      },
+      "integrations/langgraph/README.md": {
+        "required_tokens": [
+          "합성 챗봇 테스트",
+          "find_folder",
+          "search_content",
+          "http://127.0.0.1:2024"
+        ],
+        "forbidden_tokens": []
+      }
+    },
+    "automation_contract": {
+      "workflow": ".github/workflows/project-quality.yml",
+      "hook": ".githooks/pre-commit",
+      "hook_enabler": "scripts/enable_quality_hook.ps1",
+      "gitattributes": ".gitattributes",
+      "required_command": "python scripts/evaluate_quality.py"
+    }
+  },
+  "measured_evidence": {
+    "kind": "synthetic_external_service_baseline",
+    "advisory": true,
+    "recorded_on": "2026-07-16",
+    "max_age_days": 90,
+    "source": "docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md",
+    "run_fingerprint": "481644c3daca4c8b99012a98b4259620",
+    "dataset_fingerprint": "8ff7316abdf41d28",
+    "metrics": {
+      "retrieval_hit_at_5_pct": {
+        "value": 83.3,
+        "target": 90.0,
+        "direction": "higher"
+      },
+      "no_answer_accuracy_pct": {
+        "value": 0.0,
+        "target": 95.0,
+        "direction": "higher"
+      },
+      "groundedness_pct": {
+        "value": 92.3,
+        "target": 90.0,
+        "direction": "higher"
+      },
+      "retrieval_p95_ms": {
+        "value": 195.6,
+        "target": 1000.0,
+        "direction": "lower"
+      },
+      "end_to_end_p95_ms": {
+        "value": 4910.0,
+        "target": 1000.0,
+        "direction": "lower"
+      }
+    }
+  }
+}

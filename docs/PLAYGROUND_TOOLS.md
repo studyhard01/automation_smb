@@ -8,6 +8,8 @@
 | Method | Path | 역할 |
 |---|---|---|
 | `GET` | `/api/playground/tools` | 현재 등록된 tool 목록 |
+| `GET`, `POST` | `/api/playground/skills` | 설치된 skill 목록 조회, 사용자 skill 생성 |
+| `PUT`, `DELETE` | `/api/playground/skills/{skill_id}` | 사용자 skill 수정·삭제 |
 | `POST` | `/api/playground/chat` | 선택한 tool 범위에서 agent 채팅 실행 |
 | `POST` | `/api/playground/karyotype-summary` | 선택한 provider로 LLM-backed 요약 tool 직접 실행 |
 | `POST` | `/api/playground/tool-draft` | 합성 테스트용 tool manifest 초안 생성 |
@@ -20,8 +22,8 @@
 | `id` | tool 고유 ID |
 | `display_name` | UI 표시 이름 |
 | `description` | agent가 읽는 기능 설명 |
-| `category` | UI 대분류: `smb`, `database`, `report` |
-| `permission` | `read` 또는 `admin` |
+| `category` | UI 대분류: `smb`, `database`, `report`, `skill` |
+| `permission` | `read`, `write` 또는 `admin` |
 | `execution_type` | `code` 또는 `llm` |
 | `enabled` | 현재 실행 가능 여부 |
 | `default_selected` | UI 최초 선택 여부 |
@@ -34,8 +36,8 @@ provider에서 같은 방식으로 선택할 수 있다.
 
 ## 분류 UI
 
-화면은 처음에 `SMB 직접 접근`, `DB 접근`, `보고서 관련` 대분류 카드만 보여준다. 각 카드를 클릭하면 해당
-분류의 tool 체크박스가 펼쳐지고, 다시 클릭하면 접힌다. 최초 진입과 목록 새로고침 후에는 모두 접힌 상태다.
+화면은 처음에 `SMB 직접 접근`, `DB 접근`, `보고서 관련`, `Skill 관리` 대분류 카드만 보여준다. 각 카드를 클릭하면
+해당 분류의 tool 체크박스가 펼쳐지고, 다시 클릭하면 접힌다. 최초 진입과 목록 새로고침 후에는 모두 접힌 상태다.
 
 ## 등록 tool
 
@@ -48,6 +50,12 @@ provider에서 같은 방식으로 선택할 수 있다.
 | `cytogenetics_karyotype_summary` | 보고서 관련 | llm | 아니오 | 선택한 provider/model로 테스트 입력 요약 |
 | `cytogenetics_report` | 보고서 관련 | code | 아니오 | 후보 템플릿과 체크리스트 생성 |
 | `ngs_report` | 보고서 관련 | code | 아니오 | 후보 템플릿과 체크리스트 생성 |
+| `create_playground_skill` | Skill 관리 | code | 아니오 | 검증된 사용자 `<skill-id>/SKILL.md`를 로컬에 생성 |
+
+`create_playground_skill`은 일반 채팅에서 항상 노출되는 기본 tool이 아니다. 요청의 `selected_skill_ids`에
+`skill-creator`가 있으면 agent가 registry의 이 tool을 `selected_tool_ids`에 자동 추가한다. 사용자가 별도 tool
+체크를 하지 않아도 생성할 수 있으며, 생성에 성공한 skill은 같은 응답의 다음 agent 판단부터 활성화된다.
+`skill-creator`를 선택하지 않은 요청에는 자동 추가되지 않는다.
 
 ### DB 접근 tool
 
@@ -67,11 +75,13 @@ provider에서 같은 방식으로 선택할 수 있다.
 `POST /api/playground/chat`은 다음 순서로 동작한다.
 
 1. provider/model 연결을 확인한다.
-2. 요청의 `selected_tool_ids`가 registry에 있는지 확인한다.
-3. disabled/admin tool 요청을 즉시 오류로 반환한다.
-4. LLM은 선택된 tool schema만 받고 다음 행동을 JSON으로 반환한다.
-5. tool 결과를 observation으로 전달해 답변을 합성한다.
-6. `assistant_message`, `tool_calls`, `agent_steps`, `elapsed_ms`, `over_budget`, `token_usage`를 반환한다.
+2. 요청한 skill을 로드하고 `skill-creator`가 활성화된 경우에만 `create_playground_skill`을 tool 범위에 자동 추가한다.
+3. 요청의 `selected_tool_ids`가 registry에 있는지 확인한다.
+4. disabled/admin tool 요청을 즉시 오류로 반환한다.
+5. LLM은 최종 선택된 tool schema와 활성 skill 지침만 받고 다음 행동을 JSON으로 반환한다.
+6. tool 결과를 observation으로 전달해 답변을 합성한다.
+7. `assistant_message`, `tool_calls`, `agent_steps`, `active_skill_ids`, `elapsed_ms`, `over_budget`,
+   `token_usage`를 반환한다.
 
 기능 안정성을 위한 제한은 유지한다.
 
