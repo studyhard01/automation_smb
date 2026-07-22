@@ -8,12 +8,17 @@
 | Method | Path | 역할 |
 |---|---|---|
 | `GET` | `/api/playground/tools` | 현재 등록된 tool 목록 |
+| `POST` | `/api/playground/attachments` | 원시 body로 PDF/Markdown 한 건을 로컬 임시 저장 |
+| `DELETE` | `/api/playground/attachments/{attachment_id}` | 로컬 임시 첨부 삭제 |
 | `GET`, `POST` | `/api/playground/skills` | 설치된 skill 목록 조회, 사용자 skill 생성 |
 | `PUT`, `DELETE` | `/api/playground/skills/{skill_id}` | 사용자 skill 수정·삭제 |
 | `POST` | `/api/playground/chat` | 선택한 tool 범위에서 agent 채팅 실행 |
 | `POST` | `/api/playground/karyotype-summary` | 선택한 provider로 LLM-backed 요약 tool 직접 실행 |
 | `POST` | `/api/playground/tool-draft` | 합성 테스트용 tool manifest 초안 생성 |
 | `POST` | `/api/playground/llm-status` | provider/model 연결 확인 |
+| `GET`, `POST` | `/api/playground/langflow-sources` | Langflow MCP 연결 조회, 등록 및 tool 동기화 |
+| `POST`, `DELETE` | `/api/playground/langflow-sources/{source_id}/sync`, `/api/playground/langflow-sources/{source_id}` | tool 재동기화, 연결 삭제 |
+| `POST` | `/api/playground/langflow-tools/{tool_id}/test` | LLM 없이 등록된 Langflow tool 직접 실행 |
 
 `ToolDefinition`의 주요 필드는 다음과 같다.
 
@@ -22,7 +27,7 @@
 | `id` | tool 고유 ID |
 | `display_name` | UI 표시 이름 |
 | `description` | agent가 읽는 기능 설명 |
-| `category` | UI 대분류: `smb`, `database`, `report`, `skill` |
+| `category` | UI 대분류: `smb`, `database`, `report`, `skill`, `workflow` |
 | `permission` | `read`, `write` 또는 `admin` |
 | `execution_type` | `code` 또는 `llm` |
 | `enabled` | 현재 실행 가능 여부 |
@@ -30,19 +35,55 @@
 | `requires_admin` | 관리자 경로 전용 여부 |
 | `timeout_ms` | 단일 tool 제한 시간 |
 | `input_schema` | LLM이 만들 인자 설명 |
+| `origin`, `source_id` | 내장 tool인지 Langflow tool인지와 등록 연결 ID |
 
 `provider_availability`와 `external_provider_allowed`는 계약에서 제거됐다. `enabled=true`인 일반 tool은 local/OpenAI
 provider에서 같은 방식으로 선택할 수 있다.
 
 ## 분류 UI
 
-화면은 처음에 `SMB 직접 접근`, `DB 접근`, `보고서 관련`, `Skill 관리` 대분류 카드만 보여준다. 각 카드를 클릭하면
+화면은 처음에 `SMB 직접 접근`, `DB 접근`, `보고서 관련`, `Skill 관리`, `Langflow Workflow` 대분류 카드만 보여준다. 각 카드를 클릭하면
 해당 분류의 tool 체크박스가 펼쳐지고, 다시 클릭하면 접힌다. 최초 진입과 목록 새로고침 후에는 모두 접힌 상태다.
+
+채팅 작성 영역의 `PDF/MD 첨부`는 한 번에 한 파일을 받는다. 파일명은 표시용 메타데이터로만 보존하고 실제 저장
+경로에는 임의 UUID를 사용한다. 허용 확장자는 `.pdf`, `.md`, `.markdown`이며 기본 크기 상한은 10MiB다.
+
+## Langflow Flow를 Agent tool로 등록
+
+Tool Lab의 `Langflow Tool 연결`에 프로젝트 MCP URL을 등록하면 서버가 `tools/list`를 호출해 Flow 이름·설명·입력
+JSON Schema를 `.cache/playground-langflow-tools.json`에 저장한다. 일반 `/api/playground/tools`와 채팅 요청에서는 이
+로컬 스냅샷만 읽으므로 목록 조회를 위해 Langflow를 매번 호출하지 않는다. 실제 선택된 tool 실행만 MCP `tools/call`을
+호출하고 결과와 `elapsed_ms`를 기존 trace 계약으로 반환한다. Flow 결과는 최종 답변으로 취급해 불필요한 두 번째 LLM
+합성을 생략한다.
+
+- Langflow Flow에는 `Chat Output`을 연결하고 프로젝트의 MCP Server 화면에서 해당 Flow를 Tool로 공개한다.
+- URL 형식: `http://<LANGFLOW_HOST>:7860/api/v1/mcp/project/<PROJECT_ID>/streamable`
+- API key 인증을 쓰면 `.env`의 `LANGFLOW_MCP_API_KEY`에만 넣는다. URL, UI, 등록 JSON에는 key를 넣지 않는다.
+- 기본 outbound allowlist는 loopback뿐이다. 사내 Langflow 호스트는 `PLAYGROUND_LANGFLOW_ALLOWED_HOSTS`에 명시한다.
+- 등록된 tool은 현재 read tool로 취급한다. 파일 변경·인덱싱 같은 관리자 Flow는 Agent tool로 공개하지 않는다.
+- Tool Lab의 `등록 Tool 직접 테스트`는 LLM 없이 입력 JSON, MCP 결과, 호출 지연을 검증한다.
+
+Langflow 없이 연결 경로만 빠르게 확인할 수 있는 합성 서버도 제공한다.
+
+```powershell
+# 터미널 1: 합성 Langflow MCP 대체 서버
+uv run --no-sync python scripts/run_synthetic_langflow_mcp.py
+
+# 터미널 2: Playground
+uv run --no-sync uvicorn smb_finder.api:app --host 127.0.0.1 --port 8010
+```
+
+`http://127.0.0.1:8010/playground`의 Tool Lab에서 MCP URL을 `http://127.0.0.1:8765/mcp`로 바꾸고
+`등록 및 동기화`를 누른다. `synthetic_echo_workflow`가 나타나면 기본 합성 Arguments로 바로 실행할 수 있다.
 
 ## 등록 tool
 
 | ID | 분류 | 방식 | 기본 선택 | 동작 |
 |---|---|---|---:|---|
+| `draft_qc_report` | 보고서 관련 | llm | 예 | 합성 측정값 판정·LLM 비수치 서술·Markdown 조립·재감사를 한 번에 실행 |
+| `audit_qc_report` | 보고서 관련 | code | 예 | 첨부 추출·합성 SOP 대조·근거 포함 판정을 한 번에 반환 |
+| `extract_uploaded_document` | 보고서 관련 | code | 아니오 | 텍스트형 PDF/Markdown의 로컬 본문과 제한된 미리보기 반환 |
+| `search_sop_knowledge` | DB 접근 | code | 아니오 | 로컬 합성 SOP의 코드·별칭·판정 기준 검색 |
 | `find_folder` | SMB 직접 접근 | code | 예 | 인메모리 폴더 인덱스 검색 |
 | `search_content` | SMB 직접 접근 | code | 아니오 | 로컬 FTS5 내용 인덱스 검색 |
 | `refresh_content` | SMB 직접 접근 | code | 아니오 | 관리자 전용 인덱싱 안내, Playground에서는 비활성 |
@@ -80,14 +121,25 @@ LLM 합성 HTTP client는 서비스 수명 동안 keep-alive 연결을 재사용
 
 `POST /api/playground/chat`은 다음 순서로 동작한다.
 
-1. provider/model 연결을 확인한다.
-2. 요청한 skill을 로드하고 `skill-creator`가 활성화된 경우에만 `create_playground_skill`을 tool 범위에 자동 추가한다.
-3. 요청의 `selected_tool_ids`가 registry에 있는지 확인한다.
-4. disabled/admin tool 요청을 즉시 오류로 반환한다.
-5. LLM은 최종 선택된 tool schema와 활성 skill 지침만 받고 다음 행동을 JSON으로 반환한다.
-6. tool 결과를 observation으로 전달해 답변을 합성한다.
-7. `assistant_message`, `tool_calls`, `agent_steps`, `active_skill_ids`, `elapsed_ms`, `over_budget`,
+1. tool·skill·첨부 ID가 현재 로컬 registry/저장소에 있는지 확인한다.
+2. 첨부가 있고 `audit_qc_report`가 선택됐으면 provider/model 연결 전에 로컬 QC fast path를 실행한다.
+3. 일반 요청은 provider/model 연결을 확인한다.
+4. 요청한 skill을 로드하고 `skill-creator`가 활성화된 경우에만 `create_playground_skill`을 tool 범위에 자동 추가한다.
+5. disabled/admin tool 요청을 즉시 오류로 반환한다.
+6. LLM은 최종 선택된 tool schema와 활성 skill 지침만 받고 다음 행동을 JSON으로 반환한다.
+7. tool 결과를 observation으로 전달해 답변을 합성한다.
+8. `assistant_message`, `tool_calls`, `agent_steps`, `active_skill_ids`, `elapsed_ms`, `over_budget`,
    `rag_grounding`, `token_usage`를 반환한다.
+
+QC fast path는 `audit_qc_report` 한 번만 호출하며 LLM과 외부 provider를 사용하지 않는다. 내부 순서는
+`extract_uploaded_document`와 같은 추출기 → 로컬 SOP 규칙 로드/검색 → 결정론적 판정이다. 판정은
+`PASS`, `WARNING`, `FAIL`, `UNVERIFIABLE` 중 하나이고 각 finding에 기준과 SOP 근거 ID가 포함된다.
+
+`draft_qc_report`는 일반 LLM agent 경로에서 실행한다. 입력은 `temperature_c`, `recovery_rate_pct`,
+`self_check_status` 세 필수 합성 값과 선택적 `operator_notes`다. tool은 LLM 호출 전에 기존 SOP 감사기로 예상 판정을
+계산한다. LLM은 숫자를 포함하지 않는 `summary`, `interpretation`, `follow_up`만 생성하고, 관찰값 표·판정·criterion·
+evidence는 코드가 Markdown에 삽입한다. 조립 결과를 기존 감사기로 다시 검사해 사전 판정과 다르면
+`qc_draft_verification_failed`로 차단한다. 성공 결과도 `DRAFT`이며 사람 승인 전에는 최종 보고서가 아니다.
 
 기능 안정성을 위한 제한은 유지한다.
 
@@ -111,6 +163,12 @@ raw LLM debug는 별도 서버 허용 gate 없이 요청 토글만으로 작동�
 - 알 수 없는 tool: HTTP `400`, `unknown_tool`
 - 비활성 tool: chat 응답 `tool_disabled`
 - 관리자 tool: chat 응답 `admin_api_only`
+- 알 수 없는 첨부: HTTP `400`, `unknown_attachment`
+- 금지 확장자·손상 PDF·빈 첨부: HTTP `400`, `attachment_*`
+- 이미지형/본문 없는 PDF: tool 응답 `document_text_unavailable` 또는 감사 `UNVERIFIABLE`
+- QC 초안 필수값 누락·형식 오류: `qc_draft_invalid_input`
+- QC 초안 LLM 실패·형식/숫자 위반: `qc_draft_llm_failed`, `qc_draft_invalid_response`
+- QC 초안 재감사 불일치: `qc_draft_verification_failed`
 - RAG 임베딩 endpoint 미가동: chat 응답 `embedding_unavailable`
 - RAG DB 연결/SQL 실패: chat 응답 `rag_db_unavailable`
 - RAG similarity 기준 미달: 오류가 아닌 `rag_grounding.decision=insufficient_evidence`,
@@ -131,5 +189,16 @@ provider 정책에 따른 `403`은 더 이상 없다.
   "model": "local-model",
   "debug_trace": true,
   "debug_raw_llm": true
+}
+```
+
+QC 초안은 agent가 자연어에서 아래 형태의 tool 인자를 구성하며 `debug_trace=true`에서 확인할 수 있다.
+
+```json
+{
+  "temperature_c": 21.0,
+  "recovery_rate_pct": 95.0,
+  "self_check_status": "PASS",
+  "operator_notes": "합성 기능 시험 메모"
 }
 ```

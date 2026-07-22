@@ -3,19 +3,33 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from pydantic import ValidationError
+
 from smb_finder.config import Settings
+from smb_finder.qc_audit import (
+    AttachmentStore,
+    AttachmentStoreError,
+    QcAuditService,
+    QcReportDraftError,
+    QcReportDraftService,
+)
+from smb_finder.qc_audit.models import QcReportDraftRequest
 from smb_finder.rag_search import RagSearchError
 from smb_finder.reports import run_cytogenetics_karyotype_summary, run_cytogenetics_report, run_ngs_report
 from smb_finder.tooling import ToolExecutionError, ToolExecutor
 
 from .models import ToolDefinition, ToolExecutionResult
+from .langflow_tools import LangflowMcpGateway, LangflowToolError, LangflowToolStore
 from .skills import SkillStore, SkillStoreError
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -124,12 +138,34 @@ def _format_rag_response(data: Any) -> str:
     return "\n".join(lines)
 
 
-def build_tool_registry(runtime: PlaygroundRuntime) -> dict[str, ToolHandler]:
+def build_tool_registry(
+    runtime: PlaygroundRuntime,
+    *,
+    langflow_store: LangflowToolStore | None = None,
+    langflow_gateway: LangflowMcpGateway | None = None,
+    qc_audit_service: QcAuditService | None = None,
+    qc_draft_service: QcReportDraftService | None = None,
+) -> dict[str, ToolHandler]:
     """현재 런타임 상태에 맞는 tool registry를 만든다."""
 
     settings = runtime.settings
     search_executor = ToolExecutor(runtime)
     skill_store = SkillStore(settings.playground_skills_dir)
+    qc_service = qc_audit_service or QcAuditService(
+        AttachmentStore(
+            settings.playground_upload_dir,
+            max_bytes=settings.playground_upload_max_bytes,
+            max_text_chars=settings.playground_document_max_chars,
+        ),
+        settings.playground_qc_sop_path,
+        budget_ms=settings.playground_qc_audit_budget_ms,
+    )
+    draft_service = qc_draft_service or QcReportDraftService(
+        qc_service,
+        max_tokens=settings.playground_qc_draft_max_tokens,
+        max_chars=settings.playground_qc_draft_max_chars,
+        budget_ms=settings.playground_agent_budget_ms,
+    )
 
     def find_folder(args: dict[str, Any]) -> ToolExecutionResult:
         query = _text_arg(args, "query")
@@ -244,6 +280,184 @@ def build_tool_registry(runtime: PlaygroundRuntime) -> dict[str, ToolHandler]:
     def ngs_report(args: dict[str, Any]) -> ToolExecutionResult:
         return run_ngs_report(args, settings=settings, content_searcher=runtime.content_searcher)
 
+    def extract_uploaded_document(args: dict[str, Any]) -> ToolExecutionResult:
+        attachment_id = _text_arg(args, "attachment_id")
+        started = time.perf_counter()
+        try:
+            document = qc_service.extract(attachment_id)
+        except AttachmentStoreError as exc:
+            return ToolExecutionResult(
+                status="error",
+                result_text=exc.message,
+                error_code=exc.code,
+                arguments_summary=f"attachment_id_present={bool(attachment_id)}",
+            )
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        if document.status != "ok":
+            message = (
+                "PDF 본문을 추출하지 못했습니다. 텍스트형 PDF인지 확인하세요. "
+                "이미지형 PDF와 OCR은 아직 지원하지 않습니다."
+                if document.attachment.extension == ".pdf"
+                else "Markdown 본문을 추출하지 못했습니다."
+            )
+            return ToolExecutionResult(
+                status="error",
+                result_text=message,
+                result_payload=document.model_dump(exclude={"text"}),
+                error_code="document_text_unavailable",
+                arguments_summary=f"attachment_id_present=True elapsed_ms={elapsed_ms}",
+            )
+        preview = document.text[: settings.playground_document_preview_chars]
+        was_preview_truncated = len(document.text) > len(preview)
+        result_text = (
+            f"'{document.attachment.filename}'에서 {document.text_chars}자를 추출했습니다"
+            f" ({elapsed_ms:.1f}ms).\n\n{preview}"
+        )
+        if was_preview_truncated:
+            result_text += f"\n\n...[미리보기 {len(document.text) - len(preview)}자 생략]"
+        payload = document.model_dump(exclude={"text"})
+        payload["text_preview"] = preview
+        payload["preview_truncated"] = was_preview_truncated
+        return ToolExecutionResult(
+            result_text=result_text,
+            result_payload=payload,
+            arguments_summary=f"attachment_id_present=True text_chars={document.text_chars} elapsed_ms={elapsed_ms}",
+        )
+
+    def search_sop_knowledge(args: dict[str, Any]) -> ToolExecutionResult:
+        query = _text_arg(args, "query")
+        try:
+            limit = max(1, min(int(args.get("limit", 5)), 20))
+        except (TypeError, ValueError):
+            limit = 5
+        if not query:
+            return ToolExecutionResult(
+                status="error",
+                result_text="검색할 SOP 질문이나 키워드가 필요합니다.",
+                error_code="empty_query",
+                arguments_summary="query_len=0",
+            )
+        try:
+            hits, elapsed_ms = qc_service.search_sop(query, limit)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return ToolExecutionResult(
+                status="error",
+                result_text="로컬 SOP 규칙을 읽지 못했습니다.",
+                error_code="sop_rules_unavailable",
+                arguments_summary=f"query_len={len(query)} limit={limit}",
+            )
+        if not hits:
+            return ToolExecutionResult(
+                result_text="합성 SOP에서 일치하는 기준을 찾지 못했습니다.",
+                result_payload={"hits": [], "result_count": 0, "elapsed_ms": elapsed_ms},
+                arguments_summary=f"query_len={len(query)} limit={limit} elapsed_ms={elapsed_ms}",
+            )
+        lines = [f"합성 SOP 검색 결과 {len(hits)}건 ({elapsed_ms:.1f}ms):"]
+        for index, hit in enumerate(hits, start=1):
+            lines.append(
+                f"{index}. {hit.rule.id} — {hit.rule.title}\n"
+                f"   기준: {hit.rule.criterion}\n   근거: {hit.rule.evidence}"
+            )
+        return ToolExecutionResult(
+            result_text="\n".join(lines),
+            result_payload={
+                "hits": [hit.model_dump() for hit in hits],
+                "result_count": len(hits),
+                "elapsed_ms": elapsed_ms,
+                "synthetic": True,
+            },
+            arguments_summary=f"query_len={len(query)} limit={limit} elapsed_ms={elapsed_ms}",
+        )
+
+    def audit_qc_report(args: dict[str, Any]) -> ToolExecutionResult:
+        attachment_id = _text_arg(args, "attachment_id")
+        try:
+            result = qc_service.audit(attachment_id)
+        except AttachmentStoreError as exc:
+            return ToolExecutionResult(
+                status="error",
+                result_text=exc.message,
+                error_code=exc.code,
+                arguments_summary=f"attachment_id_present={bool(attachment_id)}",
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            return ToolExecutionResult(
+                status="error",
+                result_text="로컬 합성 SOP 규칙을 읽거나 감사 결과를 만들지 못했습니다.",
+                error_code="qc_audit_unavailable",
+                arguments_summary="attachment_id_present=True",
+            )
+        return ToolExecutionResult(
+            result_text=qc_service.format_audit(result),
+            result_payload={**result.model_dump(), "synthetic": True},
+            arguments_summary=(
+                f"attachment_id_present=True status={result.status} findings={len(result.findings)} "
+                f"elapsed_ms={result.elapsed_ms}"
+            ),
+        )
+
+    def draft_qc_report(args: dict[str, Any]) -> ToolExecutionResult:
+        return ToolExecutionResult(
+            status="error",
+            result_text="QC 보고서 초안 생성에는 선택한 LLM 실행 정보가 필요합니다.",
+            error_code="llm_context_required",
+            arguments_summary=f"input_keys={','.join(sorted(str(key) for key in args)) or '-'}",
+        )
+
+    def draft_qc_report_with_context(
+        args: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolExecutionResult:
+        started = time.perf_counter()
+        try:
+            request = QcReportDraftRequest.model_validate(args)
+        except ValidationError:
+            return ToolExecutionResult(
+                status="error",
+                result_text=(
+                    "QC 보고서 초안에는 temperature_c, recovery_rate_pct, self_check_status가 모두 필요하며 "
+                    "숫자와 상태값 형식을 확인해야 합니다."
+                ),
+                error_code="qc_draft_invalid_input",
+                arguments_summary=f"input_keys={','.join(sorted(str(key) for key in args)) or '-'}",
+            )
+        try:
+            result = draft_service.generate(
+                request,
+                invoke_json=context.invoke_json,
+                provider=context.provider,
+                model=context.model,
+            )
+        except QcReportDraftError as exc:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            return ToolExecutionResult(
+                status="error",
+                result_text=exc.message,
+                error_code=exc.code,
+                arguments_summary=(
+                    f"input_keys={','.join(sorted(str(key) for key in args)) or '-'} elapsed_ms={elapsed_ms}"
+                ),
+            )
+        except (AttachmentStoreError, OSError, ValueError, json.JSONDecodeError):
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            return ToolExecutionResult(
+                status="error",
+                result_text="QC 보고서 초안을 생성하거나 재검증하지 못했습니다.",
+                error_code="qc_draft_unavailable",
+                arguments_summary=(
+                    f"input_keys={','.join(sorted(str(key) for key in args)) or '-'} elapsed_ms={elapsed_ms}"
+                ),
+            )
+        return ToolExecutionResult(
+            result_text=result.markdown,
+            observation_text=result.markdown,
+            result_payload={**result.model_dump(), "synthetic": True},
+            arguments_summary=(
+                f"input_keys={','.join(sorted(str(key) for key in args))} "
+                f"deterministic_status={result.deterministic_status} llm_ms={result.llm_ms} "
+                f"verification_ms={result.verification_ms} elapsed_ms={result.elapsed_ms}"
+            ),
+        )
+
     def create_playground_skill(args: dict[str, Any]) -> ToolExecutionResult:
         """검증된 사용자 SKILL.md를 로컬 Playground 저장소에 만든다."""
 
@@ -328,7 +542,83 @@ def build_tool_registry(runtime: PlaygroundRuntime) -> dict[str, ToolHandler]:
 
     find_timeout = max(100, settings.find_budget_ms)
     content_timeout = max(100, settings.content_search_budget_ms)
-    return {
+    registry = {
+        "draft_qc_report": ToolHandler(
+            definition=ToolDefinition(
+                id="draft_qc_report",
+                display_name="QC 보고서 LLM 초안 생성",
+                description=(
+                    "구조화된 합성 QC 측정값을 결정론적으로 판정하고 선택한 LLM으로 비수치 서술을 작성한 뒤, "
+                    "기존 감사 엔진의 재검증을 통과한 DRAFT Markdown만 반환합니다."
+                ),
+                category="report",
+                permission="read",
+                execution_type="llm",
+                enabled=True,
+                default_selected=True,
+                timeout_ms=max(settings.llm_timeout_ms, settings.playground_agent_budget_ms),
+                input_schema={
+                    "temperature_c": "Aurora chamber temperature 합성 측정값(숫자, 필수)",
+                    "recovery_rate_pct": "Nova recovery rate 합성 측정값(숫자, 필수)",
+                    "self_check_status": "Orion self-check 합성 상태값(필수)",
+                    "operator_notes": "초안 서술에 참고할 선택적 합성 메모",
+                },
+            ),
+            run=draft_qc_report,
+            run_with_context=draft_qc_report_with_context,
+            returns_final_answer=True,
+        ),
+        "audit_qc_report": ToolHandler(
+            definition=ToolDefinition(
+                id="audit_qc_report",
+                display_name="QC 보고서 감사",
+                description=(
+                    "업로드한 PDF/Markdown을 로컬에서 추출하고 합성 SOP 근거와 대조해 "
+                    "PASS/WARNING/FAIL/확인 불가 결과를 반환합니다."
+                ),
+                category="report",
+                permission="read",
+                execution_type="code",
+                enabled=True,
+                default_selected=True,
+                timeout_ms=settings.playground_qc_audit_budget_ms,
+                input_schema={"attachment_id": "감사할 Playground 첨부파일 ID"},
+            ),
+            run=audit_qc_report,
+            returns_final_answer=True,
+        ),
+        "extract_uploaded_document": ToolHandler(
+            definition=ToolDefinition(
+                id="extract_uploaded_document",
+                display_name="PDF/Markdown 본문 추출",
+                description="업로드한 PDF/Markdown의 텍스트를 외부 전송 없이 로컬에서 추출합니다.",
+                category="report",
+                permission="read",
+                execution_type="code",
+                enabled=True,
+                default_selected=False,
+                timeout_ms=settings.playground_qc_audit_budget_ms,
+                input_schema={"attachment_id": "본문을 추출할 Playground 첨부파일 ID"},
+            ),
+            run=extract_uploaded_document,
+            returns_final_answer=True,
+        ),
+        "search_sop_knowledge": ToolHandler(
+            definition=ToolDefinition(
+                id="search_sop_knowledge",
+                display_name="SOP 지식 검색",
+                description="로컬 합성 SOP에서 항목 코드·제목·별칭과 판정 기준을 검색합니다.",
+                category="database",
+                permission="read",
+                execution_type="code",
+                enabled=True,
+                default_selected=False,
+                timeout_ms=500,
+                input_schema={"query": "SOP 질문, 항목 코드 또는 키워드", "limit": "반환 규칙 수(최대 20)"},
+            ),
+            run=search_sop_knowledge,
+            returns_final_answer=True,
+        ),
         "find_folder": ToolHandler(
             definition=ToolDefinition(
                 id="find_folder",
@@ -483,3 +773,30 @@ def build_tool_registry(runtime: PlaygroundRuntime) -> dict[str, ToolHandler]:
             run=create_playground_skill,
         ),
     }
+
+    store = langflow_store or LangflowToolStore(settings)
+    gateway = langflow_gateway or LangflowMcpGateway(settings)
+    try:
+        for source, snapshot in store.synchronized_tools():
+            tool_id = snapshot.definition.id
+            if tool_id in registry:
+                _logger.warning("Langflow tool ID가 기존 tool과 충돌해 제외됨: %s", tool_id)
+                continue
+
+            def run_langflow_tool(
+                args: dict[str, Any],
+                *,
+                current_source=source,
+                remote_name=snapshot.remote_name,
+            ) -> ToolExecutionResult:
+                return gateway.call_tool(current_source, remote_name, args)
+
+            registry[tool_id] = ToolHandler(
+                definition=snapshot.definition,
+                run=run_langflow_tool,
+                returns_final_answer=True,
+            )
+    except LangflowToolError as exc:
+        _logger.warning("Langflow tool 스냅샷을 불러오지 못함: %s", exc.code)
+
+    return registry

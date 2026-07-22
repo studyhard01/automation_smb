@@ -2,19 +2,22 @@
 
 ## 현재 단계
 
-Playground는 실제 의료 환경과 무관한 합성 데이터로만 기능을 검증한다. 현재 목표는 provider 연결, tool 선택,
-agent loop, 결과 표시, trace와 지연 측정이 하나의 경로에서 동작하는지 빠르게 확인하는 것이다.
+Playground는 실제 의료 환경과 무관한 합성 데이터로만 기능을 검증한다. 현재 최우선 목표는 PDF/Markdown QC Report
+감사와 구조화된 합성 측정값 기반 LLM 보고서 초안을 각각 완결된 tool 경로로 제공하는 것이다. provider 연결, 일반
+tool 선택, agent loop와 RAG 평가는 유지하지만 그 다음 순위다. Langflow/n8n/Dify 연동은 두 QC 경로 안정화 뒤로 미룬다.
 
 운영용 의료데이터 탐지, provider별 합성 데이터 허용 gate, 별도 안전 프로필은 기본 기능 테스트 이후에 다시
 설계한다. 현재 기능 경로에는 이를 추가하지 않는다.
 
 ## 사용자 흐름
 
-1. `/playground`에서 local 또는 OpenAI provider와 모델을 선택한다.
-2. 서버가 반환한 활성 tool 중 챗봇이 사용할 항목을 고른다.
-3. 일반 합성 문장을 입력한다.
-4. agent가 선택된 tool 범위 안에서 제한된 횟수만 호출한다.
-5. 답변, tool 결과, 단계 trace, token usage, 전체 소요 시간을 한 화면에서 확인한다.
+1. `/playground`에서 합성 PDF 또는 Markdown QC Report 한 건을 첨부한다.
+2. `audit_qc_report`가 선택된 상태에서 감사 요청을 전송한다.
+3. 서버가 외부 LLM 없이 문서를 추출하고 합성 SOP 세 항목과 대조한다.
+4. PASS/WARNING/FAIL/확인 불가 판정, 관찰값, 기준, 근거와 소요 시간을 확인한다.
+5. 새 보고서를 만들 때는 합성 온도·회수율·상태값을 입력하고 `draft_qc_report`를 선택한다.
+6. LLM 서술과 결정론적 표·판정을 조립한 `DRAFT` 및 재감사 상태를 확인한다.
+7. 일반 채팅은 기존처럼 선택한 tool 범위의 제한형 agent loop를 사용한다.
 
 ## 계약
 
@@ -28,6 +31,9 @@ agent loop, 결과 표시, trace와 지연 측정이 하나의 경로에서 동�
   - 알 수 없는 tool ID는 `400 unknown_tool`로 거절한다.
   - 응답은 `assistant_message`, `tool_calls`, `agent_steps`, `active_skill_ids`, `elapsed_ms`, `over_budget`,
     optional `rag_grounding`, `token_usage`를 제공한다.
+- `POST /api/playground/attachments`
+  - PDF/Markdown 한 건만 허용하고 임의 ID 경로에 로컬 저장한다.
+  - 감사 완료 후 UI가 임시 첨부를 삭제한다.
 - `POST /api/playground/karyotype-summary`
   - 별도 합성 데이터 토글이나 provider 정책 `403` 없이 선택한 provider로 실행한다.
   - 입력·LLM 설정 오류는 `400`, 길이 오류는 `422`, provider 호출/응답 오류는 `502`로 반환한다.
@@ -35,6 +41,11 @@ agent loop, 결과 표시, trace와 지연 측정이 하나의 경로에서 동�
 ## 실행 경계
 
 - agent step, tool call 수, timeout, 전체 시간 예산은 항상 제한한다.
+- 첨부와 `audit_qc_report`가 함께 선택된 요청은 provider/model 확인보다 먼저 로컬 QC fast path로 실행한다.
+- QC fast path는 high-level tool 한 번 안에서 추출과 SOP 대조를 조합하며 1초 시간 예산을 측정·로그한다.
+- QC 초안 tool은 측정값·판정·근거를 코드가 소유하고 LLM에는 비수치 서술만 맡긴다.
+- 초안은 기존 감사 엔진 재검증을 통과해야 반환하며 추가 최종 합성 LLM을 호출하지 않는다.
+- 텍스트형 PDF와 Markdown만 지원하고 이미지형 PDF OCR은 다음 단계로 분리한다.
 - 선택 tool이 정확히 `search_rag_chunks`, 선택 skill이 정확히 `rag-grounded-answer`인 요청은 결정용 LLM을 생략하고
   RAG fast path로 실행한다.
 - RAG fast path는 cutoff를 통과한 검색 성공 시 근거 합성 LLM 1회만 호출한다. 검색 오류·무결과·cutoff

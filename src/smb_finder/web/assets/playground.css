@@ -845,12 +845,68 @@ textarea:focus-visible {
   display: grid;
   grid-template-columns: 1fr auto;
   grid-template-areas:
+    "attachments attachments"
     "skills skills"
     "input send";
   gap: 10px;
   border-top: 1px solid var(--line);
   background: var(--panel);
   padding: 14px 18px;
+}
+
+.composer-attachments {
+  grid-area: attachments;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.composer .attachment-button {
+  min-height: 28px;
+  border: 1px solid #b7d8d3;
+  border-radius: 7px;
+  background: #fff;
+  color: var(--accent-strong);
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.active-attachment-chips {
+  display: flex;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.active-attachment-chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #b7d8d3;
+  border-radius: 999px;
+  background: var(--accent-weak);
+  padding: 3px 5px 3px 8px;
+  color: var(--accent-strong);
+}
+
+.composer .attachment-remove {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--accent-strong);
+  padding: 0;
+}
+
+.attachment-status {
+  color: var(--muted);
 }
 
 .composer-skills {
@@ -1128,15 +1184,50 @@ textarea:focus-visible {
 
 .lab-layout {
   display: grid;
-  grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
   gap: 18px;
   padding: 20px;
+}
+
+.lab-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  padding: 18px;
+}
+
+.lab-card-wide {
+  grid-column: 1 / -1;
 }
 
 .lab-form {
   display: grid;
   gap: 10px;
   margin-top: 14px;
+}
+
+.lab-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.lab-form input,
+.lab-form select,
+.lab-form textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 9px;
+  color: var(--text);
+}
+
+.lab-form textarea {
+  resize: vertical;
+  font-family: Consolas, "Courier New", monospace;
 }
 
 .lab-form button {
@@ -1172,6 +1263,7 @@ textarea:focus-visible {
 
   .composer {
     grid-template-areas:
+      "attachments"
       "skills"
       "input"
       "send";
@@ -1203,6 +1295,75 @@ textarea:focus-visible {
   .skills-manager-layout {
     grid-template-columns: 280px minmax(0, 1fr);
   }
+}
+
+.compact-output {
+  min-height: 220px;
+  margin-top: 12px;
+  max-height: 420px;
+}
+
+.lab-help {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.langflow-sources {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.langflow-source-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.langflow-source-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.langflow-source-heading > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.langflow-source-heading small,
+.langflow-source-url {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.langflow-source-url {
+  overflow-wrap: anywhere;
+}
+
+.langflow-source-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.langflow-source-actions button {
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  padding: 0 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.langflow-source-actions .danger-button {
+  border-color: #f0b7b1;
+  color: var(--danger);
 }
 
 @media (max-width: 520px) {

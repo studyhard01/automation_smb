@@ -6,6 +6,11 @@
 >
 > 상위 설계: [TOOL_MCP_LANGCHAIN_ARCHITECTURE.md](TOOL_MCP_LANGCHAIN_ARCHITECTURE.md)
 
+> **2026-07-22 우선순위 변경:** M0–M2 결과는 유지한다. M3 이후 MCP/LangGraph 및 Langflow/n8n/Dify 연동은
+> 동결하고 [`QC_REPORT_AUDIT_PLAN.md`](QC_REPORT_AUDIT_PLAN.md)의 PDF/Markdown 감사와 LLM 초안 생성 경로를 먼저
+> 구현·검증한다.
+> QC 도구의 MCP 공개 여부는 실제 SOP 계약과 운영 경계가 확정된 뒤 별도 결정한다.
+
 ## 1. 구현 결정 요약
 
 MCP MVP는 기존 FastAPI 프로세스에 `/mcp` Streamable HTTP 앱을 마운트한다. 별도 `stdio` 프로세스를 먼저
@@ -339,6 +344,8 @@ docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md
 
 ### M3 — LangGraph MCP client 이관
 
+상태: **후순위 동결**. QC Report 감사·LLM 초안 P0–P2 완료 전에는 착수하지 않는다.
+
 목표: LangGraph의 수동 HTTP `@tool` 래퍼를 MCP client로 단계적으로 교체한다.
 
 `langchain-mcp-adapters==0.3.0`은 `langchain-core>=1,<2`를 요구한다. 현재 integration은
@@ -359,6 +366,9 @@ rollback:
 - `SMB_AGENT_TOOL_TRANSPORT=rest`로 즉시 복귀
 
 ### M4 — 보고서 도구 확장
+
+상태: 기존 세포유전/NGS MCP 확장은 **후순위 동결**이다. 현재 우선 구현인 QC 감사는 Playground 내부 로컬 tool로
+먼저 검증하고 MCP catalog에는 아직 공개하지 않는다.
 
 M2와 M3가 안정화된 뒤 아래 순서로 추가한다.
 

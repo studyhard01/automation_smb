@@ -8,6 +8,16 @@
 > 챗봇 대화, tool 호출, trace, 지연을 검증한다. 의료데이터 입력 탐지나 provider별 합성 데이터 gate는 두지 않으며,
 > 운영용 보안 검토는 기본 기능 테스트 이후 별도 단계에서 진행한다.
 
+## 현재 개발 우선순위
+
+1. **QC Report 감사·LLM 초안 수직 슬라이스**: 첨부 감사와 구조화 측정값 기반 검토용 Markdown 생성
+2. 실제 SOP compiler·규칙 버전·근거 위치와 초안 검토·승인 상태 계약
+3. 합성 평가셋 정확도/지연 검증, 이미지형 PDF OCR, 표 구조 복원과 결과 내보내기
+4. Langflow/n8n/Dify 등 노코드 자동화 외피 연결
+
+기존 자동화 연동 코드와 계획은 삭제하지 않지만 1~3이 안정화될 때까지 신규 개발을 동결한다. 상세 범위와 단계는
+[`docs/QC_REPORT_AUDIT_PLAN.md`](docs/QC_REPORT_AUDIT_PLAN.md)를 따른다.
+
 ## 핵심 설계 — 지연 최소화
 
 매 요청마다 SMB를 도는 대신, **인덱스 우선**으로 폴더 트리를 미리 구성(메모리+JSON 캐시)하고
@@ -93,6 +103,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `src/smb_finder/rag_search.py` | 로컬 PostgreSQL 질의 임베딩→pgvector chunk 검색 (단계별 시간 측정) |
 | `src/smb_finder/evaluation/` | validated/candidate dataset, retrieval/end-to-end scorer, MLflow Dataset·judge·trace adapter |
 | `src/smb_finder/reports/` | 검사 보고서 업무 보조 tool — LLM 기반 ISCN 요약 + 로컬 후보 문서 검색/체크리스트 |
+| `src/smb_finder/qc_audit/` | 첨부 추출·합성 SOP 감사·LLM 비수치 서술·QC Markdown 초안 조립과 재검증 |
 | `src/smb_finder/tooling/` | 검색 도구 공통 Pydantic 계약·불변 catalog·timeout/동시 실행/감사 로그 executor |
 | `src/smb_finder/mcp_server.py` | 읽기 전용 MCP 검색 도구 등록과 HTTP transport 설정 |
 | `src/smb_finder/api.py` | FastAPI 앱 — `POST /find`·`/search-content`·`/refresh*` (OpenAPI 도구) |
@@ -110,6 +121,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `.githooks/pre-commit`, `.github/workflows/project-quality.yml` | 커밋과 push/PR에서 품질 hard gate 실행 |
 | `data/evaluation/` | 검증 완료 golden 15건과 검토 전 corpus 기반 candidate 25건을 분리한 합성 JSONL fixture |
 | `docs/PLAYGROUND_TOOLS.md` | `/playground` 등록 tool별 입력·동작·테스트 계약 |
+| `docs/QC_REPORT_AUDIT_PLAN.md` | QC Report 감사 우선순위, 입출력 계약, 단계별 구현 계획과 현재 제한 |
 | `docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md` | 세포유전 LLM 보고서 프로세스 이관 가이드 |
 | `docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md` | 공통 ToolSpec을 중심으로 REST·Playground·MCP·LangChain을 연결하는 목표 아키텍처와 흐름도 |
 | `docs/MCP_IMPLEMENTATION_PLAN.md` | 검색 도구 2개부터 시작하는 MCP MVP의 작업 순서·테스트·롤백 계획 |
@@ -122,6 +134,9 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
 
 ## 노코드 외피 (Langflow)
+
+> **후순위 보존 영역:** 구현과 문서는 유지하지만 QC Report 감사 핵심 경로가 안정화될 때까지 Langflow/n8n/Dify
+> 신규 연동 작업은 진행하지 않는다.
 
 코딩 없이 워크플로를 짜는 외피로 [Langflow](https://github.com/langflow-ai/langflow)를 쓴다.
 `smb_finder` 코드는 그대로 두고, `integrations/langflow/`의 커스텀 컴포넌트가 `POST /find`를
@@ -138,17 +153,38 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 
 - 화면: `GET /playground`
 - tool 목록: `GET /api/playground/tools`
+- PDF/Markdown 첨부/삭제: `POST /api/playground/attachments`, `DELETE /api/playground/attachments/{attachment_id}`
 - skill 목록/생성: `GET|POST /api/playground/skills`
 - skill 수정/삭제: `PUT|DELETE /api/playground/skills/{skill_id}`
 - ISCN 핵형 요약: `POST /api/playground/karyotype-summary`
 - 채팅 실행: `POST /api/playground/chat`
 - Tool Lab 초안: `POST /api/playground/tool-draft`
+- Langflow Flow tool 등록/동기화: `GET|POST /api/playground/langflow-sources`
+- Langflow tool 직접 테스트: `POST /api/playground/langflow-tools/{tool_id}/test`
 - local LLM 확인: `POST /api/playground/llm-status`
 
-기본 tool은 `find_folder`, `search_content`, `search_rag_chunks`, `cytogenetics_karyotype_summary`,
-`cytogenetics_report`, `ngs_report`, `refresh_content`, `create_playground_skill`이다. UI는 `SMB 직접 접근`, `DB 접근`,
+기본 tool에는 `draft_qc_report`, `audit_qc_report`, `extract_uploaded_document`, `search_sop_knowledge`, `find_folder`, `search_content`,
+`search_rag_chunks`, `cytogenetics_karyotype_summary`, `cytogenetics_report`, `ngs_report`, `refresh_content`,
+`create_playground_skill`이 있다. UI는 `SMB 직접 접근`, `DB 접근`,
 `보고서 관련`, `Skill 관리` 분류만
 먼저 표시하고, 분류를 클릭하면 내부 tool 선택지가 열린다.
+
+`PDF/MD 첨부`로 한 파일을 올린 뒤 전송하면 기본 선택된 `audit_qc_report`가 결정 LLM을 생략하고 로컬에서 즉시
+실행된다. 감사 tool 내부에서 본문 추출과 SOP 검색을 조합하므로 agent 호출 제한을 소모하는 세 단계 호출이 필요 없다.
+현재 SOP는 실제 검사실 자료와 무관한 `synthetic-qc-sop-v1`이며 결과에도 합성 기준임을 표시한다. PDF는 텍스트형만
+지원하고 스캔 이미지 OCR은 후속 단계다.
+
+`draft_qc_report`는 `temperature_c`, `recovery_rate_pct`, `self_check_status`와 선택적 `operator_notes`를 받는다.
+코드가 먼저 합성 SOP 판정과 관찰값 표를 고정하고, 선택한 provider/model은 숫자 없는 요약·해석·후속 검토 문장만
+생성한다. 조립된 Markdown은 기존 감사 엔진으로 다시 검사하며 값이나 판정이 달라지면 반환하지 않는다. 성공 결과도
+항상 `DRAFT - HUMAN REVIEW REQUIRED`이며 최종 보고서로 자동 확정하거나 파일로 보존하지 않는다. 출력 token은
+`PLAYGROUND_QC_DRAFT_MAX_TOKENS`로 제한하고 LLM·재검증·전체 지연을 trace에 남긴다.
+
+Tool Lab에서는 Langflow 프로젝트의 Streamable HTTP MCP URL을 등록해 공개된 Flow를 `Langflow Workflow` 분류의
+동적 Agent tool로 추가할 수 있다. 연결 정보와 tool schema는 Git 제외 로컬 캐시에 저장하고 API key는
+`LANGFLOW_MCP_API_KEY` 환경변수에서만 읽는다. `scripts/run_synthetic_langflow_mcp.py`는 Langflow 설치 없이
+등록·직접 호출 UI를 확인하는 합성 smoke 서버다. 자세한 계약은 [`docs/PLAYGROUND_TOOLS.md`](docs/PLAYGROUND_TOOLS.md)를
+참고한다.
 
 채팅 입력창 아래 `Skills` 버튼에서는 실제 agent와 같은 `<skill-id>/SKILL.md` 형식의 스킬을 선택·조회·추가·수정·삭제한다.
 기본 스킬은 코드와 함께 제공되는 읽기 전용 문서이며, UI에서 만든 사용자 스킬은
@@ -407,6 +443,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable_quality
 
 ## 다음 단계
 
+- **QC 초안 평가·승인 계약**: local/OpenAI 합성 case에서 사실 보존·숫자 위반 차단·재감사 일치율과 p50/p95를
+  측정하고 `DRAFT → REVIEWED → APPROVED/REJECTED` 상태 및 승인 템플릿을 정의한다.
 - **Phase 4 재측정**: 원격 온프레미스 embedding endpoint의 SSH 터널과 pgvector를 준비해 구현된
   cutoff·압축 근거·256 token 상한·
   HTTP keep-alive를 같은 15건으로 재측정하고 no-answer 95% 이상, end-to-end p95 1초 목표를 확인한다.

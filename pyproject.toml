@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27",            # LLM(OpenAI 호환) 호출용
     "psycopg[binary]>=3.2,<4", # 로컬 PostgreSQL/pgvector 검색
     "mcp>=1.28.1,<2",         # 공식 MCP Python SDK v1 (v2 안정화 전 상한 고정)
+    "pypdf>=4.0",             # QC 감사용 텍스트형 PDF 본문 추출
 ]
 
 [project.optional-dependencies]
@@ -28,9 +29,6 @@ studio = [
     "langchain-openai>=0.2",
     "langchain-core>=0.3",
 ]
-# 내용 검색의 PDF 본문 추출(선택). 미설치 시 PDF는 unsupported로 건너뛰고 서비스는 계속 동작.
-# txt/csv/json/xml/html/docx/xlsx 추출은 stdlib만으로 동작하므로 추가 설치가 필요 없다.
-pdf = ["pypdf>=4.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -40,6 +40,11 @@ def test_openapi_operation_ids_are_stable():
     assert operations["/admin/content-index-jobs"]["get"]["operationId"] == "list_content_index_jobs"
     assert operations["/admin/content-index-jobs/{job_id}"]["get"]["operationId"] == "get_content_index_job"
     assert operations["/api/playground/tools"]["get"]["operationId"] == "list_playground_tools"
+    assert operations["/api/playground/attachments"]["post"]["operationId"] == "upload_playground_attachment"
+    assert (
+        operations["/api/playground/attachments/{attachment_id}"]["delete"]["operationId"]
+        == "delete_playground_attachment"
+    )
     assert operations["/api/playground/skills"]["get"]["operationId"] == "list_playground_skills"
     assert operations["/api/playground/skills"]["post"]["operationId"] == "create_playground_skill"
     assert operations["/api/playground/skills/{skill_id}"]["put"]["operationId"] == "update_playground_skill"
@@ -51,6 +56,26 @@ def test_openapi_operation_ids_are_stable():
     assert "403" not in operations["/api/playground/karyotype-summary"]["post"]["responses"]
     assert operations["/api/playground/chat"]["post"]["operationId"] == "run_playground_chat"
     assert operations["/api/playground/tool-draft"]["post"]["operationId"] == "draft_playground_tool"
+    assert (
+        operations["/api/playground/langflow-sources"]["get"]["operationId"]
+        == "list_playground_langflow_sources"
+    )
+    assert (
+        operations["/api/playground/langflow-sources"]["post"]["operationId"]
+        == "register_playground_langflow_source"
+    )
+    assert (
+        operations["/api/playground/langflow-sources/{source_id}/sync"]["post"]["operationId"]
+        == "sync_playground_langflow_source"
+    )
+    assert (
+        operations["/api/playground/langflow-sources/{source_id}"]["delete"]["operationId"]
+        == "delete_playground_langflow_source"
+    )
+    assert (
+        operations["/api/playground/langflow-tools/{tool_id}/test"]["post"]["operationId"]
+        == "test_playground_langflow_tool"
+    )
     assert operations["/api/playground/llm-status"]["post"]["operationId"] == "check_playground_llm"
     assert "ApiErrorResponse" in schema["components"]["schemas"]
 
@@ -84,6 +109,7 @@ def test_playground_tools_api_serializes_execution_type():
     assert response.status_code == 200
     tools = {tool["id"]: tool for tool in response.json()}
     assert tools["cytogenetics_karyotype_summary"]["execution_type"] == "llm"
+    assert tools["draft_qc_report"]["execution_type"] == "llm"
     assert {
         tool_id for tool_id, tool in tools.items() if tool["execution_type"] == "code"
     } == {
@@ -94,10 +120,14 @@ def test_playground_tools_api_serializes_execution_type():
         "ngs_report",
         "refresh_content",
         "create_playground_skill",
+        "extract_uploaded_document",
+        "search_sop_knowledge",
+        "audit_qc_report",
     }
     assert tools["find_folder"]["enabled"] is True
     assert tools["search_rag_chunks"]["enabled"] is True
     assert tools["cytogenetics_karyotype_summary"]["enabled"] is True
+    assert tools["draft_qc_report"]["enabled"] is True
     assert tools["refresh_content"]["enabled"] is False
     assert "provider_availability" not in tools["find_folder"]
     assert "external_provider_allowed" not in tools["find_folder"]

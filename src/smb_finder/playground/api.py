@@ -5,26 +5,36 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 import logging
+import time
 import uuid
+from urllib.parse import unquote
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Response, status
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
 
+from smb_finder.qc_audit import AttachmentStore, AttachmentStoreError, QcAuditService
+from smb_finder.qc_audit.models import AttachmentMetadata
 from smb_finder.reports.models import (
     CytogeneticsKaryotypeSummaryRequest,
     CytogeneticsKaryotypeSummaryResponse,
 )
 
 from .agent import PlaygroundAgent
+from .langflow_tools import LangflowMcpGateway, LangflowToolError, LangflowToolStore
 from .models import (
     ChatRequest,
     ChatResponse,
+    LangflowToolSource,
+    LangflowToolSourceRequest,
+    LangflowToolSyncResponse,
+    LangflowToolTestRequest,
     LlmStatusRequest,
     LlmStatusResponse,
     SkillCreateRequest,
     SkillDefinition,
     SkillUpdateRequest,
     ToolDefinition,
+    ToolCallTrace,
     ToolDraftRequest,
     ToolDraftResponse,
 )
@@ -39,6 +49,18 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
 
     settings = runtime_getter().settings
     shared_agent = PlaygroundAgent(settings, skill_store=SkillStore(settings.playground_skills_dir))
+    langflow_store = LangflowToolStore(settings)
+    langflow_gateway = LangflowMcpGateway(settings)
+    attachment_store = AttachmentStore(
+        settings.playground_upload_dir,
+        max_bytes=settings.playground_upload_max_bytes,
+        max_text_chars=settings.playground_document_max_chars,
+    )
+    qc_audit_service = QcAuditService(
+        attachment_store,
+        settings.playground_qc_sop_path,
+        budget_ms=settings.playground_qc_audit_budget_ms,
+    )
 
     @asynccontextmanager
     async def shared_agent_lifespan(_application: FastAPI) -> AsyncIterator[None]:
@@ -62,6 +84,29 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         }.get(exc.code, 400)
         raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
 
+    def raise_langflow_error(exc: LangflowToolError) -> None:
+        status_code = {
+            "langflow_source_not_found": 404,
+            "langflow_sync_failed": 502,
+            "langflow_tool_call_failed": 502,
+        }.get(exc.code, 400)
+        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
+
+    def raise_attachment_error(exc: AttachmentStoreError) -> None:
+        status_code = {
+            "attachment_not_found": 404,
+            "attachment_too_large": 413,
+        }.get(exc.code, 400)
+        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
+
+    def registry_for(runtime: PlaygroundRuntime) -> dict:
+        return build_tool_registry(
+            runtime,
+            langflow_store=langflow_store,
+            langflow_gateway=langflow_gateway,
+            qc_audit_service=qc_audit_service,
+        )
+
     @router.get(
         "/api/playground/tools",
         response_model=list[ToolDefinition],
@@ -70,7 +115,152 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
     )
     async def list_playground_tools() -> list[ToolDefinition]:
         runtime = runtime_getter()
-        return [handler.definition for handler in build_tool_registry(runtime).values()]
+        return [handler.definition for handler in registry_for(runtime).values()]
+
+    @router.post(
+        "/api/playground/attachments",
+        response_model=AttachmentMetadata,
+        status_code=status.HTTP_201_CREATED,
+        operation_id="upload_playground_attachment",
+        summary="QC 감사용 PDF/Markdown 첨부",
+    )
+    async def upload_playground_attachment(
+        request: Request,
+        x_playground_filename: str = Header(default="", alias="X-Playground-Filename"),
+    ) -> AttachmentMetadata:
+        """multipart 의존성 없이 한 파일의 원시 바이트를 제한 크기로 받는다."""
+
+        raw_length = request.headers.get("content-length", "")
+        if raw_length.isdigit() and int(raw_length) > settings.playground_upload_max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "attachment_too_large", "message": "첨부파일 크기 제한을 넘었습니다."},
+            )
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > settings.playground_upload_max_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail={"code": "attachment_too_large", "message": "첨부파일 크기 제한을 넘었습니다."},
+                )
+        try:
+            return await run_in_threadpool(
+                attachment_store.save,
+                unquote(x_playground_filename),
+                bytes(data),
+                request.headers.get("content-type", ""),
+            )
+        except AttachmentStoreError as exc:
+            raise_attachment_error(exc)
+            raise AssertionError("unreachable")
+
+    @router.delete(
+        "/api/playground/attachments/{attachment_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+        operation_id="delete_playground_attachment",
+        summary="Playground 로컬 첨부 삭제",
+    )
+    async def delete_playground_attachment(attachment_id: str) -> Response:
+        try:
+            await run_in_threadpool(attachment_store.delete, attachment_id)
+        except AttachmentStoreError as exc:
+            raise_attachment_error(exc)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @router.get(
+        "/api/playground/langflow-sources",
+        response_model=list[LangflowToolSource],
+        operation_id="list_playground_langflow_sources",
+        summary="등록된 Langflow MCP 연결 목록",
+    )
+    async def list_langflow_sources() -> list[LangflowToolSource]:
+        try:
+            return list(await run_in_threadpool(langflow_store.list_sources))
+        except LangflowToolError as exc:
+            raise_langflow_error(exc)
+            raise AssertionError("unreachable")
+
+    @router.post(
+        "/api/playground/langflow-sources",
+        response_model=LangflowToolSyncResponse,
+        operation_id="register_playground_langflow_source",
+        summary="Langflow MCP 연결 등록 및 tool 동기화",
+    )
+    async def register_langflow_source(request: LangflowToolSourceRequest) -> LangflowToolSyncResponse:
+        try:
+            contracts, elapsed_ms = await run_in_threadpool(langflow_gateway.list_tools, request)
+            source = await run_in_threadpool(langflow_store.save_sync, request, contracts, elapsed_ms)
+        except LangflowToolError as exc:
+            raise_langflow_error(exc)
+            raise AssertionError("unreachable")
+        return LangflowToolSyncResponse(source=source, tool_count=len(source.tools), elapsed_ms=elapsed_ms)
+
+    @router.post(
+        "/api/playground/langflow-sources/{source_id}/sync",
+        response_model=LangflowToolSyncResponse,
+        operation_id="sync_playground_langflow_source",
+        summary="등록된 Langflow MCP tool 다시 동기화",
+    )
+    async def sync_langflow_source(source_id: str) -> LangflowToolSyncResponse:
+        try:
+            current = await run_in_threadpool(langflow_store.get_source, source_id)
+            request = LangflowToolSourceRequest(
+                source_id=current.source_id,
+                display_name=current.display_name,
+                mcp_url=current.mcp_url,
+                timeout_ms=current.timeout_ms,
+                enabled=current.enabled,
+            )
+            contracts, elapsed_ms = await run_in_threadpool(langflow_gateway.list_tools, request)
+            source = await run_in_threadpool(langflow_store.save_sync, request, contracts, elapsed_ms)
+        except LangflowToolError as exc:
+            await run_in_threadpool(langflow_store.mark_sync_error, source_id, exc.message)
+            raise_langflow_error(exc)
+            raise AssertionError("unreachable")
+        return LangflowToolSyncResponse(source=source, tool_count=len(source.tools), elapsed_ms=elapsed_ms)
+
+    @router.delete(
+        "/api/playground/langflow-sources/{source_id}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+        operation_id="delete_playground_langflow_source",
+        summary="Langflow MCP 연결 삭제",
+    )
+    async def delete_langflow_source(source_id: str) -> Response:
+        try:
+            await run_in_threadpool(langflow_store.delete, source_id)
+        except LangflowToolError as exc:
+            raise_langflow_error(exc)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @router.post(
+        "/api/playground/langflow-tools/{tool_id}/test",
+        response_model=ToolCallTrace,
+        operation_id="test_playground_langflow_tool",
+        summary="Langflow tool을 LLM 없이 직접 테스트",
+    )
+    async def test_langflow_tool(tool_id: str, request: LangflowToolTestRequest) -> ToolCallTrace:
+        handler = registry_for(runtime_getter()).get(tool_id)
+        if handler is None or handler.definition.origin != "langflow":
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "langflow_tool_not_found", "message": "등록된 Langflow tool을 찾지 못했습니다."},
+            )
+        started = time.perf_counter()
+        result = await run_in_threadpool(handler.execute, request.arguments)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        return ToolCallTrace(
+            tool_id=handler.definition.id,
+            tool_name=handler.definition.display_name,
+            arguments_summary=result.arguments_summary,
+            status=result.status,
+            elapsed_ms=elapsed_ms,
+            result_text=result.result_text,
+            result_payload=result.result_payload,
+            error_code=result.error_code,
+        )
 
     @router.get(
         "/api/playground/skills",
@@ -138,7 +328,7 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         x_playground_openai_key: str = Header(default="", alias="X-Playground-OpenAI-Key"),
     ) -> CytogeneticsKaryotypeSummaryResponse:
         runtime = runtime_getter()
-        handler = build_tool_registry(runtime)["cytogenetics_karyotype_summary"]
+        handler = registry_for(runtime)["cytogenetics_karyotype_summary"]
         result = await run_in_threadpool(
             shared_agent.execute_tool_direct,
             handler,
@@ -181,7 +371,7 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         x_playground_openai_key: str = Header(default="", alias="X-Playground-OpenAI-Key"),
     ) -> ChatResponse:
         runtime = runtime_getter()
-        registry = build_tool_registry(runtime)
+        registry = registry_for(runtime)
         unknown = sorted(set(request.selected_tool_ids) - set(registry))
         if unknown:
             raise HTTPException(status_code=400, detail={"code": "unknown_tool", "tools": unknown})
@@ -190,6 +380,17 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         unknown_skills = sorted(set(request.selected_skill_ids) - known_skill_ids)
         if unknown_skills:
             raise HTTPException(status_code=400, detail={"code": "unknown_skill", "skills": unknown_skills})
+        unknown_attachments: list[str] = []
+        for attachment_id in request.attachment_ids:
+            try:
+                await run_in_threadpool(attachment_store.get, attachment_id)
+            except AttachmentStoreError:
+                unknown_attachments.append(attachment_id)
+        if unknown_attachments:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "unknown_attachment", "attachments": unknown_attachments},
+            )
         request_id = str(uuid.uuid4())
         response = await run_in_threadpool(
             shared_agent.run,

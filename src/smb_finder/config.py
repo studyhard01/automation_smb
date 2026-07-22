@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -153,6 +155,72 @@ class Settings(BaseSettings):
     )
     playground_debug_preview_chars: int = Field(default=4000, description="raw LLM debug preview 최대 글자 수")
 
+    # ── Playground QC 보고서 감사 ──
+    playground_upload_dir: str = Field(
+        default=".cache/playground-uploads",
+        description="PDF/Markdown 첨부파일을 보관할 Git 제외 로컬 디렉터리",
+    )
+    playground_upload_max_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        ge=1024,
+        le=100 * 1024 * 1024,
+        description="Playground 첨부파일 한 건의 최대 바이트 수",
+    )
+    playground_document_max_chars: int = Field(
+        default=100_000,
+        ge=1000,
+        le=1_000_000,
+        description="첨부 문서에서 로컬 추출할 최대 글자 수",
+    )
+    playground_document_preview_chars: int = Field(
+        default=6000,
+        ge=500,
+        le=50_000,
+        description="문서 추출 tool 응답에 공개할 최대 글자 수",
+    )
+    playground_qc_sop_path: str = Field(
+        default=str(Path(__file__).resolve().parent / "qc_audit" / "synthetic_sop_rules.json"),
+        description="QC 감사에 사용할 로컬 SOP 규칙 JSON 경로",
+    )
+    playground_qc_audit_budget_ms: int = Field(
+        default=1000,
+        ge=100,
+        le=30_000,
+        description="문서 추출과 합성 SOP 감사를 합친 시간 예산(ms)",
+    )
+    playground_qc_draft_max_tokens: int = Field(
+        default=500,
+        ge=128,
+        le=2000,
+        description="LLM 기반 QC 보고서 초안 서술부의 최대 출력 token 수",
+    )
+    playground_qc_draft_max_chars: int = Field(
+        default=12_000,
+        ge=1000,
+        le=100_000,
+        description="결정론적 사실과 LLM 서술을 조립한 QC 보고서 초안 최대 글자 수",
+    )
+
+    # ── Playground Langflow MCP tool ──
+    playground_langflow_tools_path: str = Field(
+        default=".cache/playground-langflow-tools.json",
+        description="Tool Lab에서 등록한 Langflow MCP tool 스냅샷 경로",
+    )
+    playground_langflow_allowed_hosts: str = Field(
+        default="127.0.0.1,localhost,::1",
+        description="Playground가 연결할 수 있는 Langflow MCP 호스트 allowlist(쉼표 구분)",
+    )
+    playground_langflow_result_chars: int = Field(
+        default=8000,
+        ge=500,
+        le=100_000,
+        description="Langflow MCP tool 결과를 Playground 응답에 보존할 최대 글자 수",
+    )
+    langflow_mcp_api_key: str = Field(
+        default="",
+        description="Langflow 프로젝트 MCP 서버의 x-api-key 값. 등록 파일에는 저장하지 않음",
+    )
+
     @property
     def smb_root(self) -> str:
         r"""공유 루트 UNC 경로 (\\host\share)."""
@@ -196,6 +264,11 @@ class Settings(BaseSettings):
     def mcp_allowed_origin_set(self) -> set[str]:
         """Origin 헤더가 있는 MCP client에 명시적으로 허용한 값의 집합."""
         return {value.strip().rstrip("/").lower() for value in self.mcp_allowed_origins.split(",") if value.strip()}
+
+    @property
+    def playground_langflow_allowed_host_set(self) -> set[str]:
+        """Langflow MCP outbound 연결 허용 호스트 집합."""
+        return {value.strip().lower() for value in self.playground_langflow_allowed_hosts.split(",") if value.strip()}
 
 
 def load_settings() -> Settings:

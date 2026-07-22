@@ -106,12 +106,17 @@ def test_tool_registry_exposes_builtin_tools_without_admin():
         "ngs_report",
         "refresh_content",
         "create_playground_skill",
+        "extract_uploaded_document",
+        "search_sop_knowledge",
+        "audit_qc_report",
+        "draft_qc_report",
     }
     assert registry["find_folder"].definition.default_selected is True
     assert registry["refresh_content"].definition.enabled is False
     assert registry["cytogenetics_report"].definition.permission == "read"
     assert registry["ngs_report"].definition.permission == "read"
     assert registry["cytogenetics_karyotype_summary"].definition.execution_type == "llm"
+    assert registry["draft_qc_report"].definition.execution_type == "llm"
     assert registry["find_folder"].definition.category == "smb"
     assert registry["search_rag_chunks"].definition.category == "database"
     assert registry["cytogenetics_report"].definition.category == "report"
@@ -129,6 +134,9 @@ def test_tool_registry_exposes_builtin_tools_without_admin():
         "ngs_report",
         "refresh_content",
         "create_playground_skill",
+        "extract_uploaded_document",
+        "search_sop_knowledge",
+        "audit_qc_report",
     }
 
     result = registry["find_folder"].run({"query": "OO검사 폴더 찾아줘"})

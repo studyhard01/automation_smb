@@ -410,6 +410,19 @@ class PlaygroundAgent:
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
                 warnings=warnings,
             )
+        if request.attachment_ids and "audit_qc_report" in request.selected_tool_ids:
+            handler = registry.get("audit_qc_report")
+            if handler is not None and handler.definition.enabled:
+                warnings.append("llm_bypassed_local_qc_audit")
+                return self._run_qc_audit_fast_path(
+                    request=request,
+                    handler=handler,
+                    active_skills=active_skills,
+                    session_id=session_id,
+                    request_id=request_id,
+                    started=started,
+                    warnings=warnings,
+                )
         connection = self._resolve_llm_connection(
             provider=request.provider,
             local_base_url=request.local_base_url,
@@ -874,6 +887,82 @@ class PlaygroundAgent:
             rag_grounding=self._rag_grounding_from_traces(traces),
             debug=PlaygroundDebug(llm_calls=debug_calls) if debug_allowed else None,
             token_usage=self._aggregate_token_usage(usage_calls, connection.provider, model),
+        )
+
+    def _run_qc_audit_fast_path(
+        self,
+        *,
+        request: ChatRequest,
+        handler: ToolHandler,
+        active_skills: list[SkillDefinition],
+        session_id: str,
+        request_id: str,
+        started: float,
+        warnings: list[str],
+    ) -> ChatResponse:
+        """첨부 QC 감사 tool을 결정 LLM과 외부 provider 없이 즉시 실행한다."""
+
+        arguments = {"attachment_id": request.attachment_ids[0]}
+        trace_started = time.perf_counter()
+        try:
+            result = self._execute_handler_traced(handler, arguments)
+        except Exception:  # noqa: BLE001 - 공개 응답에는 내부 예외를 노출하지 않는다.
+            result = ToolExecutionResult(
+                status="error",
+                result_text="QC 감사 tool 실행 중 오류가 발생했습니다.",
+                error_code="tool_failed",
+            )
+        tool_elapsed_ms = round((time.perf_counter() - trace_started) * 1000, 1)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        over_budget = elapsed_ms > self.settings.playground_qc_audit_budget_ms
+        if over_budget:
+            warnings.append("playground_qc_audit_over_budget")
+        trace = ToolCallTrace(
+            tool_id=handler.definition.id,
+            tool_name=handler.definition.display_name,
+            arguments_summary=result.arguments_summary,
+            status=result.status,
+            elapsed_ms=tool_elapsed_ms,
+            result_text=result.result_text,
+            result_payload=result.result_payload,
+            error_code=result.error_code,
+        )
+        steps = [
+            AgentStepTrace(
+                step=1,
+                kind="tool_call",
+                title="로컬 QC 감사 실행",
+                detail="첨부파일 ID로 감사 파이프라인을 실행했습니다.",
+                action="tool_call",
+                tool_id=handler.definition.id,
+                tool_name=handler.definition.display_name,
+            ),
+            AgentStepTrace(
+                step=1,
+                kind="observation" if result.status == "ok" else "error",
+                title="QC 감사 결과",
+                detail=_limit_text(result.result_text, self.settings.playground_agent_result_chars),
+                action="final_answer",
+                tool_id=handler.definition.id,
+                tool_name=handler.definition.display_name,
+                status=result.status,
+                elapsed_ms=tool_elapsed_ms,
+                error_code=result.error_code,
+            ),
+        ]
+        return ChatResponse(
+            request_id=request_id,
+            session_id=session_id,
+            provider_used="local-code",
+            model_used="",
+            assistant_message=result.result_text,
+            active_skill_ids=[skill.id for skill in active_skills],
+            tool_calls=[trace],
+            agent_steps=steps if request.debug_trace else [],
+            elapsed_ms=elapsed_ms,
+            warnings=warnings,
+            error_code=result.error_code if result.status == "error" else "",
+            over_budget=over_budget,
         )
 
     def _run_rag_grounded_fast_path(
@@ -1397,6 +1486,7 @@ class PlaygroundAgent:
         prompt_payload = {
             "message": request.message[:1000],
             "recent_history": self._recent_history(request.history),
+            "attachment_ids": request.attachment_ids,
             "selected_tools": tool_specs,
             "active_skill_ids": [skill.id for skill in active_skills or []],
             "observations": observations[-3:],
@@ -1778,6 +1868,7 @@ class PlaygroundAgent:
             self.settings.llm_api_key,
             self.settings.openai_api_key,
             self.settings.admin_api_token,
+            self.settings.langflow_mcp_api_key,
         ]
         for secret in secret_values:
             if secret and len(secret) >= 3:

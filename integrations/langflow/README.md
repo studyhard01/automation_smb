@@ -42,6 +42,14 @@
 
 ## 실행
 
+### 완성된 Flow를 Tool Playground Agent에 추가
+
+Flow 출력에 `Chat Output`을 연결한 뒤 Langflow의 **MCP Server → Edit Tools**에서 해당 Flow를 공개한다. 표시되는
+프로젝트 Streamable HTTP 주소를 `http://127.0.0.1:8010/playground`의 **Tool Lab → Langflow Tool 연결**에 넣고
+`등록 및 동기화`를 누르면 Agent의 `Langflow Workflow` tool 목록에 추가된다. 인증이 켜져 있으면 Playground 서버의
+Git 제외 `.env`에 `LANGFLOW_MCP_API_KEY`를 설정한다. 단순 폴더 검색은 기존 내장 tool을 사용하고, Langflow에는
+여러 검색·정리 단계를 묶은 복합 Flow만 공개하는 것을 권장한다.
+
 ### 1) smb-finder 서비스 먼저 (호스트)
 ```bash
 cd ../..                                   # automation_smb 루트

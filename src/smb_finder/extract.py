@@ -5,7 +5,7 @@
 
 설계 원칙:
 - **외부 의존성 최소화.** 텍스트 계열은 stdlib 디코드, docx/xlsx는 `zipfile`+정규식(설치 불필요).
-  pdf만 선택 의존성(`pypdf`)이며 미설치 시 unsupported로 떨어진다(서비스는 계속 동작).
+  pdf는 기본 의존성(`pypdf`)으로 텍스트형 문서를 처리하며 이미지형 PDF의 OCR은 별도 단계로 둔다.
 - **한국어 인코딩.** 진단검사실 파일은 cp949(euc-kr)가 흔하다 → utf-8 실패 시 cp949로 폴백.
 - **지연/메모리 보호.** 파일당 저장 텍스트를 max_chars로 잘라 인덱스 비대화를 막는다.
 - **보안.** 추출 텍스트(환자 내용)는 절대 외부로 보내지 않는다 — 로컬 인덱스에만 적재된다.
@@ -121,9 +121,9 @@ def _extract_pptx(data: bytes) -> str:
 
 
 def _extract_pdf(data: bytes) -> str:
-    """pdf — pypdf가 설치돼 있으면 텍스트 추출, 없으면 빈 문자열(→ unsupported)."""
+    """pdf — pypdf로 텍스트형 페이지의 본문을 추출한다."""
     try:
-        from pypdf import PdfReader  # 선택 의존성
+        from pypdf import PdfReader
     except ImportError:
         return ""
     reader = PdfReader(io.BytesIO(data))
@@ -168,7 +168,7 @@ def extract_text(name: str, data: bytes, max_chars: int = 200_000) -> ExtractRes
 
     text = text.strip()
     if not text:
-        # 추출기는 있으나 본문이 비었음 (예: pypdf 미설치, 빈 문서, 이미지 PDF)
+        # 추출기는 있으나 본문이 비었음 (예: 빈 문서, 이미지 PDF)
         return ExtractResult(text="", status="empty")
     if len(text) > max_chars:
         text = text[:max_chars]

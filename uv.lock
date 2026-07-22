@@ -4027,6 +4027,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "pypdf" },
     { name = "smbprotocol" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -4039,9 +4040,6 @@ dev = [
 evaluation = [
     { name = "litellm" },
     { name = "mlflow", extra = ["genai"] },
-]
-pdf = [
-    { name = "pypdf" },
 ]
 studio = [
     { name = "langchain-core" },
@@ -4064,13 +4062,13 @@ requires-dist = [
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pydantic", specifier = ">=2.6" },
     { name = "pydantic-settings", specifier = ">=2.2" },
-    { name = "pypdf", marker = "extra == 'pdf'", specifier = ">=4.0" },
+    { name = "pypdf", specifier = ">=4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "smbprotocol", specifier = ">=1.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.27" },
 ]
-provides-extras = ["dev", "evaluation", "studio", "pdf"]
+provides-extras = ["dev", "evaluation", "studio"]
 
 [[package]]
 name = "smbprotocol"
