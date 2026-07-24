@@ -4,8 +4,8 @@
 
 현재 최우선 기능은 두 수직 슬라이스다. 첫째는 채팅에서 PDF/Markdown QC Report 한 건을 받아 로컬 SOP 근거와
 대조하는 감사 경로이고, 둘째는 구조화된 합성 측정값을 결정론적으로 판정한 뒤 LLM 서술을 더해 검토용 Markdown
-초안을 만드는 경로다. 기존 SMB 검색, MCP M0–M2, Langflow 연동 코드는 유지하되 Langflow/n8n/Dify 신규 개발은
-두 경로가 안정화될 때까지 후순위로 둔다.
+초안을 만드는 경로다. 기존 SMB 검색과 MCP M0–M2는 유지하며, 업무 tool은 Python 코드와 Pydantic 계약을 먼저
+구현한 뒤 공통 catalog와 공개 surface를 별도로 결정한다.
 
 검토한 `llm-wiki`와 `llm-wiki-qc-audit`의 유용한 구조는 문서 정규화, 근거 검색, 규칙 기반 판정, 결과 조립을
 분리하는 방식이다. LLM은 수치·판정·근거를 결정하지 않고 비수치 서술만 생성하며, 코드는 초안을 조립한 뒤 기존
@@ -133,10 +133,10 @@ flowchart LR
 - [ ] 운영 부하 p50/p95, cold/warm 지연, 대용량 문서 예산 검증
 - [ ] 승인된 온프레미스 모델/OCR만 사용하는 외부 전송 차단 구조
 
-### 후순위 — 자동화 외피
+### 후순위 — 공통 tool·자동화 확장
 
-- Langflow/n8n/Dify에서 감사 tool을 호출하는 workflow
-- MCP 공개 범위, 인증, 사용자별 권한
+- QC tool의 공통 catalog 이관과 Playground 회귀 계약
+- MCP 공개 범위, 인증, 사용자별 권한의 별도 승인
 - 알림·승인·티켓 발행 등 후속 자동화
 
 ## 다음 결정에 필요한 정보

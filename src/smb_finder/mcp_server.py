@@ -4,20 +4,22 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Annotated
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from starlette.datastructures import Headers, URLPath
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Match, NoMatchFound
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .config import Settings
-from .tooling import FindFolderOutput, SearchContentOutput, ToolExecutionError, ToolExecutor
+from .tooling import ToolCatalog, ToolExecutionError, ToolExecutor, ToolSpec
 
 
 @dataclass(frozen=True)
@@ -150,11 +152,16 @@ def validate_mcp_settings(settings: Settings) -> None:
         raise RuntimeError("MCP_ALLOWED_HOSTS에는 하나 이상의 Host가 필요합니다.")
 
 
-def create_mcp_bundle(runtime_provider: Any, settings: Settings) -> McpBundle:
-    """검색 두 개만 등록한 stateless Streamable HTTP MCP app을 만든다."""
+def create_mcp_bundle(
+    runtime_provider: Any,
+    settings: Settings,
+    *,
+    catalog: ToolCatalog | None = None,
+) -> McpBundle:
+    """catalog에서 MCP 공개가 승인된 도구만 Streamable HTTP app에 등록한다."""
 
     validate_mcp_settings(settings)
-    executor = ToolExecutor(runtime_provider)
+    executor = ToolExecutor(runtime_provider, catalog=catalog)
     server = SafeFastMCP(
         name="automation-smb-search",
         instructions="사전 구축된 온프레미스 인덱스를 읽기 전용으로 검색합니다.",
@@ -162,47 +169,52 @@ def create_mcp_bundle(runtime_provider: Any, settings: Settings) -> McpBundle:
         json_response=True,
         streamable_http_path="/mcp",
     )
-    annotations = ToolAnnotations(
-        readOnlyHint=True,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False,
-    )
-
-    @server.tool(
-        name="find_folder",
-        description="사전 구축된 인메모리 인덱스에서 공유 폴더를 찾습니다.",
-        annotations=annotations,
-    )
-    async def find_folder(
-        query: Annotated[str, Field(min_length=1, max_length=500)],
-        limit: Annotated[int | None, Field(ge=1, le=20)] = None,
-    ) -> FindFolderOutput:
-        result = await executor.execute_async(
-            "find_folder",
-            {"query": query, "limit": limit},
-            surface="mcp",
+    for spec in executor.catalog.list("mcp"):
+        server.add_tool(
+            _build_mcp_handler(executor, spec),
+            name=spec.id,
+            description=spec.description,
+            annotations=ToolAnnotations(
+                readOnlyHint=spec.read_only,
+                destructiveHint=spec.destructive,
+                idempotentHint=spec.idempotent,
+                openWorldHint=spec.open_world,
+            ),
+            structured_output=True,
         )
-        return FindFolderOutput.model_validate(result)
-
-    @server.tool(
-        name="search_content",
-        description="사전 구축된 로컬 내용 인덱스에서 파일을 찾습니다. 본문 snippet은 반환하지 않습니다.",
-        annotations=annotations,
-    )
-    async def search_content(
-        query: Annotated[str, Field(min_length=1, max_length=500)],
-        limit: Annotated[int | None, Field(ge=1, le=20)] = None,
-    ) -> SearchContentOutput:
-        result = await executor.execute_async(
-            "search_content",
-            {"query": query, "limit": limit},
-            surface="mcp",
-        )
-        return SearchContentOutput.model_validate(result)
 
     secured_app = McpSecurityMiddleware(server.streamable_http_app(), settings)
     return McpBundle(server=server, app=secured_app)
+
+
+def _build_mcp_handler(executor: ToolExecutor, spec: ToolSpec) -> Callable[..., Awaitable[BaseModel]]:
+    """Pydantic 입력 계약을 FastMCP 함수 signature로 변환한다."""
+
+    async def execute_catalog_tool(**arguments: Any) -> BaseModel:
+        return await executor.execute_async(spec.id, arguments, surface="mcp")
+
+    parameters: list[inspect.Parameter] = []
+    for name, field_info in spec.input_model.model_fields.items():
+        annotation: Any = field_info.rebuild_annotation()
+        if field_info.description:
+            annotation = Annotated[annotation, Field(description=field_info.description)]
+        default = inspect.Parameter.empty if field_info.is_required() else field_info.default
+        parameters.append(
+            inspect.Parameter(
+                name,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                default=default,
+                annotation=annotation,
+            )
+        )
+    execute_catalog_tool.__name__ = spec.id
+    execute_catalog_tool.__qualname__ = spec.id
+    setattr(
+        execute_catalog_tool,
+        "__signature__",
+        inspect.Signature(parameters=parameters, return_annotation=spec.output_model),
+    )
+    return execute_catalog_tool
 
 
 def _is_loopback_client(scope: Scope) -> bool:

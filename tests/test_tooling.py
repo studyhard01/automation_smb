@@ -7,9 +7,10 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from pydantic import BaseModel
 
 from smb_finder.config import Settings
-from smb_finder.tooling import ToolCatalog, ToolExecutionError, ToolExecutor
+from smb_finder.tooling import ToolCatalog, ToolExecutionError, ToolExecutor, ToolSpec
 
 
 class RecordingFinder:
@@ -80,6 +81,70 @@ def test_explicit_empty_catalog_is_deny_all():
 
     assert catalog.list("mcp") == ()
     assert catalog.get("find_folder", "mcp") is None
+
+
+def test_catalog_handler_and_timeout_policy_are_the_execution_source():
+    class SyntheticInput(BaseModel):
+        value: str
+
+    class SyntheticOutput(BaseModel):
+        echoed: str
+
+    calls: list[str] = []
+
+    def handler(runtime, validated):  # noqa: ANN001
+        calls.append(runtime.marker)
+        return {"echoed": validated.value}
+
+    spec = ToolSpec(
+        id="synthetic_echo",
+        description="합성 catalog dispatch 검증",
+        input_model=SyntheticInput,
+        output_model=SyntheticOutput,
+        handler=handler,
+        timeout_resolver=lambda runtime: runtime.timeout_ms,
+        allowed_surfaces=frozenset({"playground"}),
+    )
+    runtime = SimpleNamespace(marker="catalog-handler", timeout_ms=250)
+
+    result = ToolExecutor(runtime, catalog=ToolCatalog((spec,))).execute(
+        "synthetic_echo",
+        {"value": "ok"},
+        surface="playground",
+    )
+
+    assert result == SyntheticOutput(echoed="ok")
+    assert calls == ["catalog-handler"]
+
+
+def test_mcp_catalog_rejects_admin_or_mutating_specs_even_if_surface_is_declared():
+    class SyntheticInput(BaseModel):
+        value: str
+
+    class SyntheticOutput(BaseModel):
+        echoed: str
+
+    def handler(runtime, validated):  # noqa: ANN001, ARG001
+        return {"echoed": validated.value}
+
+    admin_spec = ToolSpec(
+        id="admin_refresh",
+        description="관리자 작업",
+        input_model=SyntheticInput,
+        output_model=SyntheticOutput,
+        handler=handler,
+        timeout_resolver=lambda runtime: 250,
+        allowed_surfaces=frozenset({"playground", "mcp"}),
+        permission="admin",
+        read_only=False,
+        destructive=True,
+        idempotent=False,
+    )
+    catalog = ToolCatalog((admin_spec,))
+
+    assert catalog.list("playground") == (admin_spec,)
+    assert catalog.list("mcp") == ()
+    assert catalog.get("admin_refresh", "mcp") is None
 
 
 def test_find_folder_uses_default_limit_once_and_returns_minimal_contract():

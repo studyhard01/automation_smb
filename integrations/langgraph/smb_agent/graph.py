@@ -1,7 +1,4 @@
-"""LangGraph 그래프 — SMB 공유폴더 에이전트 (Langflow의 'Agent + 도구 + Chat I/O'에 대응).
-
-`smbtest` Langflow flow는 Agent 노드가 SMB 컴포넌트들을 도구로 부르고 Chat Input/Output이
-연결된 형태다. 그 구조를 LangGraph로 옮긴 것이 이 그래프다:
+"""LangGraph Studio용 SMB 공유폴더 에이전트 그래프.
 
     Chat 입력(messages) → [에이전트 LLM] ⇄ [도구: find_folder/search_content/refresh_content] → Chat 응답
 

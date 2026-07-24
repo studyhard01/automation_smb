@@ -328,9 +328,10 @@
           "statement_timeout"
         ],
         "src/smb_finder/tooling/catalog.py": [
-          "permission: Literal[\"read\"]",
+          "permission: Literal[\"read\", \"admin\"]",
           "read_only: bool = True",
-          "destructive: bool = False"
+          "destructive: bool = False",
+          "_surface_allows"
         ]
       },
       "api_tool_contracts": {
@@ -373,7 +374,7 @@
       "observability": {
         "src/smb_finder/tooling/executor.py": [
           "elapsed_ms",
-          "over_budget",
+          "result_count",
           "_audit"
         ],
         "src/smb_finder/api.py": [
@@ -412,6 +413,7 @@
           "인덱스 우선",
           "읽기 전용",
           "src/smb_finder/mcp_server.py",
+          "ToolCatalog",
           "scripts/evaluate_quality.py",
           "RAG_SIMILARITY_CUTOFF",
           "RAG_SYNTHESIS_EVIDENCE_CHARS",
@@ -474,6 +476,7 @@
       "docs/MCP_IMPLEMENTATION_PLAN.md": {
         "required_tokens": [
           "M0–M2 로컬 MVP 구현 완료",
+          "catalog 기반 직접 등록 완료",
           "src/smb_finder/mcp_server.py",
           "tests/test_mcp_server.py",
           "M3"
@@ -486,7 +489,8 @@
           "create_playground_skill",
           "active_skill_ids",
           "find_folder",
-          "search_content"
+          "search_content",
+          "ToolCatalog"
         ],
         "forbidden_tokens": [
           "LANGSMITH_TRACING"
@@ -497,6 +501,7 @@
           "src/smb_finder/tooling/",
           "src/smb_finder/mcp_server.py",
           "tests/test_mcp_server.py",
+          "catalog 기반",
           "M0",
           "M2"
         ],
@@ -566,14 +571,6 @@
           "다음 적용",
           "MinIO",
           "설치 전에"
-        ],
-        "forbidden_tokens": []
-      },
-      "integrations/langflow/README.md": {
-        "required_tokens": [
-          "합성 데이터 전용 테스트",
-          "합성 프로젝트 자료 폴더",
-          "--llm-provider openai"
         ],
         "forbidden_tokens": []
       },

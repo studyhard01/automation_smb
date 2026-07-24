@@ -1868,7 +1868,6 @@ class PlaygroundAgent:
             self.settings.llm_api_key,
             self.settings.openai_api_key,
             self.settings.admin_api_token,
-            self.settings.langflow_mcp_api_key,
         ]
         for secret in secret_values:
             if secret and len(secret) >= 3:

@@ -8,15 +8,21 @@
 > 챗봇 대화, tool 호출, trace, 지연을 검증한다. 의료데이터 입력 탐지나 provider별 합성 데이터 gate는 두지 않으며,
 > 운영용 보안 검토는 기본 기능 테스트 이후 별도 단계에서 진행한다.
 
+## 개발 환경 설정
+
+처음 참여하는 개발자는 역할별 설치·실행·검증 절차를 정리한
+[`Frontend/Backend 개발 환경 설정`](docs/DEVELOPMENT_SETUP.md)부터 확인한다. 현재 Frontend는 별도 Node 빌드가
+없는 정적 UI이며, Backend와 함께 합성 데이터 모드로 시작하는 방법을 안내한다.
+
 ## 현재 개발 우선순위
 
 1. **QC Report 감사·LLM 초안 수직 슬라이스**: 첨부 감사와 구조화 측정값 기반 검토용 Markdown 생성
-2. 실제 SOP compiler·규칙 버전·근거 위치와 초안 검토·승인 상태 계약
-3. 합성 평가셋 정확도/지연 검증, 이미지형 PDF OCR, 표 구조 복원과 결과 내보내기
-4. Langflow/n8n/Dify 등 노코드 자동화 외피 연결
+2. **코드 우선 tool 계약**: Python 도메인 코드와 Pydantic 계약을 공통 `ToolCatalog`/`ToolExecutor`에서 관리
+3. 실제 SOP compiler·규칙 버전·근거 위치와 초안 검토·승인 상태 계약
+4. 합성 평가셋 정확도/지연 검증, 이미지형 PDF OCR, 표 구조 복원과 결과 내보내기
 
-기존 자동화 연동 코드와 계획은 삭제하지 않지만 1~3이 안정화될 때까지 신규 개발을 동결한다. 상세 범위와 단계는
-[`docs/QC_REPORT_AUDIT_PLAN.md`](docs/QC_REPORT_AUDIT_PLAN.md)를 따른다.
+Playground는 같은 프로세스의 executor를 직접 호출하고, 외부 MCP Host만 `/mcp`에서 명시적으로 승인된 읽기 도구를
+호출한다. QC 상세 범위와 단계는 [`docs/QC_REPORT_AUDIT_PLAN.md`](docs/QC_REPORT_AUDIT_PLAN.md)를 따른다.
 
 ## 핵심 설계 — 지연 최소화
 
@@ -120,6 +126,7 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `config/project_quality_rubric.json` | 100점 배점·hard gate·합성 실측 evidence의 machine-readable 기준 |
 | `.githooks/pre-commit`, `.github/workflows/project-quality.yml` | 커밋과 push/PR에서 품질 hard gate 실행 |
 | `data/evaluation/` | 검증 완료 golden 15건과 검토 전 corpus 기반 candidate 25건을 분리한 합성 JSONL fixture |
+| `docs/DEVELOPMENT_SETUP.md` | Frontend/Backend 역할별 개발 환경 설치·실행·검증 가이드 |
 | `docs/PLAYGROUND_TOOLS.md` | `/playground` 등록 tool별 입력·동작·테스트 계약 |
 | `docs/QC_REPORT_AUDIT_PLAN.md` | QC Report 감사 우선순위, 입출력 계약, 단계별 구현 계획과 현재 제한 |
 | `docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md` | 세포유전 LLM 보고서 프로세스 이관 가이드 |
@@ -130,26 +137,18 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 | `docs/PROJECT_QUALITY_RUBRIC.md` | 코드 변경마다 적용하는 100점 품질 기준, hard gate, 로컬/CI 실행 계약 |
 | `docs/PRODUCTION_ARCHITECTURE.md` | 실제 온프레미스 운영 토폴로지, MinIO 범위, 장애·전환 계획 |
 | `docs/DEVELOPMENT_LESSONS.md` | 작업 중 반복 가능한 문제와 다음 적용 원칙을 최신 12개 이내로 유지 |
-| `integrations/langflow/` | 노코드 외피 — Langflow 컴포넌트 + `folder_search` 워크플로우 자동 생성기 ([README](integrations/langflow/README.md)) |
 | `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
 
-## 노코드 외피 (Langflow)
+## 코드 우선 tool·MCP 연결
 
-> **후순위 보존 영역:** 구현과 문서는 유지하지만 QC Report 감사 핵심 경로가 안정화될 때까지 Langflow/n8n/Dify
-> 신규 연동 작업은 진행하지 않는다.
-
-코딩 없이 워크플로를 짜는 외피로 [Langflow](https://github.com/langflow-ai/langflow)를 쓴다.
-`smb_finder` 코드는 그대로 두고, `integrations/langflow/`의 커스텀 컴포넌트가 `POST /find`를
-**사내 localhost로** 호출해 캔버스에 끌어다 쓸 수 있게 감싼다(외부 전송 없음). 자세한 실행은
-[`integrations/langflow/README.md`](integrations/langflow/README.md).
-
-첫 자동 생성 템플릿은 `folder_search`다. 자연어 요구사항을 입력하면 기존 `SMBFolderFinder`
-컴포넌트를 재사용하는 Langflow flow를 생성하고, Langflow API에 바로 등록할 수 있다. 기본은
-규칙/로컬 LLM이며, OpenAI는 명시 설정이 있을 때만 사용한다.
+업무 tool은 외부 workflow 제품에서 만들거나 동기화하지 않는다. Python 도메인 서비스와 Pydantic 모델을 먼저
+구현하고, 공통 catalog에 handler·timeout·surface·권한을 등록한다. Playground는 이 계약을 in-process로 사용하고
+MCP adapter는 `allowed_surfaces`에 `mcp`가 선언된 읽기·멱등 tool만 공개한다. 현재 공개 목록은
+`find_folder`, `search_content` 두 개다.
 
 ## 자체 챗봇 Playground
 
-Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한다.
+`smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한다.
 
 - 화면: `GET /playground`
 - tool 목록: `GET /api/playground/tools`
@@ -159,8 +158,6 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 - ISCN 핵형 요약: `POST /api/playground/karyotype-summary`
 - 채팅 실행: `POST /api/playground/chat`
 - Tool Lab 초안: `POST /api/playground/tool-draft`
-- Langflow Flow tool 등록/동기화: `GET|POST /api/playground/langflow-sources`
-- Langflow tool 직접 테스트: `POST /api/playground/langflow-tools/{tool_id}/test`
 - local LLM 확인: `POST /api/playground/llm-status`
 
 기본 tool에는 `draft_qc_report`, `audit_qc_report`, `extract_uploaded_document`, `search_sop_knowledge`, `find_folder`, `search_content`,
@@ -180,11 +177,9 @@ Langflow 없이 `smb_finder` 안에서 바로 쓰는 챗봇/tool UI를 제공한
 항상 `DRAFT - HUMAN REVIEW REQUIRED`이며 최종 보고서로 자동 확정하거나 파일로 보존하지 않는다. 출력 token은
 `PLAYGROUND_QC_DRAFT_MAX_TOKENS`로 제한하고 LLM·재검증·전체 지연을 trace에 남긴다.
 
-Tool Lab에서는 Langflow 프로젝트의 Streamable HTTP MCP URL을 등록해 공개된 Flow를 `Langflow Workflow` 분류의
-동적 Agent tool로 추가할 수 있다. 연결 정보와 tool schema는 Git 제외 로컬 캐시에 저장하고 API key는
-`LANGFLOW_MCP_API_KEY` 환경변수에서만 읽는다. `scripts/run_synthetic_langflow_mcp.py`는 Langflow 설치 없이
-등록·직접 호출 UI를 확인하는 합성 smoke 서버다. 자세한 계약은 [`docs/PLAYGROUND_TOOLS.md`](docs/PLAYGROUND_TOOLS.md)를
-참고한다.
+Tool Lab은 내장 도구의 manifest 초안을 만들고 현재 catalog 계약을 확인하는 용도로만 사용한다. 외부 MCP 연결은
+Playground가 아니라 승인된 MCP Host가 `/mcp`를 통해 수행한다. 자세한 계약은
+[`docs/PLAYGROUND_TOOLS.md`](docs/PLAYGROUND_TOOLS.md)를 참고한다.
 
 채팅 입력창 아래 `Skills` 버튼에서는 실제 agent와 같은 `<skill-id>/SKILL.md` 형식의 스킬을 선택·조회·추가·수정·삭제한다.
 기본 스킬은 코드와 함께 제공되는 읽기 전용 문서이며, UI에서 만든 사용자 스킬은
@@ -359,7 +354,7 @@ reload를 끄려면 `-NoReload`를 추가한다. MLflow는 현재 선택 의존�
 ```powershell
 # uv.lock 기준으로 Python 3.11 가상환경과 개발 의존성을 한 번에 맞춘다.
 uv sync --python 3.11 --native-tls --extra dev
-Copy-Item .env.example .env                  # SMB 자격증명 입력 (실제 값은 ../automation/.env)
+Copy-Item .env.example .env                  # 합성 테스트에서는 SMB 자격증명을 비워 둔다.
 
 # 서버 실행
 uv run --no-sync uvicorn smb_finder.api:app --host 127.0.0.1 --port 8010 --reload
@@ -417,7 +412,7 @@ curl -s http://localhost:8010/admin/content-index-jobs/<job_id> \
 
 ```bash
 .venv/Scripts/python -m pytest tests/ -m "not integration"   # 라이브 SMB 불필요
-.venv/Scripts/python -m ruff check src tests integrations/langflow
+.venv/Scripts/python -m ruff check src tests integrations/langgraph scripts
 
 # 테스트·린트·문서 링크·저장소 경계를 한 번에 평가
 uv run --no-sync python scripts/evaluate_quality.py
@@ -443,6 +438,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\enable_quality
 
 ## 다음 단계
 
+- **공통 catalog 단계적 확장**: 검색 tool의 Playground manifest를 Pydantic schema에서 파생하고,
+  `search_rag_chunks`, QC·보고서 tool을 tool별 계약·회귀 테스트와 함께 이관하되 MCP 공개 여부는 별도로 승인한다.
 - **QC 초안 평가·승인 계약**: local/OpenAI 합성 case에서 사실 보존·숫자 위반 차단·재감사 일치율과 p50/p95를
   측정하고 `DRAFT → REVIEWED → APPROVED/REJECTED` 상태 및 승인 템플릿을 정의한다.
 - **Phase 4 재측정**: 원격 온프레미스 embedding endpoint의 SSH 터널과 pgvector를 준비해 구현된

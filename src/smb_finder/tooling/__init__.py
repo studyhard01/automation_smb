@@ -2,7 +2,8 @@
 
 from .catalog import SEARCH_TOOL_SPECS, ToolCatalog, ToolSpec, ToolSurface
 from .contracts import FindFolderInput, FindFolderOutput, SearchContentInput, SearchContentOutput
-from .executor import ToolExecutionError, ToolExecutor
+from .errors import ToolExecutionError
+from .executor import ToolExecutor
 
 __all__ = [
     "SEARCH_TOOL_SPECS",

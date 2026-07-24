@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 import time
 from collections.abc import Callable
@@ -26,10 +25,7 @@ from smb_finder.reports import run_cytogenetics_karyotype_summary, run_cytogenet
 from smb_finder.tooling import ToolExecutionError, ToolExecutor
 
 from .models import ToolDefinition, ToolExecutionResult
-from .langflow_tools import LangflowMcpGateway, LangflowToolError, LangflowToolStore
 from .skills import SkillStore, SkillStoreError
-
-_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -141,8 +137,6 @@ def _format_rag_response(data: Any) -> str:
 def build_tool_registry(
     runtime: PlaygroundRuntime,
     *,
-    langflow_store: LangflowToolStore | None = None,
-    langflow_gateway: LangflowMcpGateway | None = None,
     qc_audit_service: QcAuditService | None = None,
     qc_draft_service: QcReportDraftService | None = None,
 ) -> dict[str, ToolHandler]:
@@ -256,7 +250,7 @@ def build_tool_registry(
             status="skipped",
             result_text=(
                 "내용 DB화는 무거운 관리자 작업이라 Playground 1차 버전에서는 자동 실행하지 않습니다. "
-                "/admin/content-index-jobs API 또는 Langflow의 DB화 컴포넌트를 사용하세요."
+                "/admin/content-index-jobs API를 사용하세요."
             ),
             error_code="admin_tool_manual_only",
             arguments_summary=f"path_len={len(path)}",
@@ -773,30 +767,5 @@ def build_tool_registry(
             run=create_playground_skill,
         ),
     }
-
-    store = langflow_store or LangflowToolStore(settings)
-    gateway = langflow_gateway or LangflowMcpGateway(settings)
-    try:
-        for source, snapshot in store.synchronized_tools():
-            tool_id = snapshot.definition.id
-            if tool_id in registry:
-                _logger.warning("Langflow tool ID가 기존 tool과 충돌해 제외됨: %s", tool_id)
-                continue
-
-            def run_langflow_tool(
-                args: dict[str, Any],
-                *,
-                current_source=source,
-                remote_name=snapshot.remote_name,
-            ) -> ToolExecutionResult:
-                return gateway.call_tool(current_source, remote_name, args)
-
-            registry[tool_id] = ToolHandler(
-                definition=snapshot.definition,
-                run=run_langflow_tool,
-                returns_final_answer=True,
-            )
-    except LangflowToolError as exc:
-        _logger.warning("Langflow tool 스냅샷을 불러오지 못함: %s", exc.code)
 
     return registry

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 import logging
-import time
 import uuid
 from urllib.parse import unquote
 
@@ -20,21 +19,15 @@ from smb_finder.reports.models import (
 )
 
 from .agent import PlaygroundAgent
-from .langflow_tools import LangflowMcpGateway, LangflowToolError, LangflowToolStore
 from .models import (
     ChatRequest,
     ChatResponse,
-    LangflowToolSource,
-    LangflowToolSourceRequest,
-    LangflowToolSyncResponse,
-    LangflowToolTestRequest,
     LlmStatusRequest,
     LlmStatusResponse,
     SkillCreateRequest,
     SkillDefinition,
     SkillUpdateRequest,
     ToolDefinition,
-    ToolCallTrace,
     ToolDraftRequest,
     ToolDraftResponse,
 )
@@ -49,8 +42,6 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
 
     settings = runtime_getter().settings
     shared_agent = PlaygroundAgent(settings, skill_store=SkillStore(settings.playground_skills_dir))
-    langflow_store = LangflowToolStore(settings)
-    langflow_gateway = LangflowMcpGateway(settings)
     attachment_store = AttachmentStore(
         settings.playground_upload_dir,
         max_bytes=settings.playground_upload_max_bytes,
@@ -84,14 +75,6 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         }.get(exc.code, 400)
         raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
 
-    def raise_langflow_error(exc: LangflowToolError) -> None:
-        status_code = {
-            "langflow_source_not_found": 404,
-            "langflow_sync_failed": 502,
-            "langflow_tool_call_failed": 502,
-        }.get(exc.code, 400)
-        raise HTTPException(status_code=status_code, detail={"code": exc.code, "message": exc.message}) from exc
-
     def raise_attachment_error(exc: AttachmentStoreError) -> None:
         status_code = {
             "attachment_not_found": 404,
@@ -102,8 +85,6 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
     def registry_for(runtime: PlaygroundRuntime) -> dict:
         return build_tool_registry(
             runtime,
-            langflow_store=langflow_store,
-            langflow_gateway=langflow_gateway,
             qc_audit_service=qc_audit_service,
         )
 
@@ -168,99 +149,6 @@ def create_playground_router(runtime_getter: Callable[[], PlaygroundRuntime]) ->
         except AttachmentStoreError as exc:
             raise_attachment_error(exc)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @router.get(
-        "/api/playground/langflow-sources",
-        response_model=list[LangflowToolSource],
-        operation_id="list_playground_langflow_sources",
-        summary="등록된 Langflow MCP 연결 목록",
-    )
-    async def list_langflow_sources() -> list[LangflowToolSource]:
-        try:
-            return list(await run_in_threadpool(langflow_store.list_sources))
-        except LangflowToolError as exc:
-            raise_langflow_error(exc)
-            raise AssertionError("unreachable")
-
-    @router.post(
-        "/api/playground/langflow-sources",
-        response_model=LangflowToolSyncResponse,
-        operation_id="register_playground_langflow_source",
-        summary="Langflow MCP 연결 등록 및 tool 동기화",
-    )
-    async def register_langflow_source(request: LangflowToolSourceRequest) -> LangflowToolSyncResponse:
-        try:
-            contracts, elapsed_ms = await run_in_threadpool(langflow_gateway.list_tools, request)
-            source = await run_in_threadpool(langflow_store.save_sync, request, contracts, elapsed_ms)
-        except LangflowToolError as exc:
-            raise_langflow_error(exc)
-            raise AssertionError("unreachable")
-        return LangflowToolSyncResponse(source=source, tool_count=len(source.tools), elapsed_ms=elapsed_ms)
-
-    @router.post(
-        "/api/playground/langflow-sources/{source_id}/sync",
-        response_model=LangflowToolSyncResponse,
-        operation_id="sync_playground_langflow_source",
-        summary="등록된 Langflow MCP tool 다시 동기화",
-    )
-    async def sync_langflow_source(source_id: str) -> LangflowToolSyncResponse:
-        try:
-            current = await run_in_threadpool(langflow_store.get_source, source_id)
-            request = LangflowToolSourceRequest(
-                source_id=current.source_id,
-                display_name=current.display_name,
-                mcp_url=current.mcp_url,
-                timeout_ms=current.timeout_ms,
-                enabled=current.enabled,
-            )
-            contracts, elapsed_ms = await run_in_threadpool(langflow_gateway.list_tools, request)
-            source = await run_in_threadpool(langflow_store.save_sync, request, contracts, elapsed_ms)
-        except LangflowToolError as exc:
-            await run_in_threadpool(langflow_store.mark_sync_error, source_id, exc.message)
-            raise_langflow_error(exc)
-            raise AssertionError("unreachable")
-        return LangflowToolSyncResponse(source=source, tool_count=len(source.tools), elapsed_ms=elapsed_ms)
-
-    @router.delete(
-        "/api/playground/langflow-sources/{source_id}",
-        status_code=status.HTTP_204_NO_CONTENT,
-        response_class=Response,
-        operation_id="delete_playground_langflow_source",
-        summary="Langflow MCP 연결 삭제",
-    )
-    async def delete_langflow_source(source_id: str) -> Response:
-        try:
-            await run_in_threadpool(langflow_store.delete, source_id)
-        except LangflowToolError as exc:
-            raise_langflow_error(exc)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @router.post(
-        "/api/playground/langflow-tools/{tool_id}/test",
-        response_model=ToolCallTrace,
-        operation_id="test_playground_langflow_tool",
-        summary="Langflow tool을 LLM 없이 직접 테스트",
-    )
-    async def test_langflow_tool(tool_id: str, request: LangflowToolTestRequest) -> ToolCallTrace:
-        handler = registry_for(runtime_getter()).get(tool_id)
-        if handler is None or handler.definition.origin != "langflow":
-            raise HTTPException(
-                status_code=404,
-                detail={"code": "langflow_tool_not_found", "message": "등록된 Langflow tool을 찾지 못했습니다."},
-            )
-        started = time.perf_counter()
-        result = await run_in_threadpool(handler.execute, request.arguments)
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-        return ToolCallTrace(
-            tool_id=handler.definition.id,
-            tool_name=handler.definition.display_name,
-            arguments_summary=result.arguments_summary,
-            status=result.status,
-            elapsed_ms=elapsed_ms,
-            result_text=result.result_text,
-            result_payload=result.result_payload,
-            error_code=result.error_code,
-        )
 
     @router.get(
         "/api/playground/skills",

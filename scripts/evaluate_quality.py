@@ -526,7 +526,7 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
 
     python = python_executable or sys.executable
     return {
-        "ruff": [python, "-m", "ruff", "check", "src", "tests", "integrations/langflow", "scripts"],
+        "ruff": [python, "-m", "ruff", "check", "src", "tests", "integrations/langgraph", "scripts"],
         "pytest": [
             python,
             "-m",

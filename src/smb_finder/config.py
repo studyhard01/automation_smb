@@ -201,26 +201,6 @@ class Settings(BaseSettings):
         description="결정론적 사실과 LLM 서술을 조립한 QC 보고서 초안 최대 글자 수",
     )
 
-    # ── Playground Langflow MCP tool ──
-    playground_langflow_tools_path: str = Field(
-        default=".cache/playground-langflow-tools.json",
-        description="Tool Lab에서 등록한 Langflow MCP tool 스냅샷 경로",
-    )
-    playground_langflow_allowed_hosts: str = Field(
-        default="127.0.0.1,localhost,::1",
-        description="Playground가 연결할 수 있는 Langflow MCP 호스트 allowlist(쉼표 구분)",
-    )
-    playground_langflow_result_chars: int = Field(
-        default=8000,
-        ge=500,
-        le=100_000,
-        description="Langflow MCP tool 결과를 Playground 응답에 보존할 최대 글자 수",
-    )
-    langflow_mcp_api_key: str = Field(
-        default="",
-        description="Langflow 프로젝트 MCP 서버의 x-api-key 값. 등록 파일에는 저장하지 않음",
-    )
-
     @property
     def smb_root(self) -> str:
         r"""공유 루트 UNC 경로 (\\host\share)."""
@@ -264,12 +244,6 @@ class Settings(BaseSettings):
     def mcp_allowed_origin_set(self) -> set[str]:
         """Origin 헤더가 있는 MCP client에 명시적으로 허용한 값의 집합."""
         return {value.strip().rstrip("/").lower() for value in self.mcp_allowed_origins.split(",") if value.strip()}
-
-    @property
-    def playground_langflow_allowed_host_set(self) -> set[str]:
-        """Langflow MCP outbound 연결 허용 호스트 집합."""
-        return {value.strip().lower() for value in self.playground_langflow_allowed_hosts.split(",") if value.strip()}
-
 
 def load_settings() -> Settings:
     """설정 인스턴스를 생성한다."""

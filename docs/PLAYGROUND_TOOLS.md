@@ -16,9 +16,6 @@
 | `POST` | `/api/playground/karyotype-summary` | 선택한 provider로 LLM-backed 요약 tool 직접 실행 |
 | `POST` | `/api/playground/tool-draft` | 합성 테스트용 tool manifest 초안 생성 |
 | `POST` | `/api/playground/llm-status` | provider/model 연결 확인 |
-| `GET`, `POST` | `/api/playground/langflow-sources` | Langflow MCP 연결 조회, 등록 및 tool 동기화 |
-| `POST`, `DELETE` | `/api/playground/langflow-sources/{source_id}/sync`, `/api/playground/langflow-sources/{source_id}` | tool 재동기화, 연결 삭제 |
-| `POST` | `/api/playground/langflow-tools/{tool_id}/test` | LLM 없이 등록된 Langflow tool 직접 실행 |
 
 `ToolDefinition`의 주요 필드는 다음과 같다.
 
@@ -27,7 +24,7 @@
 | `id` | tool 고유 ID |
 | `display_name` | UI 표시 이름 |
 | `description` | agent가 읽는 기능 설명 |
-| `category` | UI 대분류: `smb`, `database`, `report`, `skill`, `workflow` |
+| `category` | UI 대분류: `smb`, `database`, `report`, `skill` |
 | `permission` | `read`, `write` 또는 `admin` |
 | `execution_type` | `code` 또는 `llm` |
 | `enabled` | 현재 실행 가능 여부 |
@@ -35,46 +32,31 @@
 | `requires_admin` | 관리자 경로 전용 여부 |
 | `timeout_ms` | 단일 tool 제한 시간 |
 | `input_schema` | LLM이 만들 인자 설명 |
-| `origin`, `source_id` | 내장 tool인지 Langflow tool인지와 등록 연결 ID |
+| `origin`, `source_id` | 내장 tool 호환 metadata. 현재 각각 `builtin`, 빈 문자열 |
 
 `provider_availability`와 `external_provider_allowed`는 계약에서 제거됐다. `enabled=true`인 일반 tool은 local/OpenAI
 provider에서 같은 방식으로 선택할 수 있다.
 
 ## 분류 UI
 
-화면은 처음에 `SMB 직접 접근`, `DB 접근`, `보고서 관련`, `Skill 관리`, `Langflow Workflow` 대분류 카드만 보여준다. 각 카드를 클릭하면
-해당 분류의 tool 체크박스가 펼쳐지고, 다시 클릭하면 접힌다. 최초 진입과 목록 새로고침 후에는 모두 접힌 상태다.
+화면은 처음에 `SMB 직접 접근`, `DB 접근`, `보고서 관련`, `Skill 관리` 대분류 카드만 보여준다. 각 카드를
+클릭하면 해당 분류의 tool 체크박스가 펼쳐지고, 다시 클릭하면 접힌다. 최초 진입과 목록 새로고침 후에는 모두
+접힌 상태다.
 
 채팅 작성 영역의 `PDF/MD 첨부`는 한 번에 한 파일을 받는다. 파일명은 표시용 메타데이터로만 보존하고 실제 저장
 경로에는 임의 UUID를 사용한다. 허용 확장자는 `.pdf`, `.md`, `.markdown`이며 기본 크기 상한은 10MiB다.
 
-## Langflow Flow를 Agent tool로 등록
+## 공통 catalog와 MCP 경계
 
-Tool Lab의 `Langflow Tool 연결`에 프로젝트 MCP URL을 등록하면 서버가 `tools/list`를 호출해 Flow 이름·설명·입력
-JSON Schema를 `.cache/playground-langflow-tools.json`에 저장한다. 일반 `/api/playground/tools`와 채팅 요청에서는 이
-로컬 스냅샷만 읽으므로 목록 조회를 위해 Langflow를 매번 호출하지 않는다. 실제 선택된 tool 실행만 MCP `tools/call`을
-호출하고 결과와 `elapsed_ms`를 기존 trace 계약으로 반환한다. Flow 결과는 최종 답변으로 취급해 불필요한 두 번째 LLM
-합성을 생략한다.
+`find_folder`, `search_content`는 Pydantic 입출력 모델, handler, timeout과 공개 surface를 공통 `ToolCatalog`에서
+관리한다. Playground는 같은 `ToolExecutor`를 프로세스 안에서 직접 호출한다. 자기 서비스의 `/mcp`를 다시
+호출하거나 외부 tool schema를 동기화하지 않는다.
 
-- Langflow Flow에는 `Chat Output`을 연결하고 프로젝트의 MCP Server 화면에서 해당 Flow를 Tool로 공개한다.
-- URL 형식: `http://<LANGFLOW_HOST>:7860/api/v1/mcp/project/<PROJECT_ID>/streamable`
-- API key 인증을 쓰면 `.env`의 `LANGFLOW_MCP_API_KEY`에만 넣는다. URL, UI, 등록 JSON에는 key를 넣지 않는다.
-- 기본 outbound allowlist는 loopback뿐이다. 사내 Langflow 호스트는 `PLAYGROUND_LANGFLOW_ALLOWED_HOSTS`에 명시한다.
-- 등록된 tool은 현재 read tool로 취급한다. 파일 변경·인덱싱 같은 관리자 Flow는 Agent tool로 공개하지 않는다.
-- Tool Lab의 `등록 Tool 직접 테스트`는 LLM 없이 입력 JSON, MCP 결과, 호출 지연을 검증한다.
-
-Langflow 없이 연결 경로만 빠르게 확인할 수 있는 합성 서버도 제공한다.
-
-```powershell
-# 터미널 1: 합성 Langflow MCP 대체 서버
-uv run --no-sync python scripts/run_synthetic_langflow_mcp.py
-
-# 터미널 2: Playground
-uv run --no-sync uvicorn smb_finder.api:app --host 127.0.0.1 --port 8010
-```
-
-`http://127.0.0.1:8010/playground`의 Tool Lab에서 MCP URL을 `http://127.0.0.1:8765/mcp`로 바꾸고
-`등록 및 동기화`를 누른다. `synthetic_echo_workflow`가 나타나면 기본 합성 Arguments로 바로 실행할 수 있다.
+`/mcp`는 외부 MCP Host용 adapter다. 현재 catalog에서 `mcp` surface가 승인된 읽기·멱등 검색 두 개만 공개하며,
+관리자·쓰기·인덱싱·RAG·QC·보고서 tool은 공개하지 않는다. 다른 내장 tool은 기존 Playground registry에 남아 있고
+tool별 Pydantic 계약과 회귀 검증을 추가하면서 공통 catalog로 단계적으로 이관한다. 검색 두 개의 Playground 표시용
+`ToolDefinition.input_schema`도 현재 호환 registry에 남은 수동 metadata이며, 후속 이관에서 Pydantic schema로
+파생한다.
 
 ## 등록 tool
 

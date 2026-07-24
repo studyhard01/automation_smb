@@ -8,9 +8,9 @@ from pydantic import BaseModel, Field
 
 ToolPermission = Literal["read", "write", "admin"]
 ToolExecutionType = Literal["code", "llm"]
-ToolCategory = Literal["smb", "database", "report", "skill", "workflow"]
+ToolCategory = Literal["smb", "database", "report", "skill"]
 ToolStatus = Literal["ok", "error", "skipped"]
-ToolOrigin = Literal["builtin", "langflow"]
+ToolOrigin = Literal["builtin"]
 AgentAction = Literal["tool_call", "final_answer", "clarify"]
 AgentStepKind = Literal["decision", "tool_call", "observation", "final", "blocked", "error"]
 LlmProvider = Literal["local", "openai"]
@@ -34,52 +34,6 @@ class ToolDefinition(BaseModel):
     input_schema: dict[str, Any] = Field(default_factory=dict)
     origin: ToolOrigin = "builtin"
     source_id: str = ""
-
-
-class LangflowToolSnapshot(BaseModel):
-    """동기화 시점의 Langflow MCP tool 계약."""
-
-    remote_name: str
-    definition: ToolDefinition
-
-
-class LangflowToolSource(BaseModel):
-    """비밀값을 제외하고 로컬에 저장하는 Langflow 프로젝트 MCP 연결."""
-
-    source_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
-    display_name: str = Field(min_length=1, max_length=100)
-    mcp_url: str = Field(min_length=1, max_length=2000)
-    timeout_ms: int = Field(default=5000, ge=500, le=30_000)
-    enabled: bool = True
-    tools: list[LangflowToolSnapshot] = Field(default_factory=list)
-    last_synced_at: str = ""
-    last_sync_elapsed_ms: float = 0.0
-    last_error: str = ""
-    api_key_configured: bool = False
-
-
-class LangflowToolSourceRequest(BaseModel):
-    """Langflow MCP 연결 등록·갱신 요청."""
-
-    source_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9-]*$")
-    display_name: str = Field(min_length=1, max_length=100)
-    mcp_url: str = Field(min_length=1, max_length=2000)
-    timeout_ms: int = Field(default=5000, ge=500, le=30_000)
-    enabled: bool = True
-
-
-class LangflowToolSyncResponse(BaseModel):
-    """Langflow MCP tool 동기화 결과."""
-
-    source: LangflowToolSource
-    tool_count: int = 0
-    elapsed_ms: float = 0.0
-
-
-class LangflowToolTestRequest(BaseModel):
-    """LLM을 거치지 않는 Langflow tool 직접 테스트 요청."""
-
-    arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 class SkillDefinition(BaseModel):

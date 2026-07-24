@@ -23,7 +23,7 @@ __pycache__/
 dist/
 build/
 
-# 로컬 Docker/LLM override에는 API key가 들어갈 수 있으므로 커밋 금지
+# 제거된 Langflow 통합의 로컬 상태는 수동 정리 전까지 계속 Git에서 제외한다.
 integrations/langflow/docker-compose.override.yml
 integrations/langflow/.langflow-data/
 integrations/langgraph/.langgraph_api/

@@ -12,25 +12,13 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from smb_finder.models import ContentSearchRequest, FindRequest
-
 from .catalog import ToolCatalog, ToolSpec, ToolSurface
+from .errors import ToolExecutionError
 
 _logger = logging.getLogger(__name__)
 _DEFAULT_MAX_CONCURRENCY = 4
 _SHARED_POOL = ThreadPoolExecutor(max_workers=_DEFAULT_MAX_CONCURRENCY, thread_name_prefix="smb-tool")
 _SHARED_SLOTS = BoundedSemaphore(_DEFAULT_MAX_CONCURRENCY)
-
-
-class ToolExecutionError(RuntimeError):
-    """민감한 입력이나 내부 예외 문자열을 포함하지 않는 도구 오류."""
-
-    def __init__(self, code: str, message: str, *, retryable: bool = False, elapsed_ms: float = 0.0) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.retryable = retryable
-        self.elapsed_ms = elapsed_ms
 
 
 class ToolExecutor:
@@ -148,8 +136,7 @@ class ToolExecutor:
             raise ToolExecutionError("invalid_arguments", "도구 입력이 올바르지 않습니다.") from exc
 
         runtime = self._get_runtime()
-        settings = runtime.settings
-        timeout_ms = settings.find_budget_ms if tool_id == "find_folder" else settings.content_search_budget_ms
+        timeout_ms = spec.timeout_resolver(runtime)
         return spec, validated, max(100, int(timeout_ms))
 
     def _submit(
@@ -171,70 +158,16 @@ class ToolExecutor:
                 elapsed_ms=elapsed_ms,
             )
         try:
-            future = self._pool.submit(self._run, spec.id, validated)
+            future = self._pool.submit(self._run, spec, validated)
         except Exception:
             self._slots.release()
             raise
         future.add_done_callback(lambda _future: self._slots.release())
         return future
 
-    def _run(self, tool_id: str, validated: BaseModel) -> dict[str, Any]:
+    def _run(self, spec: ToolSpec, validated: BaseModel) -> dict[str, Any]:
         runtime = self._get_runtime()
-        if tool_id == "find_folder":
-            if runtime.finder is None:
-                raise ToolExecutionError("finder_not_ready", "폴더 인덱스가 아직 준비되지 않았습니다.", retryable=True)
-            request = FindRequest(
-                query=validated.query,
-                limit=validated.limit or runtime.settings.find_default_limit,
-            )
-            response = runtime.finder.find(request)
-            for hit in response.hits:
-                self._ensure_safe_runtime_output(hit.name, hit.path, runtime.settings)
-            hits = [
-                {
-                    "name": hit.name,
-                    "path": hit.path,
-                    "score": getattr(hit, "score", 0.0),
-                    "depth": getattr(hit, "depth", 0),
-                }
-                for hit in response.hits
-            ]
-            return {
-                "hits": hits,
-                "result_count": getattr(response, "result_count", len(hits)),
-                "elapsed_ms": max(0.0, float(getattr(response, "elapsed_ms", 0.0))),
-                "over_budget": bool(getattr(response, "over_budget", False)),
-            }
-
-        if runtime.content_searcher is None:
-            raise ToolExecutionError(
-                "content_searcher_not_ready",
-                "내용 검색 인덱스가 아직 준비되지 않았습니다.",
-                retryable=True,
-            )
-        request = ContentSearchRequest(
-            query=validated.query,
-            limit=validated.limit or runtime.settings.content_default_limit,
-        )
-        response = runtime.content_searcher.search(request)
-        for hit in response.hits:
-            self._ensure_safe_runtime_output(hit.name, hit.path, runtime.settings)
-        hits = [
-            {
-                "name": hit.name,
-                "path": hit.path,
-                "ext": hit.ext,
-                "score": getattr(hit, "score", 0.0),
-            }
-            for hit in response.hits
-        ]
-        return {
-            "hits": hits,
-            "result_count": getattr(response, "result_count", len(hits)),
-            "elapsed_ms": max(0.0, float(getattr(response, "elapsed_ms", 0.0))),
-            "over_budget": bool(getattr(response, "over_budget", False)),
-            "_indexed_files": max(0, int(getattr(response, "indexed_files", 0))),
-        }
+        return spec.handler(runtime, validated)
 
     def _finish(self, spec: ToolSpec, result: Any, surface: ToolSurface, started: float) -> BaseModel:
         elapsed_ms = self._elapsed_ms(started)
@@ -255,40 +188,6 @@ class ToolExecutor:
         if runtime is None:
             raise ToolExecutionError("runtime_not_ready", "검색 runtime이 아직 준비되지 않았습니다.", retryable=True)
         return runtime
-
-    @staticmethod
-    def _ensure_safe_runtime_output(name: str, path: str, settings: Any) -> None:
-        """설정에 있는 내부 식별자·자격정보가 결과명/경로에 섞이면 전체 결과를 차단한다."""
-
-        values = (str(name), str(path))
-        exact_markers = [
-            settings.smb_host,
-            settings.smb_share_name,
-            settings.smb_username,
-        ]
-        for configured_path in (settings.smb_index_cache_path, settings.content_index_db_path):
-            normalized = str(configured_path or "").replace("\\", "/")
-            exact_markers.append(normalized.rsplit("/", 1)[-1])
-        secret_markers = [
-            settings.smb_password,
-            settings.admin_api_token,
-            settings.mcp_api_token,
-            settings.llm_api_key,
-            settings.openai_api_key,
-        ]
-
-        for value in values:
-            normalized = value.replace("\\", "/").casefold()
-            components = {component for component in normalized.split("/") if component}
-            components.add(normalized)
-            for marker in exact_markers:
-                candidate = str(marker or "").strip().replace("\\", "/").casefold()
-                if candidate and candidate in components:
-                    raise ToolExecutionError("unsafe_tool_output", "도구 결과를 안전하게 반환할 수 없습니다.")
-            for marker in secret_markers:
-                candidate = str(marker or "").strip().casefold()
-                if candidate and candidate in normalized:
-                    raise ToolExecutionError("unsafe_tool_output", "도구 결과를 안전하게 반환할 수 없습니다.")
 
     @staticmethod
     def _elapsed_ms(started: float) -> float:

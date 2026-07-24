@@ -56,26 +56,7 @@ def test_openapi_operation_ids_are_stable():
     assert "403" not in operations["/api/playground/karyotype-summary"]["post"]["responses"]
     assert operations["/api/playground/chat"]["post"]["operationId"] == "run_playground_chat"
     assert operations["/api/playground/tool-draft"]["post"]["operationId"] == "draft_playground_tool"
-    assert (
-        operations["/api/playground/langflow-sources"]["get"]["operationId"]
-        == "list_playground_langflow_sources"
-    )
-    assert (
-        operations["/api/playground/langflow-sources"]["post"]["operationId"]
-        == "register_playground_langflow_source"
-    )
-    assert (
-        operations["/api/playground/langflow-sources/{source_id}/sync"]["post"]["operationId"]
-        == "sync_playground_langflow_source"
-    )
-    assert (
-        operations["/api/playground/langflow-sources/{source_id}"]["delete"]["operationId"]
-        == "delete_playground_langflow_source"
-    )
-    assert (
-        operations["/api/playground/langflow-tools/{tool_id}/test"]["post"]["operationId"]
-        == "test_playground_langflow_tool"
-    )
+    assert not any("langflow" in path for path in operations)
     assert operations["/api/playground/llm-status"]["post"]["operationId"] == "check_playground_llm"
     assert "ApiErrorResponse" in schema["components"]["schemas"]
 
@@ -95,6 +76,27 @@ def _playground_api_app() -> FastAPI:
         )
     )
     return test_app
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/playground/langflow-sources"),
+        ("POST", "/api/playground/langflow-sources"),
+        ("POST", "/api/playground/langflow-sources/legacy-source/sync"),
+        ("DELETE", "/api/playground/langflow-sources/legacy-source"),
+        ("POST", "/api/playground/langflow-tools/legacy-tool/test"),
+    ],
+)
+def test_removed_langflow_routes_return_not_found(method: str, path: str):
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=_playground_api_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.request(method, path)
+
+    response = asyncio.run(request())
+
+    assert response.status_code == 404
 
 
 async def _get_playground_tools() -> httpx.Response:

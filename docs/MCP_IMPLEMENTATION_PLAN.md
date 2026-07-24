@@ -1,15 +1,15 @@
-# automation-smb MCP 적용 구현 계획
+# automation-smb 코드 우선 MCP 구현 계획
 
-> 상태: M0–M2 로컬 MVP 구현 완료 — 사내 다중 사용자 공개·OAuth/SSO·LangGraph 전환은 후속 단계다.
+> 상태: M0–M2 로컬 MVP 구현 완료, 검색 2개의 catalog 기반 직접 등록 완료 — 공통 catalog 확장, 사내 다중 사용자 공개,
+> OAuth/SSO와 LangGraph client 전환은 후속 단계다.
 >
-> 기준일: 2026-07-14
+> 기준일: 2026-07-24
 >
 > 상위 설계: [TOOL_MCP_LANGCHAIN_ARCHITECTURE.md](TOOL_MCP_LANGCHAIN_ARCHITECTURE.md)
 
-> **2026-07-22 우선순위 변경:** M0–M2 결과는 유지한다. M3 이후 MCP/LangGraph 및 Langflow/n8n/Dify 연동은
-> 동결하고 [`QC_REPORT_AUDIT_PLAN.md`](QC_REPORT_AUDIT_PLAN.md)의 PDF/Markdown 감사와 LLM 초안 생성 경로를 먼저
-> 구현·검증한다.
-> QC 도구의 MCP 공개 여부는 실제 SOP 계약과 운영 경계가 확정된 뒤 별도 결정한다.
+> **2026-07-24 구조 결정:** 업무 tool은 Python 도메인 코드와 Pydantic 계약으로 먼저 구현한다. Playground는
+> 공통 executor를 in-process로 사용하고, 외부 client만 `/mcp`에서 명시적으로 승인된 tool을 호출한다. QC 도구의
+> catalog 이관과 MCP 공개 여부는 실제 SOP 계약과 운영 경계가 확정된 뒤 각각 별도 결정한다.
 
 ## 1. 구현 결정 요약
 
@@ -135,21 +135,22 @@ SSE 전용 endpoint는 만들지 않는다. `stdio`는 데스크톱 MCP Host가 
 @dataclass(frozen=True)
 class ToolSpec:
     id: str
-    display_name: str
     description: str
-    permission: Literal["read", "admin"]
     input_model: type[BaseModel]
     output_model: type[BaseModel]
-    timeout_ms: int
-    enabled: bool
-    expose_to_playground: bool
-    expose_to_mcp: bool
-    external_provider_allowed: bool
-    run: ToolCallable
+    handler: ToolHandler
+    timeout_resolver: TimeoutResolver
+    allowed_surfaces: frozenset[ToolSurface]
+    permission: Literal["read", "admin"]
+    read_only: bool
+    destructive: bool
+    idempotent: bool
+    open_world: bool
 ```
 
 MVP에서는 검색 두 개만 공통 `ToolCatalog`로 옮긴다. 기존 보고서·관리자 도구는 현재 registry에 남기되,
-`playground/tools.py`가 공통 검색 spec과 기존 spec을 합치는 호환 shim 역할을 한다.
+`playground/tools.py`가 공통 검색 spec과 기존 spec을 합치는 호환 shim 역할을 한다. `ToolExecutor`는 tool ID
+조건문이 아니라 spec의 handler와 timeout resolver를 실행하며 MCP adapter는 `allowed_surfaces`를 순회해 등록한다.
 
 ### 5.2 입력 계약
 
@@ -342,11 +343,25 @@ docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md
 - 관리자·보고서·핵형요약 도구가 목록에 없음
 - 결과와 로그에 금지 필드가 없음
 
-### M3 — LangGraph MCP client 이관
+### M3 — 공통 catalog 확장과 adapter 일반화
 
-상태: **후순위 동결**. QC Report 감사·LLM 초안 P0–P2 완료 전에는 착수하지 않는다.
+상태: **검색 2개 adapter 일반화 완료, 업무 tool 단계적 이관 대기**.
 
-목표: LangGraph의 수동 HTTP `@tool` 래퍼를 MCP client로 단계적으로 교체한다.
+목표: Playground registry에 남은 업무 tool을 계약·회귀 테스트와 함께 하나씩 공통 catalog로 옮긴다. catalog
+등록이 MCP 공개를 뜻하지 않으며, 각 `allowed_surfaces`는 데이터·권한·지연 검토 후 별도로 결정한다.
+
+권장 이관 순서:
+
+1. `search_rag_chunks`
+2. `audit_qc_report`
+3. `draft_qc_report`
+4. 보고서 후보·체크리스트 tool
+5. 핵형 요약은 local LLM·입력 제한을 별도 검증한 뒤 이관
+
+관리자·인덱싱·skill 쓰기·첨부 관리 tool은 catalog에 등록하더라도 MCP surface를 허용하지 않는다.
+
+LangGraph Studio는 선택적 코드 디버깅 client로 유지한다. 수동 HTTP `@tool` 래퍼를 MCP client로 교체할 때는
+`langchain-mcp-adapters` 호환성을 별도 변경에서 검증한다.
 
 `langchain-mcp-adapters==0.3.0`은 `langchain-core>=1,<2`를 요구한다. 현재 integration은
 `langchain-core>=0.3` 전제이므로 M2와 같은 변경에 섞지 않는다.
@@ -441,6 +456,16 @@ client 테스트를 기준으로 삼는다.
 - fake runtime 기반 `FastMCP.call_tool` 100회: p50 0.208ms, p95 0.278ms, max 0.505ms
 - `MCP_ENABLED=false` 기본 상태의 `POST /mcp`: 404 확인
 - 실제 SMB 세션, 환자/검사 파일, 로컬·외부 LLM은 검증에 사용하지 않음
+
+### 9.5 catalog 기반 직접 등록 검증 (2026-07-24)
+
+- `ToolSpec` handler·timeout resolver 기반 dispatch 적용
+- MCP `tools/list`가 catalog의 `mcp` surface와 동일한 검색 2개만 반환
+- Pydantic 입력 제약과 구조화 출력 schema, read-only annotation 일치
+- 관리자·쓰기 spec은 `mcp` surface가 선언돼도 catalog 방어 계층에서 제외
+- Playground는 MCP HTTP 우회 없이 같은 executor를 직접 사용
+- fake runtime 200회: direct executor p50 0.224ms/p95 0.291ms, MCP call p50 0.273ms/p95 0.338ms,
+  adapter p95 증가 0.047ms
 
 ## 10. 로컬 실행과 smoke 시나리오
 

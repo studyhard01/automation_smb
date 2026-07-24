@@ -7,7 +7,6 @@ const state = {
   history: [],
   openaiApiKey: "",
   chatPending: false,
-  langflowSources: [],
   attachments: [],
 };
 
@@ -31,11 +30,6 @@ const toolCategories = [
     id: "skill",
     name: "Skill 관리",
     description: "실제 SKILL.md를 만들고 현재 agent에 적용합니다.",
-  },
-  {
-    id: "workflow",
-    name: "Langflow Workflow",
-    description: "Langflow에서 제작하고 MCP로 공개한 복합 Flow를 실행합니다.",
   },
 ];
 
@@ -77,17 +71,6 @@ const skillDocumentInput = document.querySelector("#skillDocument");
 const skillEditorStatus = document.querySelector("#skillEditorStatus");
 const saveSkillButton = document.querySelector("#saveSkill");
 const deleteSkillButton = document.querySelector("#deleteSkill");
-const langflowSourceForm = document.querySelector("#langflowSourceForm");
-const langflowSourceId = document.querySelector("#langflowSourceId");
-const langflowDisplayName = document.querySelector("#langflowDisplayName");
-const langflowMcpUrl = document.querySelector("#langflowMcpUrl");
-const langflowTimeout = document.querySelector("#langflowTimeout");
-const langflowStatus = document.querySelector("#langflowStatus");
-const langflowSources = document.querySelector("#langflowSources");
-const langflowTestForm = document.querySelector("#langflowTestForm");
-const langflowToolSelect = document.querySelector("#langflowToolSelect");
-const langflowToolArguments = document.querySelector("#langflowToolArguments");
-const langflowTestOutput = document.querySelector("#langflowTestOutput");
 
 function ensureSettingsDialog() {
   let dialog = document.querySelector("#settingsDialog");
@@ -649,7 +632,7 @@ async function loadTools() {
         const executionType = executionTypeOf(tool);
         const executionClass = executionType || "unknown";
         const executionLabel =
-          tool.origin === "langflow" ? "Langflow" : executionType === "code" ? "코드" : executionType === "llm" ? "LLM" : "미확인";
+          executionType === "code" ? "코드" : executionType === "llm" ? "LLM" : "미확인";
         const selectable = tool.enabled === true && executionType !== null;
         const item = document.createElement("section");
         item.className = `tool-item${selectable ? "" : " disabled"}`;
@@ -715,173 +698,6 @@ function responseErrorMessage(data, fallback) {
     if (message) return message;
   }
   return fallback;
-}
-
-function setLangflowStatus(text, status = "") {
-  langflowStatus.textContent = text;
-  langflowStatus.className = `status-line ${status}`.trim();
-}
-
-function schemaExample(schema) {
-  if (!schema || typeof schema !== "object" || !schema.properties) return { input_value: "synthetic hello" };
-  const result = {};
-  for (const [name, property] of Object.entries(schema.properties)) {
-    if (Object.prototype.hasOwnProperty.call(property || {}, "default")) {
-      result[name] = property.default;
-    } else if (property?.type === "boolean") {
-      result[name] = false;
-    } else if (property?.type === "integer" || property?.type === "number") {
-      result[name] = 1;
-    } else if (property?.type === "array") {
-      result[name] = [];
-    } else if (property?.type === "object") {
-      result[name] = {};
-    } else {
-      result[name] = `synthetic ${name}`;
-    }
-  }
-  return result;
-}
-
-function renderLangflowSources() {
-  langflowSources.innerHTML = "";
-  langflowToolSelect.innerHTML = "";
-  if (!state.langflowSources.length) {
-    langflowSources.innerHTML = '<p class="tool-list-status">등록된 Langflow 연결이 없습니다.</p>';
-    langflowToolSelect.innerHTML = '<option value="">먼저 Langflow 연결을 등록하세요</option>';
-    return;
-  }
-
-  for (const source of state.langflowSources) {
-    const card = document.createElement("article");
-    card.className = "langflow-source-card";
-    card.dataset.sourceId = source.source_id;
-    const toolCount = Array.isArray(source.tools) ? source.tools.length : 0;
-    card.innerHTML = `
-      <div class="langflow-source-heading">
-        <div>
-          <strong>${escapeHtml(source.display_name)}</strong>
-          <small>${escapeHtml(source.source_id)} · ${toolCount}개 tool · ${escapeHtml(source.last_sync_elapsed_ms || 0)}ms</small>
-        </div>
-        <div class="langflow-source-actions">
-          <button type="button" class="secondary-button" data-langflow-action="sync">동기화</button>
-          <button type="button" class="danger-button" data-langflow-action="delete">삭제</button>
-        </div>
-      </div>
-      <code class="langflow-source-url">${escapeHtml(source.mcp_url)}</code>
-      ${source.last_error ? `<p class="error">${escapeHtml(source.last_error)}</p>` : ""}
-    `;
-    langflowSources.appendChild(card);
-
-    for (const snapshot of source.tools || []) {
-      const tool = snapshot.definition;
-      const option = document.createElement("option");
-      option.value = tool.id;
-      option.textContent = `${source.display_name} / ${tool.display_name}`;
-      option.dataset.schema = JSON.stringify(tool.input_schema || {});
-      langflowToolSelect.appendChild(option);
-    }
-  }
-  updateLangflowArgumentExample();
-}
-
-function updateLangflowArgumentExample() {
-  const option = langflowToolSelect.selectedOptions[0];
-  if (!option?.value) return;
-  try {
-    langflowToolArguments.value = JSON.stringify(schemaExample(JSON.parse(option.dataset.schema || "{}")), null, 2);
-  } catch (_error) {
-    langflowToolArguments.value = '{\n  "input_value": "synthetic hello"\n}';
-  }
-}
-
-async function loadLangflowSources() {
-  try {
-    const response = await fetch("/api/playground/langflow-sources");
-    const data = await response.json();
-    if (!response.ok) throw new Error(responseErrorMessage(data, `HTTP ${response.status}`));
-    state.langflowSources = Array.isArray(data) ? data : [];
-    renderLangflowSources();
-  } catch (error) {
-    setLangflowStatus(`연결 목록 조회 실패: ${error.message}`, "error");
-  }
-}
-
-async function registerLangflowSource(event) {
-  event.preventDefault();
-  setLangflowStatus("Langflow MCP에 연결해 tool을 동기화하는 중...");
-  try {
-    const response = await fetch("/api/playground/langflow-sources", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        source_id: langflowSourceId.value.trim(),
-        display_name: langflowDisplayName.value.trim(),
-        mcp_url: langflowMcpUrl.value.trim(),
-        timeout_ms: Number(langflowTimeout.value),
-        enabled: true,
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(responseErrorMessage(data, `HTTP ${response.status}`));
-    setLangflowStatus(`${data.tool_count}개 tool 동기화 완료 (${data.elapsed_ms}ms)`, "ok");
-    await Promise.all([loadLangflowSources(), loadTools()]);
-  } catch (error) {
-    setLangflowStatus(`등록 실패: ${error.message}`, "error");
-  }
-}
-
-async function handleLangflowSourceAction(event) {
-  const button = event.target.closest("[data-langflow-action]");
-  if (!button) return;
-  const card = button.closest("[data-source-id]");
-  const sourceId = card?.dataset.sourceId;
-  if (!sourceId) return;
-  const action = button.dataset.langflowAction;
-  setLangflowStatus(action === "sync" ? "tool을 다시 동기화하는 중..." : "연결을 삭제하는 중...");
-  try {
-    const response = await fetch(
-      action === "sync"
-        ? `/api/playground/langflow-sources/${encodeURIComponent(sourceId)}/sync`
-        : `/api/playground/langflow-sources/${encodeURIComponent(sourceId)}`,
-      { method: action === "sync" ? "POST" : "DELETE" }
-    );
-    const data = response.status === 204 ? {} : await response.json();
-    if (!response.ok) throw new Error(responseErrorMessage(data, `HTTP ${response.status}`));
-    setLangflowStatus(action === "sync" ? `${data.tool_count}개 tool 동기화 완료 (${data.elapsed_ms}ms)` : "연결 삭제 완료", "ok");
-    await Promise.all([loadLangflowSources(), loadTools()]);
-  } catch (error) {
-    setLangflowStatus(`${action === "sync" ? "동기화" : "삭제"} 실패: ${error.message}`, "error");
-  }
-}
-
-async function testLangflowTool(event) {
-  event.preventDefault();
-  const toolId = langflowToolSelect.value;
-  if (!toolId) return;
-  let argumentsValue;
-  try {
-    argumentsValue = JSON.parse(langflowToolArguments.value || "{}");
-    if (!argumentsValue || Array.isArray(argumentsValue) || typeof argumentsValue !== "object") {
-      throw new Error("Arguments는 JSON object여야 합니다.");
-    }
-  } catch (error) {
-    langflowTestOutput.textContent = `입력 오류: ${error.message}`;
-    return;
-  }
-  langflowTestOutput.textContent = "Langflow tool 실행 중...";
-  try {
-    const response = await fetch(`/api/playground/langflow-tools/${encodeURIComponent(toolId)}/test`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ arguments: argumentsValue }),
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(responseErrorMessage(data, `HTTP ${response.status}`));
-    langflowTestOutput.textContent = JSON.stringify(data, null, 2);
-  } catch (error) {
-    langflowTestOutput.textContent = `실행 실패: ${error.message}`;
-  }
 }
 
 function renderActiveSkills() {
@@ -1240,13 +1056,8 @@ closeSkillsButton.addEventListener("click", () => skillsDialog.close());
 newSkillButton.addEventListener("click", startNewSkill);
 saveSkillButton.addEventListener("click", saveSkill);
 deleteSkillButton.addEventListener("click", deleteSkill);
-langflowSourceForm.addEventListener("submit", registerLangflowSource);
-langflowSources.addEventListener("click", handleLangflowSourceAction);
-langflowTestForm.addEventListener("submit", testLangflowTool);
-langflowToolSelect.addEventListener("change", updateLangflowArgumentExample);
 restoreSelectedSkills();
 applyProviderMode();
 loadTools();
 renderAttachments();
 loadSkills();
-loadLangflowSources();

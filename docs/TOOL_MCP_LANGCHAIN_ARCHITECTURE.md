@@ -1,9 +1,10 @@
-# automation-smb 도구·LangChain·MCP 통합 아키텍처
+# automation-smb 코드 우선 도구·LangChain·MCP 아키텍처
 
-> 상태: M0–M2 로컬 MCP MVP 완료, M3 이후 이관 대기 — 이 문서는 완료된 공통 검색 계약·`/mcp`와 목표 구조를
-> 함께 정의한다. 상세 구현 순서와 검증 결과는 [MCP_IMPLEMENTATION_PLAN.md](MCP_IMPLEMENTATION_PLAN.md)를 따른다.
+> 상태: 검색 2개의 공통 계약·executor·catalog 기반 `/mcp` 등록 완료, 나머지 업무 tool 이관 대기 — 이 문서는
+> 현재 구조와 단계적 목표를 함께 정의한다. 상세 구현 순서와 검증 결과는
+> [MCP_IMPLEMENTATION_PLAN.md](MCP_IMPLEMENTATION_PLAN.md)를 따른다.
 >
-> 기준일: 2026-07-14
+> 기준일: 2026-07-24
 
 ## 1. 결론
 
@@ -16,8 +17,8 @@ MCP, LangChain/LangGraph 어댑터를 연결한다.
 1. **업무 로직은 한 번만 구현한다.** 폴더 검색, 문서 검색, 보고서 후보 검색, 핵형요약 함수는 기존 구현을 재사용한다.
 2. **도구 계약과 정책도 한 곳에서 관리한다.** 이름, 설명, Pydantic 입출력, 권한, timeout, 외부 전송 허용 여부를
    공통 `ToolSpec`과 `ToolExecutor`가 소유한다.
-3. **MCP는 외부 AI 도구 접근의 표준 경계로 사용한다.** LangGraph와 Langflow가 각자 HTTP 래퍼를 복제하지 않고
-   MCP를 통해 허용된 도구를 발견하고 호출하도록 이관한다.
+3. **MCP는 외부 AI 도구 접근의 표준 경계로 사용한다.** 외부 MCP Host는 `/mcp`에서 승인된 도구만 발견하고
+   호출하며, 자체 Playground는 같은 executor를 in-process로 사용한다.
 4. **LangChain은 Agent 오케스트레이션에 사용한다.** 단순 검색 fast path에는 LLM을 강제하지 않는다.
 5. **관리자·쓰기 작업은 Agent/MCP에서 분리한다.** 인덱스 갱신은 인증된 관리자 API와 백그라운드 job으로만 실행한다.
 
@@ -52,7 +53,6 @@ flowchart TB
         web["자체 Playground Web"]
         restClient["사내 REST 클라이언트"]
         mcpHost["Codex 등 MCP Host"]
-        langflow["Langflow"]
         studio["LangGraph Studio"]
         admin["운영 관리자"]
     end
@@ -99,8 +99,6 @@ flowchart TB
     web --> playgroundApi
     restClient --> fastapi
     mcpHost -->|"stdio 또는 인증된 HTTP"| mcpServer
-    langflow -->|"기존 REST"| fastapi
-    langflow -->|"목표 MCP"| mcpServer
     studio --> langchainAgent
     admin --> adminApi
 

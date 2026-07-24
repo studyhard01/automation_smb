@@ -4,7 +4,8 @@
 
 Playground는 실제 의료 환경과 무관한 합성 데이터로만 기능을 검증한다. 현재 최우선 목표는 PDF/Markdown QC Report
 감사와 구조화된 합성 측정값 기반 LLM 보고서 초안을 각각 완결된 tool 경로로 제공하는 것이다. provider 연결, 일반
-tool 선택, agent loop와 RAG 평가는 유지하지만 그 다음 순위다. Langflow/n8n/Dify 연동은 두 QC 경로 안정화 뒤로 미룬다.
+tool 선택, agent loop와 RAG 평가는 유지하지만 그 다음 순위다. 업무 tool은 코드와 Pydantic 계약을 먼저 구현하고
+공통 catalog 이관과 MCP 공개 여부를 별도 단계로 검증한다.
 
 운영용 의료데이터 탐지, provider별 합성 데이터 허용 gate, 별도 안전 프로필은 기본 기능 테스트 이후에 다시
 설계한다. 현재 기능 경로에는 이를 추가하지 않는다.

@@ -13,6 +13,7 @@ from smb_finder import api
 from smb_finder.config import Settings
 from smb_finder.index import FolderIndex
 from smb_finder.mcp_server import McpExactRoute, create_mcp_bundle, validate_mcp_settings
+from smb_finder.tooling import ToolCatalog, ToolExecutor
 
 
 TOKEN = "local-mcp-test-token-0123456789"
@@ -126,13 +127,19 @@ def test_tools_list_is_exactly_two_read_only_tools():
     bundle, _, _ = _bundle()
 
     tools = asyncio.run(bundle.server.list_tools())
+    specs = ToolCatalog().list("mcp")
 
-    assert [tool.name for tool in tools] == ["find_folder", "search_content"]
+    assert [tool.name for tool in tools] == [spec.id for spec in specs] == ["find_folder", "search_content"]
     assert all(tool.annotations.readOnlyHint is True for tool in tools)
     assert all(tool.annotations.destructiveHint is False for tool in tools)
     assert all(tool.annotations.idempotentHint is True for tool in tools)
     assert all(tool.annotations.openWorldHint is False for tool in tools)
     assert all(tool.outputSchema is not None for tool in tools)
+    for tool, spec in zip(tools, specs, strict=True):
+        expected_input = spec.input_model.model_json_schema()
+        assert tool.inputSchema["properties"] == expected_input["properties"]
+        assert tool.inputSchema["required"] == expected_input["required"]
+        assert tool.outputSchema["title"] == spec.output_model.model_json_schema()["title"]
     assert "indexed_files" not in tools[1].outputSchema["properties"]
 
 
@@ -155,6 +162,26 @@ def test_call_tool_executes_existing_search_once_and_redacts_payload():
     assert "민감한 본문 snippet" not in serialized
     assert "snippet" not in serialized
     assert "refresh_content" not in serialized
+
+
+def test_direct_executor_and_mcp_adapter_return_the_same_structured_results():
+    settings = Settings(_env_file=None, mcp_enabled=True, mcp_api_token=TOKEN)
+    runtime = SimpleNamespace(settings=settings, finder=FakeFinder(), content_searcher=FakeSearcher())
+    executor = ToolExecutor(runtime)
+    bundle = create_mcp_bundle(runtime, settings)
+
+    direct_folder = executor.execute("find_folder", {"query": "folder"}, surface="mcp").model_dump()
+    direct_content = executor.execute("search_content", {"query": "document"}, surface="mcp").model_dump()
+
+    async def call_tools():
+        folder_result = await bundle.server.call_tool("find_folder", {"query": "folder"})
+        content_result = await bundle.server.call_tool("search_content", {"query": "document"})
+        return folder_result[1], content_result[1]
+
+    mcp_folder, mcp_content = asyncio.run(call_tools())
+
+    assert mcp_folder == direct_folder
+    assert mcp_content == direct_content
 
 
 def test_invalid_tool_arguments_are_not_reflected_by_fastmcp():
