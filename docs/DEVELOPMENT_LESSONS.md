@@ -13,6 +13,11 @@
 
 ## 현재 교훈
 
+### 2026-07-24 — 문서 구조를 바꿔도 canonical 계약을 보존한다
+- 상황: README의 파일별 구조 표를 책임별 그룹으로 줄이면서 품질 rubric이 요구하는 핵심 경로 표식이 빠져 hard gate가 실패했다.
+- 교훈: canonical 문서는 설명 자료이면서 자동 검사 계약이므로 표현을 단순화해도 필수 주장·경로·링크는 유지해야 한다.
+- 다음 적용: README·설계 문서 개편 전 rubric의 `canonical_documents`를 확인하고 변경 직후 전체 품질 평가를 실행한다.
+
 ### 2026-07-24 — 도구 계약 원본과 공개 adapter를 분리한다
 - 상황: 외부 tool schema 동기화와 로컬 registry가 함께 존재해 계약 원본이 나뉘고 원격 지연·장애가 fast path로 전파될 수 있었다.
 - 교훈: Python 도메인 코드와 Pydantic catalog를 단일 원본으로 두고 Playground는 in-process, 외부 client만 승인된 MCP adapter를 사용한다.

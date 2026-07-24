@@ -93,51 +93,35 @@ Origin 없는 로컬 서버형 client는 허용한다. Origin 헤더가 있는 c
 
 ## 구조
 
-| 파일 | 역할 |
-|---|---|
-| `src/smb_finder/config.py` | `.env` 설정 로더 (SMB·인덱스·LLM·시간예산·내용검색) |
-| `src/smb_finder/models.py` | 입출력 Pydantic 모델 (`Find*`/`ContentSearch*`) |
-| `src/smb_finder/smb_client.py` | SMB 세션 + 트리 순회 (폴더 `walk_folders`, 파일 `walk_files`) |
-| `src/smb_finder/index.py` | 폴더 인메모리 인덱스 + 빠른 검색 + JSON 캐시 |
-| `src/smb_finder/indexer.py` | SMB 순회로 폴더 인덱스 빌드 (시작/백그라운드) |
-| `src/smb_finder/intent.py` | 자연어 → 키워드 (규칙 우선, LLM 선택) |
-| `src/smb_finder/finder.py` | 폴더 검색 오케스트레이터 (정규화→검색→응답, 시간 측정) |
-| `src/smb_finder/extract.py` | 파일 본문 추출 (텍스트/`docx`/`xlsx`/`pdf`, cp949 폴백) |
-| `src/smb_finder/content_index.py` | 내용 FTS5(trigram) 저장 + 검색 (bm25·snippet) |
-| `src/smb_finder/content_indexer.py` | SMB 파일 순회→추출→FTS5 적재 (관리/백그라운드) |
-| `src/smb_finder/content_search.py` | 내용 검색 오케스트레이터 (토큰화→검색, 시간 측정) |
-| `src/smb_finder/rag_search.py` | 로컬 PostgreSQL 질의 임베딩→pgvector chunk 검색 (단계별 시간 측정) |
-| `src/smb_finder/evaluation/` | validated/candidate dataset, retrieval/end-to-end scorer, MLflow Dataset·judge·trace adapter |
-| `src/smb_finder/reports/` | 검사 보고서 업무 보조 tool — LLM 기반 ISCN 요약 + 로컬 후보 문서 검색/체크리스트 |
-| `src/smb_finder/qc_audit/` | 첨부 추출·합성 SOP 감사·LLM 비수치 서술·QC Markdown 초안 조립과 재검증 |
-| `src/smb_finder/tooling/` | 검색 도구 공통 Pydantic 계약·불변 catalog·timeout/동시 실행/감사 로그 executor |
-| `src/smb_finder/mcp_server.py` | 읽기 전용 MCP 검색 도구 등록과 HTTP transport 설정 |
-| `src/smb_finder/api.py` | FastAPI 앱 — `POST /find`·`/search-content`·`/refresh*` (OpenAPI 도구) |
-| `src/smb_finder/playground/` | 자체 챗봇 Playground — 선택한 tool만 호출하는 local LLM 기반 채팅 API |
-| `src/smb_finder/web/` | `/playground` 정적 UI — tool 선택, 채팅, Tool Lab 초안 화면 |
-| `scripts/start_local_stack.ps1` | Playground 기본 실행과 MLflow·LangGraph Studio 선택 실행을 지원하는 Start/Stop/Status 실행기 |
-| `scripts/start_remote_embedding_tunnel.ps1` | PuTTY 저장 세션으로 원격 온프레미스 embedding 서버를 `127.0.0.1:18080/v1`에 연결 |
-| `scripts/run_mlflow_doc_eval.py` | 문서 RAG retrieval/end-to-end golden evaluation과 선택적 LLM judge CLI |
-| `scripts/register_mlflow_eval_dataset.py` | golden/candidate JSONL을 로컬 MLflow Evaluation Dataset으로 등록 |
-| `scripts/review_evaluation_candidate.py` | candidate 사람 검토 결정을 기록하고 golden 승격과 분리 |
-| `scripts/evaluate_quality.py` | 저장소 전용 100점 rubric과 hard gate를 로컬/CI에서 동일하게 평가 |
-| `scripts/check_development_lessons.py` | commit/push 전 짧은 개발 교훈 문서와 명시적 검토 상태를 검사 |
-| `scripts/enable_quality_hook.ps1` | 추적된 pre-commit hook을 현재 clone에 활성화 |
-| `config/project_quality_rubric.json` | 100점 배점·hard gate·합성 실측 evidence의 machine-readable 기준 |
-| `.githooks/pre-commit`, `.github/workflows/project-quality.yml` | 커밋과 push/PR에서 품질 hard gate 실행 |
-| `data/evaluation/` | 검증 완료 golden 15건과 검토 전 corpus 기반 candidate 25건을 분리한 합성 JSONL fixture |
-| `docs/DEVELOPMENT_SETUP.md` | Frontend/Backend 역할별 개발 환경 설치·실행·검증 가이드 |
-| `docs/PLAYGROUND_TOOLS.md` | `/playground` 등록 tool별 입력·동작·테스트 계약 |
-| `docs/QC_REPORT_AUDIT_PLAN.md` | QC Report 감사 우선순위, 입출력 계약, 단계별 구현 계획과 현재 제한 |
-| `docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md` | 세포유전 LLM 보고서 프로세스 이관 가이드 |
-| `docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md` | 공통 ToolSpec을 중심으로 REST·Playground·MCP·LangChain을 연결하는 목표 아키텍처와 흐름도 |
-| `docs/MCP_IMPLEMENTATION_PLAN.md` | 검색 도구 2개부터 시작하는 MCP MVP의 작업 순서·테스트·롤백 계획 |
-| `docs/playground_agentic_plan.md` | Playground 제한형 agent loop와 debug 토글 구현 계획 |
-| `docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md` | MLflow 기반 문서 RAG 검색·답변·지연 평가 최종 개발 계획 |
-| `docs/PROJECT_QUALITY_RUBRIC.md` | 코드 변경마다 적용하는 100점 품질 기준, hard gate, 로컬/CI 실행 계약 |
-| `docs/PRODUCTION_ARCHITECTURE.md` | 실제 온프레미스 운영 토폴로지, MinIO 범위, 장애·전환 계획 |
-| `docs/DEVELOPMENT_LESSONS.md` | 작업 중 반복 가능한 문제와 다음 적용 원칙을 최신 12개 이내로 유지 |
-| `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
+파일을 하나씩 나열하는 대신, 변경할 때 함께 봐야 하는 책임 단위로 묶었다.
+
+| 그룹 | 대표 경로 | 책임 |
+|---|---|---|
+| **검색·인덱싱 코어** | `src/smb_finder/smb_client.py`, `index*.py`, `content_*.py`, `finder.py`, `rag_search.py` | SMB 읽기, 폴더·본문 인덱스 구축, 인메모리/FTS5/pgvector 검색과 지연 측정 |
+| **API·도구 surface** | `src/smb_finder/api.py`, `models.py`, `tooling/`, `src/smb_finder/mcp_server.py`, `playground/`, `web/` | Pydantic 계약, ToolCatalog/executor, REST·Playground·MCP 공개 계층과 정적 UI |
+| **업무 기능** | `src/smb_finder/reports/`, `qc_audit/` | 합성 보고서 보조, 첨부 추출, SOP 감사, LLM 서술과 재검증 |
+| **평가·합성 데이터** | `src/smb_finder/evaluation/`, `data/evaluation/`, `scripts/*eval*`, `scripts/review_evaluation_candidate.py` | golden/candidate fixture, retrieval·end-to-end scorer, MLflow 기록과 사람 검토 |
+| **실행·통합** | `scripts/start_*.ps1`, `integrations/langgraph/` | 로컬 스택·원격 embedding tunnel 실행, LangGraph Studio 디버깅 |
+| **문서·품질 관리** | `docs/`, `docs/DEVELOPMENT_LESSONS.md`, `config/project_quality_rubric.json`, `scripts/evaluate_quality.py`, `.githooks/`, `.github/workflows/` | 환경 설정·설계·운영 문서, 품질 rubric, 로컬/CI hard gate와 개발 교훈 |
+
+새 기능은 보통 **도메인 구현 → `tooling/` 계약 등록 → 필요한 API/Playground/MCP surface 연결 → 테스트·문서 갱신**
+순서로 따라가면 된다.
+
+## 문서 안내
+
+| 분류 | 문서 | 설명 |
+|---|---|---|
+| **시작·개발** | [Frontend/Backend 개발 환경 설정](docs/DEVELOPMENT_SETUP.md) | 역할별 설치, 합성 데이터용 `.env`, 실행·smoke test와 문제 해결 절차 |
+| **시작·개발** | [개발 교훈](docs/DEVELOPMENT_LESSONS.md) | 반복된 오류·권한·지연 문제에서 얻은 원칙과 다음 작업의 사전 점검 항목 |
+| **도구·기능** | [Playground tool 기능 계약](docs/PLAYGROUND_TOOLS.md) | 등록 tool의 입력·출력, 실행 경로, 권한, timeout과 테스트 계약 |
+| **도구·기능** | [Playground 챗봇 기능 테스트 설계](docs/playground_agentic_plan.md) | 제한형 agent loop, tool 선택, trace/debug와 지연 예산 설계 |
+| **도구·기능** | [QC Report 감사·LLM 초안 계획](docs/QC_REPORT_AUDIT_PLAN.md) | 합성 QC 첨부 감사, 사실 보존형 LLM 초안의 계약·구현 단계·현재 제한 |
+| **도구·기능** | [LLM 보고서 생성 적용 가이드](docs/LLM_REPORT_PROCESS_FOR_AUTOMATION_SMB.md) | 세포유전 보고서 생성 과정을 이 저장소의 tool 흐름으로 옮기는 방법 |
+| **아키텍처·통합** | [Tool·LangChain·MCP 아키텍처](docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md) | Python ToolCatalog를 단일 원본으로 REST·Playground·MCP에 연결하는 목표 구조 |
+| **아키텍처·통합** | [MCP 구현 계획](docs/MCP_IMPLEMENTATION_PLAN.md) | 읽기 전용 검색 도구부터 시작하는 MCP 작업 순서, 검증과 롤백 기준 |
+| **아키텍처·통합** | [운영 아키텍처](docs/PRODUCTION_ARCHITECTURE.md) | 온프레미스 운영 토폴로지, SMB·PostgreSQL·MinIO 범위와 장애 전환 계획 |
+| **평가·품질** | [MLflow 문서 챗봇 평가 계획](docs/MLFLOW_DOCUMENT_CHATBOT_EVALUATION_PLAN.md) | golden/candidate 데이터셋, 검색·답변·지연 평가와 MLflow 기록 방법 |
+| **평가·품질** | [프로젝트 품질 rubric](docs/PROJECT_QUALITY_RUBRIC.md) | 100점 배점, hard gate, 합성 evidence와 로컬·CI 검증 기준 |
 
 ## 코드 우선 tool·MCP 연결
 
