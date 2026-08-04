@@ -20,9 +20,9 @@ TEMPLATE_SECTION = "## 새 항목 템플릿"
 LESSON_HEADER = re.compile(r"^### (?P<date>\d{4}-\d{2}-\d{2}) — (?P<title>.+)$", re.MULTILINE)
 REQUIRED_FIELDS = ("- 상황:", "- 교훈:", "- 다음 적용:")
 MEANINGFUL_PREFIXES = (
-    "src/",
+    "backend/src/",
+    "backend/tests/",
     "scripts/",
-    "tests/",
     "config/",
     "integrations/",
     ".github/",

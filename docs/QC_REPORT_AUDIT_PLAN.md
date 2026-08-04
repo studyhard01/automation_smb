@@ -78,7 +78,7 @@ flowchart LR
 
 ## 합성 기준 데이터
 
-`src/smb_finder/qc_audit/synthetic_sop_rules.json`은 기능 테스트 전용 세 항목을 제공한다.
+`backend/src/smb_finder/qc_audit/synthetic_sop_rules.json`은 기능 테스트 전용 세 항목을 제공한다.
 
 - `SYN-QC-TEMP`: Aurora chamber temperature, 18.0–24.0 °C
 - `SYN-QC-YIELD`: Nova recovery rate, 80.0–120.0 %

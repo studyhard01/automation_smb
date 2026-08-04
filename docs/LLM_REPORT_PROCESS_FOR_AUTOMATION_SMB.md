@@ -6,7 +6,7 @@
 
 **작성 목적**: 현재 CytogeneticsProject의 LLM 보고서 생성 흐름을 `automation_smb` 프로젝트의 `/playground` tool 구조로 옮기기 위한 전달 문서입니다.
 **전달 대상**: `C:\Users\AI_team\Desktop\project\automation_smb`, branch `dev_codex`
-**권장 신규 위치**: `src/smb_finder/reports/`
+**권장 신규 위치**: `backend/src/smb_finder/reports/`
 
 ---
 
@@ -264,7 +264,7 @@ automation_smb 권장:
 `automation_smb`에 아래 구조를 추가하는 것을 권장합니다.
 
 ```text
-src/smb_finder/reports/
+backend/src/smb_finder/reports/
   __init__.py
   models.py
   registry.py
@@ -486,7 +486,7 @@ automation_smb `/playground`에서는 최소 다음 표시가 필요합니다.
    - token usage는 provider/model/call id/input token/output token 정도로 제한합니다.
 
 2. 보고서 tool 공통 모델/계약 추가
-   - `src/smb_finder/reports/models.py`
+   - `backend/src/smb_finder/reports/models.py`
    - `ReportRequest`, `ReportResult`, `EvidenceSource`, provider policy
 
 3. 세포유전 보고서 tool 1차 구현

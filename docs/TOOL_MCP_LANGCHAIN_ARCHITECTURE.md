@@ -26,7 +26,7 @@ MCP, LangChain/LangGraph 어댑터를 연결한다.
 
 현재 저장소에는 이미 두 종류의 도구 정의가 존재한다.
 
-- `src/smb_finder/playground/tools.py`: 자체 Playground용 `ToolDefinition`·`ToolHandler`
+- `backend/src/smb_finder/playground/tools.py`: 자체 Playground용 `ToolDefinition`·`ToolHandler`
 - `integrations/langgraph/smb_agent/tools.py`: `@tool`로 만든 LangChain 도구가 FastAPI를 HTTP로 호출
 
 따라서 LangChain Tool로 전면 재작성하면 관리가 단순해지기보다, MCP·REST·Playground에 필요한 권한과 결과 변환을
@@ -307,12 +307,12 @@ LangChain middleware와 MCP handler는 정책을 각자 다시 구현하지 않�
 
 ## 7. 권장 코드 구조
 
-현재 공통 계약은 `src/smb_finder/tooling/`, MCP 진입점은 `src/smb_finder/mcp_server.py`, 회귀 검증은
-`tests/test_mcp_server.py`에 구현되어 있다. 아래 트리의 `adapters/`와 LangGraph MCP 주입은 후속 목표이며,
+현재 공통 계약은 `backend/src/smb_finder/tooling/`, MCP 진입점은 `backend/src/smb_finder/mcp_server.py`, 회귀 검증은
+`backend/tests/test_mcp_server.py`에 구현되어 있다. 아래 트리의 `adapters/`와 LangGraph MCP 주입은 후속 목표이며,
 기존 파일을 한꺼번에 이동하지 않는다.
 
 ```text
-src/smb_finder/
+backend/src/smb_finder/
 ├── api.py                         # REST·Playground 라우트
 ├── finder.py                      # 기존 폴더 검색 업무 로직
 ├── content_search.py              # 기존 문서 검색 업무 로직
@@ -411,11 +411,11 @@ middleware로 다시 구현해야 하므로 공통 ToolSpec보다 관리 이점�
 
 ### 현재 저장소
 
-- `src/smb_finder/playground/tools.py` — 현재 자체 Tool Registry
-- `src/smb_finder/playground/agent.py` — 선택 도구 allowlist, 외부 provider, 관리자 도구 차단
+- `backend/src/smb_finder/playground/tools.py` — 현재 자체 Tool Registry
+- `backend/src/smb_finder/playground/agent.py` — 선택 도구 allowlist, 외부 provider, 관리자 도구 차단
 - `integrations/langgraph/smb_agent/tools.py` — 현재 LangChain `@tool` HTTP 래퍼
 - `integrations/langgraph/smb_agent/graph.py` — 현재 LangGraph ReAct Agent
-- `src/smb_finder/api.py` — 현재 REST 및 관리자 API
+- `backend/src/smb_finder/api.py` — 현재 REST 및 관리자 API
 
 ### 공식 문서
 

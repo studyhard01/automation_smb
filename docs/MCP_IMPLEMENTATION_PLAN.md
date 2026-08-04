@@ -286,19 +286,19 @@ MCP 서버는 연결한 Host가 도구 결과를 외부 모델이나 자체 trac
 신규 파일 후보:
 
 ```text
-src/smb_finder/tooling/__init__.py
-src/smb_finder/tooling/contracts.py
-src/smb_finder/tooling/catalog.py
-src/smb_finder/tooling/executor.py
-tests/test_tooling.py
+backend/src/smb_finder/tooling/__init__.py
+backend/src/smb_finder/tooling/contracts.py
+backend/src/smb_finder/tooling/catalog.py
+backend/src/smb_finder/tooling/executor.py
+backend/tests/test_tooling.py
 ```
 
 수정 파일 후보:
 
 ```text
-src/smb_finder/playground/tools.py
-src/smb_finder/playground/agent.py
-tests/test_playground.py
+backend/src/smb_finder/playground/tools.py
+backend/src/smb_finder/playground/agent.py
+backend/tests/test_playground.py
 ```
 
 완료 gate:
@@ -315,17 +315,17 @@ tests/test_playground.py
 신규 파일 후보:
 
 ```text
-src/smb_finder/mcp_server.py
-src/smb_finder/tooling/adapters/__init__.py
-src/smb_finder/tooling/adapters/mcp.py
-tests/test_mcp_server.py
+backend/src/smb_finder/mcp_server.py
+backend/src/smb_finder/tooling/adapters/__init__.py
+backend/src/smb_finder/tooling/adapters/mcp.py
+backend/tests/test_mcp_server.py
 ```
 
 수정 파일 후보:
 
 ```text
-src/smb_finder/api.py
-src/smb_finder/config.py
+backend/src/smb_finder/api.py
+backend/src/smb_finder/config.py
 .env.example
 pyproject.toml
 uv.lock
@@ -443,7 +443,7 @@ M2와 M3가 안정화된 뒤 아래 순서로 추가한다.
 uv sync --python 3.11 --native-tls --extra dev
 uv run --no-sync ruff check .
 uv run --no-sync pytest -m "not integration"
-uv run --no-sync pytest tests/test_tooling.py tests/test_mcp_server.py tests/test_playground.py tests/test_api_contracts.py
+uv run --no-sync pytest backend/tests/test_tooling.py backend/tests/test_mcp_server.py backend/tests/test_playground.py backend/tests/test_api_contracts.py
 ```
 
 MCP Inspector는 선택 검증이다. 사내 SSL 프록시에서 `npx`가 실패하면 필수 검증으로 취급하지 않고 Python SDK

@@ -80,7 +80,7 @@ Claude Code 전용 진입점과 참고 구현 링크를 보완하며, 내용이 
 
 ## 도구·관례 (없으면 이걸 기본값으로)
 
-- **Python: `uv` + Python 3.11**, `src/` 레이아웃, 린트 `ruff`(line-length 120), 테스트 `pytest`. 단위/통합 테스트는 `-m "not integration"`으로 분리(실서버 필요한 건 `integration` 마커).
+- **Python: `uv` + Python 3.11**, `backend/src/` 레이아웃과 `backend/tests/`, 린트 `ruff`(line-length 120), 테스트 `pytest`. 루트 `pyproject.toml`·`uv.lock`은 저장소 전체 실행 설정이다. 단위/통합 테스트는 `-m "not integration"`으로 분리(실서버 필요한 건 `integration` 마커).
 - SMB 라이브러리는 참고 구현과 동일하게 **`smbclient`(smbprotocol)**.
 - 입출력 데이터 구조는 **Pydantic 모델**로, 함수엔 type hint + docstring.
 - **문서·주석·docstring은 한국어**, **파일명은 영문**(특히 마크다운).

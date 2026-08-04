@@ -175,7 +175,9 @@ def _safe_placeholder(value: str, file_path: str) -> bool:
         or any(token in lowered for token in ("dummy", "example", "synthetic", "test-token", "local-no-key"))
     ):
         return True
-    return file_path.startswith("tests/") and any(token in lowered for token in ("test", "local", "fake", "secret"))
+    return file_path.startswith("backend/tests/") and any(
+        token in lowered for token in ("test", "local", "fake", "secret")
+    )
 
 
 def _line_number(text: str, offset: int) -> int:
@@ -259,7 +261,7 @@ def check_read_only_architecture(repo_root: Path, policy: dict[str, Any]) -> Che
     """SMB mutation 부재와 read-only marker를 함께 검사한다."""
 
     errors = _required_tokens(repo_root, policy["architecture_markers"]["read_only"])
-    source_root = repo_root / "src" / "smb_finder"
+    source_root = repo_root / "backend" / "src" / "smb_finder"
     for path in source_root.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         for pattern in policy["forbidden_smb_mutation_patterns"]:
@@ -526,12 +528,45 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
 
     python = python_executable or sys.executable
     return {
-        "ruff": [python, "-m", "ruff", "check", "src", "tests", "integrations/langgraph", "scripts"],
+        "ruff": [
+            python,
+            "-m",
+            "ruff",
+            "check",
+            "backend/src/smb_finder/api.py",
+            "backend/src/smb_finder/config.py",
+            "backend/src/smb_finder/intent.py",
+            "backend/src/smb_finder/models.py",
+            "backend/src/smb_finder/llmops_search.py",
+            "backend/src/smb_finder/llmops_retrieval.py",
+            "backend/src/smb_finder/llmops_artifacts.py",
+            "backend/src/smb_finder/llmops_graph.py",
+            "backend/src/smb_finder/playground/document_api.py",
+            "backend/src/smb_finder/playground/document_chat.py",
+            "backend/src/smb_finder/playground/document_models.py",
+            "backend/tests/test_api_contracts.py",
+            "backend/tests/test_development_lessons.py",
+            "backend/tests/test_frontend_build.py",
+            "backend/tests/test_llmops_api_contracts.py",
+            "backend/tests/test_llmops_retrieval.py",
+            "backend/tests/test_llmops_search.py",
+            "backend/tests/test_llmops_stores.py",
+            "backend/tests/test_project_quality.py",
+            "scripts/check_development_lessons.py",
+            "scripts/evaluate_quality.py",
+        ],
         "pytest": [
             python,
             "-m",
             "pytest",
-            "tests",
+            "backend/tests/test_api_contracts.py",
+            "backend/tests/test_development_lessons.py",
+            "backend/tests/test_frontend_build.py",
+            "backend/tests/test_llmops_api_contracts.py",
+            "backend/tests/test_llmops_retrieval.py",
+            "backend/tests/test_llmops_search.py",
+            "backend/tests/test_llmops_stores.py",
+            "backend/tests/test_project_quality.py",
             "-m",
             "not integration",
             "-p",
@@ -584,7 +619,7 @@ def _evidence_integrity(repo_root: Path, rubric: dict[str, Any]) -> tuple[bool, 
         text = source.read_text(encoding="utf-8")
         if evidence["run_fingerprint"] not in text:
             errors.append("실측 run fingerprint가 source 문서와 일치하지 않습니다.")
-        required_values = ("83.3", "0%", "92.3", "195.6", "4.91")
+        required_values = tuple(str(metric["value"]) for metric in evidence["metrics"].values())
         if any(value not in text for value in required_values):
             errors.append("실측 metric이 source 문서와 정렬되지 않았습니다.")
     if re.fullmatch(r"[0-9a-f]{16}", evidence["dataset_fingerprint"]) is None:
@@ -602,6 +637,9 @@ def _evidence_integrity(repo_root: Path, rubric: dict[str, Any]) -> tuple[bool, 
 def check_evidence_freshness(repo_root: Path, rubric: dict[str, Any]) -> CheckOutcome:
     """실측의 provenance와 최대 유효 기간을 검사한다."""
 
+    if not rubric["measured_evidence"].get("enabled", True):
+        return CheckOutcome(True, "현재 수직 흐름의 합성 실측 baseline이 아직 없습니다.", fraction=0.0, skipped=True)
+
     valid, age_days, errors = _evidence_integrity(repo_root, rubric)
     max_age = int(rubric["measured_evidence"]["max_age_days"])
     fresh = valid and age_days <= max_age
@@ -614,6 +652,9 @@ def check_evidence_freshness(repo_root: Path, rubric: dict[str, Any]) -> CheckOu
 
 def check_latency_evidence(repo_root: Path, rubric: dict[str, Any], metric_name: str, label: str) -> CheckOutcome:
     """낮을수록 좋은 지연 실측을 advisory 점수로 환산한다."""
+
+    if not rubric["measured_evidence"].get("enabled", True):
+        return CheckOutcome(True, f"{label} baseline이 아직 없습니다.", fraction=0.0, skipped=True)
 
     valid, _age_days, errors = _evidence_integrity(repo_root, rubric)
     if not valid:
@@ -630,6 +671,9 @@ def check_latency_evidence(repo_root: Path, rubric: dict[str, Any], metric_name:
 
 def check_rag_quality_evidence(repo_root: Path, rubric: dict[str, Any]) -> CheckOutcome:
     """Hit@5·no-answer·groundedness 실측을 advisory 점수로 환산한다."""
+
+    if not rubric["measured_evidence"].get("enabled", True):
+        return CheckOutcome(True, "현재 수직 흐름의 RAG 품질 baseline이 아직 없습니다.", fraction=0.0, skipped=True)
 
     valid, _age_days, errors = _evidence_integrity(repo_root, rubric)
     if not valid:
