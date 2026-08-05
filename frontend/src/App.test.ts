@@ -6,7 +6,15 @@ import { playgroundApi } from "@/api/client";
 import ChatWorkspace from "@/components/ChatWorkspace.vue";
 import FeatureSidebar from "@/components/FeatureSidebar.vue";
 import FileSidebar from "@/components/FileSidebar.vue";
-import type { ChatResponse, DocumentSearchHit, DocumentSearchResponse, StoresStatusResponse } from "@/types";
+import SettingsDialog from "@/components/SettingsDialog.vue";
+import type {
+  ChatResponse,
+  DocumentSearchHit,
+  DocumentSearchResponse,
+  FileUploadResponse,
+  PlaygroundSettingsResponse,
+  StoresStatusResponse,
+} from "@/types";
 
 vi.mock("@/api/client", () => ({
   ApiError: class ApiError extends Error {
@@ -19,6 +27,9 @@ vi.mock("@/api/client", () => ({
     sendChat: vi.fn(),
     previewFile: vi.fn(),
     getFileGraph: vi.fn(),
+    getSettings: vi.fn(),
+    updateUploadDirectory: vi.fn(),
+    uploadFile: vi.fn(),
   },
 }));
 
@@ -49,6 +60,26 @@ const storesStatus: StoresStatusResponse = {
   postgresql: { configured: true, connected: true, degraded: false, message: "ok", latency_ms: 1, metadata: {} },
   minio: { configured: true, connected: true, degraded: false, message: "ok", latency_ms: 1, metadata: {} },
   neo4j: { configured: true, connected: true, degraded: false, message: "ok", latency_ms: 1, metadata: {} },
+};
+
+const settingsResponse: PlaygroundSettingsResponse = {
+  upload: {
+    enabled: true,
+    configured: true,
+    relative_directory: "playground/uploads",
+    destination_label: "공유폴더 업로드 영역",
+    max_size_bytes: 1024,
+    allowed_extensions: [".md"],
+  },
+  local_llm_configured: true,
+};
+
+const uploadResponse: FileUploadResponse = {
+  file_name: "synthetic-note.md",
+  size_bytes: 9,
+  uploaded_at: "2026-08-05T00:00:00Z",
+  destination_label: "공유폴더 업로드 영역",
+  indexed: false,
 };
 
 const chatResponse: ChatResponse = {
@@ -87,6 +118,9 @@ describe("App DB document flow", () => {
     vi.mocked(playgroundApi.searchFiles).mockResolvedValue(searchResponse);
     vi.mocked(playgroundApi.sendChat).mockResolvedValue(chatResponse);
     vi.mocked(playgroundApi.getFileGraph).mockResolvedValue(graphResponse);
+    vi.mocked(playgroundApi.getSettings).mockResolvedValue(settingsResponse);
+    vi.mocked(playgroundApi.updateUploadDirectory).mockResolvedValue(settingsResponse);
+    vi.mocked(playgroundApi.uploadFile).mockResolvedValue(uploadResponse);
   });
 
   it("자연어 검색 결과를 선택하면 document_qa 요청에 UUID scope를 보낸다", async () => {
@@ -127,5 +161,47 @@ describe("App DB document flow", () => {
       revision_id: selectedFile.revision_id,
     }));
     expect(wrapper.text()).toContain("Revision 2");
+  });
+
+  it("파일 선택과 해제는 검색 피드백을 회색 상태 문구로 덮어쓰지 않는다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("검색 준비");
+    expect(wrapper.text()).not.toContain("일부 기능 제한");
+    await wrapper.findComponent(FileSidebar).vm.$emit("search", "합성 프로젝트 계획 찾아줘");
+    await flushPromises();
+    const sidebar = wrapper.findComponent(FileSidebar);
+    const searchFeedback = sidebar.props("searchFeedback");
+
+    await sidebar.vm.$emit("toggleFile", selectedFile);
+    await wrapper.vm.$nextTick();
+    expect(sidebar.props("searchFeedback")).toBe(searchFeedback);
+    await sidebar.vm.$emit("toggleFile", selectedFile);
+    await wrapper.vm.$nextTick();
+    expect(sidebar.props("searchFeedback")).toBe(searchFeedback);
+  });
+
+  it("검증된 파일을 업로드하고 indexed=false 완료 상태를 안내한다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const file = new File(["synthetic"], "synthetic-note.md", { type: "text/markdown" });
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("uploadFile", file);
+    await flushPromises();
+
+    expect(playgroundApi.uploadFile).toHaveBeenCalledWith(file);
+    expect(wrapper.findComponent(FileSidebar).props("uploadStatus")).toBe("success");
+    expect(wrapper.findComponent(FileSidebar).props("uploadFeedback")).toContain("검색 인덱스에는 반영되지 않았습니다");
+  });
+
+  it("설정 대화상자에서 상대 경로만 PATCH하고 전체 설정 응답을 반영한다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.findComponent(SettingsDialog).vm.$emit("saveUploadDirectory", "playground/reviewed");
+    await flushPromises();
+
+    expect(playgroundApi.updateUploadDirectory).toHaveBeenCalledWith("playground/reviewed");
+    expect(wrapper.findComponent(SettingsDialog).props("feedbackStatus")).toBe("success");
   });
 });

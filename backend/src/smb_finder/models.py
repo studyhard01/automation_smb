@@ -38,10 +38,13 @@ class DocumentSearchHit(BaseModel):
     modified_at: datetime | None = None
     score: float = 0.0
     match_source: Literal["metadata", "content"] = "metadata"
+    matched_stores: list[Literal["postgresql", "minio", "neo4j"]] = Field(
+        default_factory=lambda: ["postgresql"]
+    )
 
 
 class DocumentSearchResponse(BaseModel):
-    """DB 검색 결과와 측정 지연."""
+    """멀티스토어 검색 결과와 측정 지연."""
 
     query: str
     normalized_query: str
@@ -50,6 +53,11 @@ class DocumentSearchResponse(BaseModel):
     elapsed_ms: float
     over_budget: bool = False
     source: Literal["llmops"] = "llmops"
+    search_mode: Literal["postgresql", "multistore"] = "postgresql"
+    queried_stores: list[Literal["postgresql", "minio", "neo4j"]] = Field(default_factory=list)
+    llm_expanded: bool = False
+    timings_ms: dict[str, float] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RetrievalScope(BaseModel):

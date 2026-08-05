@@ -3,19 +3,21 @@
 - 작성 기준일: 2026-08-04
 - 검토 기준: `mageAI_project`의 LLMOps Data Pipeline DB·챗봇 연동·버전 비교·파일 명명 문서
 - 적용 대상: `automation_smb`의 RAG 검색, Playground API/tool, 문서·버전 조회 경계
-- 상태: 검색·선택 범위 Citation 대화·MinIO Preview·Neo4j 버전 관계 수직 슬라이스 구현
+- 상태: LLM 멀티스토어 검색·선택 범위 Citation 대화·MinIO Preview·Neo4j 버전 관계 수직 슬라이스 구현
 
 ## 1. 결정 요약
 
 `automation_smb`는 LLMOps Data Pipeline이 만든 데이터셋을 새로 적재하거나
 변경하지 않고, 별도의 read-only adapter를 통해 조회한다. PostgreSQL
-`llmops` Schema를 검색과 문서 상태의 기준 시스템으로 삼고, MinIO는 권한을
-확인한 Artifact 열람에만, Neo4j는 버전·구조 화면에만 선택적으로 사용한다.
+`llmops` Schema를 문서 상태와 최종 활성 UUID의 기준 시스템으로 삼는다. 파일 찾기에서는 온프레미스 Ollama가 검색어를
+확장하고 PostgreSQL 메타데이터/Chunk, MinIO Artifact key, Neo4j 문서/Revision label을 함께 조회한다.
 
 Playground의 현재 파일 선택 hot path는 다음처럼 유지한다.
 
 ```text
-좌측 파일 찾기 → read-only PostgreSQL 파일 검색 → 결과 선택
+좌측 파일 찾기 → local LLM 질의 확장
+               → PostgreSQL·MinIO·Neo4j read-only 후보 병렬 조회
+               → PostgreSQL active UUID hydrate·중복 통합 → 결과 선택
                → selected_files(doc_id, revision_id)
                → 선택 UUID 범위 Hybrid/RRF Chunk 검색 → Citation 대화
 명시적 보기    → read-only MinIO Preview/Canonical 중계
@@ -23,7 +25,7 @@ Playground의 현재 파일 선택 hot path는 다음처럼 유지한다.
 ```
 
 - Langflow 연동, Langflow source 동기화, Langflow tool import는 범위에서 제외한다.
-- 요청마다 MinIO·Neo4j까지 모두 조회하지 않는다.
+- 파일 검색 요청은 세 저장소를 bounded parallel query로 조회하며 저장소별 timeout과 부분 실패 경고를 반환한다.
 - 기존 `search_rag_chunks`는 즉시 삭제하지 않고 호환 진입점으로 유지한 뒤,
   내부 구현을 데이터셋 adapter로 교체한다.
 - 제공된 설정을 메모리에만 읽어 PostgreSQL·MinIO·Neo4j의 read-only 연결과 계약을 검증했다.
@@ -66,7 +68,7 @@ Playground의 현재 파일 선택 hot path는 다음처럼 유지한다.
 | 응답 Score | `similarity` 한 개 | `vector`, `lexical`, `trigram`, `rrf`와 공개 가능한 최종 Score |
 | 문서 Version | 검색 응답에 없음 | 업무 `source_version`과 기술 `revision_number`를 분리해 반환 |
 | Artifact | 없음 | ACL 확인 후 Backend가 MinIO에서 read-only 조회, Object URI는 미노출 |
-| Graph | 없음 | 채팅 hot path 밖의 선택 기능. 장애 시 PostgreSQL 검색은 정상 유지 |
+| Graph | 없음 | 파일 후보 label 검색과 선택 버전 기능. 장애 시 다른 저장소 부분 결과 유지 |
 | Playground | 좌측 파일 검색 결과를 선택해 `selected_files`로 채팅에 전달 | 선택 범위 Hybrid/RRF, 구조화 Citation/검색 요약, Artifact/Graph link를 반환 |
 | 오류 | 넓은 `rag_db_unavailable` | 잘못된 요청·권한·timeout·dependency·계약 불일치를 구분한 안전한 오류 |
 
@@ -268,26 +270,28 @@ Principal 전체를 포함하지 않는다.
 
 ## 8. 지연과 timeout 예산
 
-목표는 warm 상태의 텍스트 명령 p50 300ms 미만, p95 1초 미만이다. 현재 기본
-임베딩 3초 + DB 1.5초 설정은 장애 상한으로는 동작하지만 사용자 체감 목표를
-보장하지 못하므로 데이터셋 adapter에는 더 작은 전체 deadline을 둔다.
+멀티스토어+LLM 파일 검색 목표는 warm 상태 p50 1.5초 미만, p95 3초 미만이며 hard budget은 8초다. 단순
+PostgreSQL fallback 검색은 기존 p95 1초 목표를 유지한다. 모든 단계는 bounded timeout과 상위 N건 제한을 둔다.
 
 | 단계 | 권장 hard timeout | 관측 필드 |
 |---|---:|---|
 | Pool 획득/DB 연결 | 200ms | `pool_wait_ms`, `db_connect_ms` |
 | 질의 Embedding | 400ms | `embedding_ms` |
-| PostgreSQL Hybrid Query | 300ms | `db_ms` |
+| 검색어 확장 local LLM | 6,000ms hard | `llm_query_expansion` |
+| PostgreSQL 파일 Query | 1,500ms | `postgresql` |
+| MinIO Registry/Object 확인 | 1,000ms | `minio` |
+| Neo4j label Query | 1,000ms | `neo4j` |
 | 결과/Citation 조립 | 100ms | `assembly_ms` |
-| 검색 전체 | 900ms | `elapsed_ms`, `over_budget` |
+| 파일 검색 전체 | 8,000ms hard | `elapsed_ms`, `over_budget` |
 | MinIO Preview/Diff | 500ms | `artifact_ms` |
 | Neo4j Graph | 400ms | `graph_ms`, `degraded_dependencies` |
 
 - `candidate_k`와 `top_k`에 상한을 두고 결과 본문 글자 수도 제한한다.
-- 단순 검색/열람은 LLM을 호출하지 않는다.
+- 파일 검색은 문서 본문 없이 사용자 질의만 온프레미스 LLM으로 확장하고, 실패하면 기본 정규화 검색어로 fallback한다.
 - 채팅은 검색 fast path를 먼저 실행하고, 근거가 없으면 생성 LLM을 호출하지
   않는다. 생성이 예산을 넘길 가능성이 있으면 extractive 답변 또는 후속
   streaming 계약을 별도 결정한다.
-- Graph와 Artifact는 사용자가 해당 화면을 열 때만 호출한다.
+- 파일 검색에서는 Graph label과 Artifact Object key/존재 여부만 조회하며, 본문·원본은 사용자가 화면을 열 때만 읽는다.
 - timeout 뒤 실행이 계속 누적되지 않도록 pool과 동시성 상한을 함께 검증한다.
 
 ## 9. ACL과 Citation 규칙
@@ -337,6 +341,13 @@ Principal 전체를 포함하지 않는다.
 - DB가 구성되지 않았거나 응답하지 않으면 `503`을 반환하며 로컬 fixture를 성공 결과로 사용하지 않는다.
 - 파일 검색은 파일명·제목·본문 신호를 PostgreSQL에서 조회하고 안정적인 UUID를 반환한다.
 
+### Phase 1.5 — LLM 멀티스토어 후보 통합 (완료)
+
+- 온프레미스 Ollama가 원문 질의만 받아 파일명·부서명·문서 종류 동의어를 구조화 JSON으로 확장한다.
+- PostgreSQL·MinIO·Neo4지를 bounded thread pool로 병렬 조회하고 `queried_stores`, `matched_stores`, 단계별 지연을 반환한다.
+- MinIO·Neo4j 후보는 PostgreSQL active `(doc_id, revision_id)`로 다시 hydrate하며 내부 Object URI는 응답하지 않는다.
+- 선택 저장소 장애는 경고와 부분 결과로 반환하고 PostgreSQL 기준 원장 장애는 명시적 503으로 처리한다.
+
 ### Phase 2 — Playground 선택 문서 근거 대화 (완료)
 
 - 좌측 선택 결과를 중앙 `selected_files` 컨텍스트로 전달하는 연결은 완료했다.
@@ -376,7 +387,7 @@ Principal 전체를 포함하지 않는다.
 - timeout, pool busy, embedding 차원, Schema 불일치의 error code
 - 비인가와 미존재 문서가 동일 404
 - 비교 pair의 같은 `doc_id` 소속과 순서 검증
-- MinIO/Neo4j 장애 시 허용된 degraded/fallback 동작
+- MinIO/Neo4j/검색 LLM 장애 시 허용된 degraded/fallback 동작
 
 ### API regression
 
@@ -405,7 +416,7 @@ Principal 전체를 포함하지 않는다.
 | 경로 노출 | 상위 예시 응답에는 `source_uri`가 있으나 내부 SMB 경로 노출 위험 | Browser/LLM에는 opaque reference만 제공하는 축소 계약 승인 |
 | API 호환 | 기존 int ID/vector-only 모델과 새 UUID/Hybrid 모델은 직접 호환 불가 | handler alias는 유지하되 payload는 versioned model로 전환 승인 |
 | Version 비교 | 임의 pair 즉시 계산은 CPU·응답 크기를 늘림 | Phase 2는 저장된 비교만, on-demand 계산은 비동기 설계 후 승인 |
-| MinIO/Neo4j | 검색 hot path에 넣으면 지연과 장애면적이 증가 | 현재처럼 명시적 보기/버전 요청으로 분리 유지 |
+| MinIO/Neo4j | 검색 hot path에서 지연과 장애면적이 증가 | 30건 상한·병렬 timeout·부분 결과를 적용하고 원본/본문 읽기는 명시적 요청으로 분리 |
 | 외부 LLM | 검색 Chunk가 외부로 전송될 수 있음 | 현재는 로컬 provider만 사용. 외부 전송은 데이터 범위를 밝힌 별도 승인 필요 |
 | Schema drift | 상위 문서와 실제 Migration 상태가 다를 수 있음 | 연결 승인 후 read-only startup contract check부터 수행 |
 

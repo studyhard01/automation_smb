@@ -16,7 +16,7 @@
       "criteria": [
         {"id": "tracked_artifact_hygiene", "title": "민감·로컬 산출물 비커밋", "points": 7, "hard_gate": true, "check": "tracked_artifacts"},
         {"id": "sensitive_value_hygiene", "title": "자격증명·내부 주소 비노출", "points": 10, "hard_gate": true, "check": "sensitive_values"},
-        {"id": "read_only_boundary", "title": "저장소 읽기 전용", "points": 8, "hard_gate": true, "check": "read_only_architecture"}
+        {"id": "storage_boundary", "title": "DB 읽기 전용·제한 SMB 쓰기", "points": 8, "hard_gate": true, "check": "read_only_architecture"}
       ]
     },
     {
@@ -79,7 +79,7 @@
     "allowed_tracked_paths": [".env.example"],
     "text_scan_extensions": [".py", ".ts", ".vue", ".js", ".html", ".css", ".md", ".toml", ".yaml", ".yml", ".json", ".ps1", ".sh", ".txt", ".example"],
     "safe_private_ip_literals": ["10.20.30.40", "10.0.0.5"],
-    "safe_unc_hosts": ["host", "internal-host"],
+    "safe_unc_hosts": ["host", "internal-host", "synthetic-server"],
     "fixture_contracts": [],
     "runtime": {
       "project_name": "automation-smb",
@@ -88,7 +88,7 @@
       "ruff_line_length": 120,
       "ruff_src": ["backend/src", "backend/tests"],
       "pytest_marker": "integration",
-      "required_dependencies": ["pydantic", "httpx", "psycopg", "boto3", "neo4j"],
+      "required_dependencies": ["pydantic", "httpx", "psycopg", "boto3", "neo4j", "python-multipart", "smbprotocol"],
       "lock_file": "uv.lock"
     },
     "architecture_markers": {
@@ -98,6 +98,7 @@
       },
       "timeout_elapsed": {
         "backend/src/smb_finder/llmops_search.py": ["statement_timeout", "time.perf_counter", "elapsed_ms"],
+        "backend/src/smb_finder/llmops_multistore_search.py": ["llmops_file_search_budget_ms", "time.perf_counter", "elapsed_ms"],
         "backend/src/smb_finder/llmops_retrieval.py": ["llmops_embedding_timeout_ms", "statement_timeout", "elapsed_ms"],
         "backend/src/smb_finder/playground/document_chat.py": ["llm_timeout_ms", "playground_agent_budget_ms", "elapsed_ms"]
       },
@@ -105,16 +106,20 @@
         "backend/src/smb_finder/llmops_search.py": ["default_transaction_read_only=on", "application_name"],
         "backend/src/smb_finder/llmops_retrieval.py": ["default_transaction_read_only=on", "statement_timeout"],
         "backend/src/smb_finder/llmops_artifacts.py": ["default_transaction_read_only=on", "head_object", "get_object"],
-        "backend/src/smb_finder/llmops_graph.py": ["MATCH (d:Document", "default_access_mode=READ_ACCESS"]
+        "backend/src/smb_finder/llmops_graph.py": ["MATCH (d:Document", "default_access_mode=READ_ACCESS"],
+        "backend/src/smb_finder/playground/upload_service.py": ["smb_upload_enabled", "normalize_relative_directory", "mode=\"xb\"", "file_already_exists", "smb_upload_max_size_bytes", "indexed=False"]
       },
       "api_tool_contracts": {
         "backend/src/smb_finder/playground/document_models.py": ["class ChatRequest(BaseModel)", "selected_files", "class ChatResponse(BaseModel)"],
         "backend/src/smb_finder/playground/document_api.py": ["response_model=DocumentSearchResponse", "validate_active_selections", "response_model=ChatResponse"],
-        "backend/src/smb_finder/playground/document_chat.py": ["selections =", "rag_insufficient_evidence", "citations"]
+        "backend/src/smb_finder/playground/document_chat.py": ["selections =", "rag_insufficient_evidence", "citations"],
+        "backend/src/smb_finder/playground/upload_api.py": ["response_model=PlaygroundSettingsResponse", "response_model=FileUploadResponse", "run_in_threadpool"],
+        "backend/src/smb_finder/playground/upload_models.py": ["class UploadSettingsPatch", "class FileUploadResponse", "indexed: bool = False"]
       },
       "observability": {
         "backend/src/smb_finder/api.py": ["ApiErrorResponse", "internal_error", "type(exc).__name__"],
         "backend/src/smb_finder/llmops_search.py": ["time.perf_counter", "over_budget", "_logger.warning"],
+        "backend/src/smb_finder/llmops_multistore_search.py": ["llm_query_expansion", "queried_stores", "over_budget"],
         "backend/src/smb_finder/playground/document_api.py": ["Document chat completed", "elapsed_ms", "error_code"]
       }
     },
@@ -136,7 +141,7 @@
         "forbidden_tokens": ["Langflow를 사용"]
       },
       "docs/IMPLEMENTATION_STATUS.md": {
-        "required_tokens": ["기준일: 2026-08-04", "자연어 파일 검색", "선택 문서 검증", "13개 통과", "10개 통과", "제거 대상 판정"],
+        "required_tokens": ["기준일: 2026-08-05", "자연어 파일 검색", "선택 문서 검증", "52개 테스트 통과", "23개 통과", "제거 대상 판정", "Docker 패키징", "파일 첨부"],
         "forbidden_tokens": []
       },
       "docs/DATASET_DB_INTEGRATION_PLAN.md": {

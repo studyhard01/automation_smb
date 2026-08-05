@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from typing import Any
 
 from neo4j import GraphDatabase, Query, READ_ACCESS
@@ -41,11 +42,27 @@ class LlmopsGraphReader:
             previous.revision_id AS previous_revision_id
         ORDER BY r.revision_number
         """
+    _SEARCH_QUERY_TEXT = """
+        MATCH (d:Document {space_id: $space_id})
+        OPTIONAL MATCH (d)-[:LATEST]->(latest:Revision)
+        WITH d, latest,
+             toLower(
+                 coalesce(d.title, '') + ' ' +
+                 coalesce(d.document_key, '') + ' ' +
+                 coalesce(d.logical_name, '') + ' ' +
+                 coalesce(latest.source_version, '') + ' ' +
+                 coalesce(toString(latest.revision_number), '')
+             ) AS searchable
+        WHERE any(term IN $terms WHERE searchable CONTAINS term)
+        RETURN d.doc_id AS doc_id, latest.revision_id AS revision_id
+        LIMIT $limit
+        """
 
     def __init__(self, settings: Settings, *, driver: Any | None = None) -> None:
         self._settings = settings
         timeout_s = max(0.1, settings.llmops_neo4j_timeout_ms / 1000)
         self._query = Query(self._QUERY_TEXT, timeout=timeout_s)
+        self._search_query = Query(self._SEARCH_QUERY_TEXT, timeout=timeout_s)
         self._status_query = Query("RETURN 1 AS ok", timeout=timeout_s)
         self._driver = driver or GraphDatabase.driver(
             settings.neo4j_uri.strip(),
@@ -124,6 +141,33 @@ class LlmopsGraphReader:
             elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
         )
 
+    def search_document_refs(self, terms: Iterable[str], *, limit: int) -> set[tuple[str, str]]:
+        """Document/Revision label에서 검색어와 일치하는 활성 pair를 찾는다."""
+
+        started = time.perf_counter()
+        normalized_terms = list(dict.fromkeys(term.casefold().strip() for term in terms if term.strip()))
+        if not normalized_terms:
+            return set()
+        warnings: list[str] = []
+        database = self._preferred_database(warnings)
+        try:
+            rows = self._search(database, normalized_terms, limit)
+        except Neo4jError as exc:
+            if database and self._is_database_not_found(exc):
+                try:
+                    rows = self._search(None, normalized_terms, limit)
+                except Exception as fallback_exc:
+                    raise self._unavailable(started) from fallback_exc
+            else:
+                raise self._unavailable(started) from exc
+        except Exception as exc:
+            raise self._unavailable(started) from exc
+        return {
+            (str(row["doc_id"]), str(row["revision_id"]))
+            for row in rows
+            if row.get("doc_id") and row.get("revision_id")
+        }
+
     def _read(self, database: str | None, doc_id: str) -> list[dict[str, Any]]:
         with self._driver.session(database=database, default_access_mode=READ_ACCESS) as session:
             # neo4j 6.x의 ManagedTransaction.run()은 timeout을 담은 Query 객체를
@@ -134,6 +178,18 @@ class LlmopsGraphReader:
                     self._query,
                     space_id=self._settings.llmops_graph_space,
                     doc_id=doc_id,
+                )
+            )
+        return [record.data() for record in records]
+
+    def _search(self, database: str | None, terms: list[str], limit: int) -> list[dict[str, Any]]:
+        with self._driver.session(database=database, default_access_mode=READ_ACCESS) as session:
+            records = list(
+                session.run(
+                    self._search_query,
+                    space_id=self._settings.llmops_graph_space,
+                    terms=terms,
+                    limit=limit,
                 )
             )
         return [record.data() for record in records]

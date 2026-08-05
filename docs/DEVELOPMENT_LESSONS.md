@@ -13,6 +13,16 @@
 
 ## 현재 교훈
 
+### 2026-08-05 — 읽기 서비스에 쓰기를 더할 때는 경계를 별도 계약으로 고정한다
+- 상황: DB 조회만 하던 LAN Playground에 공유폴더 파일 첨부와 사용자가 바꿀 수 있는 저장 경로가 추가됐다.
+- 교훈: 쓰기는 명시적 활성화·share 내부 상대 경로·크기/확장자 제한·비덮어쓰기로 좁히고, 비밀 설정과 공개 설정 및 저장 완료와 인덱싱 완료를 분리해야 한다.
+- 다음 적용: LAN 쓰기 기능은 인증·권한·감사 승인 전 최소 범위로 유지하고, traversal·동명이름·초과 크기·재시작 후 설정 유지 회귀 테스트를 먼저 둔다.
+
+### 2026-08-05 — 컨테이너와 LAN HTTP는 localhost의 실행 조건을 공유하지 않는다
+- 상황: 사내 SSL 검사와 container DNS 차이 외에도 localhost에서 되던 `crypto.randomUUID`가 LAN의 비보안 HTTP 브라우저에서는 제공되지 않아 DB 검색 성공 뒤 UI가 실패로 표시됐다.
+- 교훈: build trust·container endpoint·adapter readiness뿐 아니라 secure-context 전용 Browser API도 LAN 배포 계약에 포함하고, UI 비핵심 ID는 안전한 fallback을 제공해야 한다.
+- 다음 적용: secure default와 runtime 비밀 경계를 유지하고 non-root·LAN bind·멀티스토어 검색을 검증한 뒤, secure-context API를 제거한 브라우저 회귀 테스트로 실제 원격 HTTP 흐름까지 확인한다.
+
 ### 2026-08-04 — 멀티스택 저장소는 물리 경계와 설정 소유권을 함께 드러낸다
 - 상황: Vue와 FastAPI의 물리 경계가 불명확했고, 제품 목표에서 제외한 실험 코드도 같은 package에 남아 현재 실행 경로와 향후 후보를 구분하기 어려웠다.
 - 교훈: 멀티스택 저장소는 `frontend/`·`backend/` 경계를 대칭적으로 두고, 새 수직 슬라이스를 먼저 연결·검증한 뒤 레거시의 import·dependency·문서·파일을 순서대로 제거해야 한다.
@@ -39,9 +49,9 @@
 - 다음 적용: 선택형 UI는 결과 표시·선택/해제·카드별 보조 동작·중앙 범위·downstream 요청을 contract test와 화면 smoke로 검증한다.
 
 ### 2026-08-03 — 구축 데이터 schema는 복제하지 않고 소비 계약으로 경계 짓는다
-- 상황: 별도 파이프라인이 만든 문서·Revision·Chunk 데이터셋을 현재 단순 RAG 모델에 바로 맞추면 최신본·인용·버전 계보가 손실될 수 있었다.
-- 교훈: 외부 schema는 upstream 기준으로 존중하고 서비스 내부에는 읽기 전용 reader와 Pydantic 공개 계약을 두어 저장소 세부와 UI를 분리한다.
-- 다음 적용: 실제 연결 전에 ID·활성 Revision·Citation·ACL·timeout 계약을 합성 fixture로 고정하고 저장소별 adapter를 단계적으로 검증한다.
+- 상황: 문서·Revision·Chunk·Artifact·Graph가 여러 저장소에 분산돼 한 저장소만 검색하면 버전명이나 Object key 단서를 놓칠 수 있었다.
+- 교훈: 저장소별 read-only 후보를 병렬 수집하되 최종 ID·활성 Revision은 PostgreSQL 기준 원장에서 hydrate해 중복과 stale 대상을 차단한다.
+- 다음 적용: 멀티스토어 검색은 저장소별 timeout·부분 실패·매칭 출처·단계 지연을 계약에 포함하고 실제 연결 smoke에서 모두 조회됐는지 확인한다.
 
 ### 2026-07-24 — 문서 구조를 바꿔도 canonical 계약을 보존한다
 - 상황: README의 파일별 구조 표를 책임별 그룹으로 줄이면서 품질 rubric이 요구하는 핵심 경로 표식이 빠져 hard gate가 실패했다.
@@ -62,16 +72,6 @@
 - 상황: Candidate 파일은 `candidate` 상태만 허용했지만 진행률은 허용되지 않은 상태값을 세어 항상 0점이었다.
 - 교훈: 점수식을 추가할 때 입력 계약에서 실제로 그 상태에 도달하고 다음 단계로 이동할 수 있는지 함께 검증한다.
 - 다음 적용: 검토 결정과 baseline 승격을 분리하고 fixture·CLI·rubric 테스트로 같은 상태 전이를 고정한다.
-
-### 2026-07-20 — Windows 검증은 workspace별 cache와 temp로 격리한다
-- 상황: 사용자 공용 `uv` cache와 pytest temp의 소유권·잔여 상태 때문에 코드와 무관한 접근 거부가 재현됐다.
-- 교훈: 공용 경로 재사용 실패를 dependency 문제로 오인하지 말고 저장소의 `.tmp` 아래 격리 경로로 원인을 분리한다.
-- 다음 적용: 검증 명령에 필요하면 `UV_CACHE_DIR`와 `--basetemp`를 workspace 경로로 지정하고 산출물은 커밋하지 않는다.
-
-### 2026-07-20 — MLflow 저장소와 업무 원본의 경계를 분리한다
-- 상황: 개발용 MLflow metadata와 artifact가 로컬 SQLite와 `.cache`에 있어 재배포·다중 노드 운영 시 내구성이 없다.
-- 교훈: 운영 MLflow는 PostgreSQL metadata와 MinIO artifact를 분리하되 MinIO를 원본 SMB 복제소로 사용하지 않는다.
-- 다음 적용: 운영 pilot 전에 MLflow proxy 방식과 전용 bucket을 검증하고 허용 artifact 목록부터 승인한다.
 
 ## 새 항목 템플릿
 

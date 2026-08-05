@@ -62,7 +62,7 @@ def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> API
         "/api/playground/files/search",
         response_model=DocumentSearchResponse,
         operation_id="search_playground_files",
-        summary="자연어 파일 검색",
+        summary="멀티스토어 자연어 파일 검색",
     )
     async def search_files(request: DocumentSearchRequest) -> DocumentSearchResponse:
         runtime = runtime_getter()

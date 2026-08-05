@@ -6,12 +6,13 @@
 Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이다.
 
 1. 왼쪽 파일 찾기에 `진검파트 WBS 찾아줘` 같은 자연어를 입력한다.
-2. PostgreSQL `llmops` 데이터셋에서 활성 문서 후보가 반환된다.
+2. 온프레미스 Ollama가 검색어를 확장하고 PostgreSQL·MinIO·Neo4j가 병렬로 활성 문서 후보를 찾는다.
 3. 검색 후보의 `버전 확인`으로 선택 전에도 Neo4j 버전 관계를 바로 조회한다.
 4. 사용자가 후보를 선택하면 `(doc_id, revision_id)`가 중앙 대화 범위에 들어간다.
 5. 중앙 질문은 선택 Revision의 Chunk만 Hybrid/RRF로 검색하고 온프레미스 Ollama가 Citation과 함께 답한다.
 6. 오른쪽 기능은 선택 문서의 `문서 요약`, `보고서 초안`만 제공한다.
 7. 필요할 때 MinIO 미리보기를 조회한다.
+8. 사용자가 파일을 첨부하면 승인된 SMB share의 설정된 상대 경로에 비덮어쓰기 저장하고 `indexed=false`를 알린다.
 
 규칙 기반 가짜 결과, fixture fallback, 매 요청 SMB 전체 순회는 성공으로 간주하지 않는다.
 
@@ -21,7 +22,7 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 
 - Vue 3 파일 검색·선택·채팅 UI
 - FastAPI/Pydantic API
-- PostgreSQL 자연어 파일 후보 검색
+- 온프레미스 LLM 검색어 확장과 PostgreSQL·MinIO·Neo4j 통합 파일 후보 검색
 - 활성 Revision 재검증
 - 선택 문서 범위 Hybrid/RRF 검색
 - 온프레미스 Ollama 근거 답변
@@ -29,12 +30,14 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 - 검색 결과별 Neo4j 버전 관계 read-only 조회
 - 중앙 선택 문서 대화와 별도 실행 기능 `문서 요약`, `보고서 초안`
 - MinIO Preview/Canonical read-only 조회
+- 명시적으로 활성화한 SMB 파일 첨부와 비밀 없는 상대 경로 설정
 
 ### 현재 제외
 
 - Langflow, LangGraph Studio, MCP
 - 로컬 SQLite/SMB 직접 인덱싱과 `/find`, `/search-content`
-- 범용 Tool Lab, Skill CRUD, 파일 첨부
+- 범용 Tool Lab, Skill CRUD
+- 첨부 파일 자동 변환·DB 인덱싱·버전 관계 생성
 - QC 감사, 핵형·NGS 등 별도 업무 데모
 - 외부 OpenAI provider
 - DB schema/object/graph 생성·수정·삭제
@@ -54,7 +57,7 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 
 ### P1 — 지연과 검색 품질
 
-- 파일 검색 p50 300ms 미만, p95 1초 미만
+- 멀티스토어+LLM 파일 검색 p50 1.5초 미만, p95 3초 미만, hard budget 8초
 - 선택 문서 검색 단계별 지연 기록
 - Ollama 모델·프롬프트·근거 길이 조정으로 end-to-end 지연 개선
 - 합성 질의셋으로 Hit@5, no-answer, groundedness 측정

@@ -258,7 +258,7 @@ def check_architecture_markers(repo_root: Path, policy: dict[str, Any], section:
 
 
 def check_read_only_architecture(repo_root: Path, policy: dict[str, Any]) -> CheckOutcome:
-    """SMB mutation 부재와 read-only marker를 함께 검사한다."""
+    """DB read-only와 명시적으로 제한된 SMB 첨부 marker를 함께 검사한다."""
 
     errors = _required_tokens(repo_root, policy["architecture_markers"]["read_only"])
     source_root = repo_root / "backend" / "src" / "smb_finder"
@@ -267,7 +267,11 @@ def check_read_only_architecture(repo_root: Path, policy: dict[str, Any]) -> Che
         for pattern in policy["forbidden_smb_mutation_patterns"]:
             if pattern in text:
                 errors.append(f"{path.relative_to(repo_root).as_posix()}: SMB mutation marker 감지")
-    return CheckOutcome(not errors, "SMB·RAG 읽기 전용 경계가 유지됩니다." if not errors else "읽기 전용 경계를 확인해야 합니다.", details=tuple(errors))
+    return CheckOutcome(
+        not errors,
+        "DB 읽기 전용·제한 SMB 첨부 경계가 유지됩니다." if not errors else "저장소 접근 경계를 확인해야 합니다.",
+        details=tuple(errors),
+    )
 
 
 def _fixture_error(path: str, line: int, message: str) -> str:
@@ -538,13 +542,18 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
             "backend/src/smb_finder/intent.py",
             "backend/src/smb_finder/models.py",
             "backend/src/smb_finder/llmops_search.py",
+            "backend/src/smb_finder/llmops_multistore_search.py",
             "backend/src/smb_finder/llmops_retrieval.py",
             "backend/src/smb_finder/llmops_artifacts.py",
             "backend/src/smb_finder/llmops_graph.py",
             "backend/src/smb_finder/playground/document_api.py",
             "backend/src/smb_finder/playground/document_chat.py",
             "backend/src/smb_finder/playground/document_models.py",
+            "backend/src/smb_finder/playground/upload_api.py",
+            "backend/src/smb_finder/playground/upload_models.py",
+            "backend/src/smb_finder/playground/upload_service.py",
             "backend/tests/test_api_contracts.py",
+            "backend/tests/test_container_packaging.py",
             "backend/tests/test_development_lessons.py",
             "backend/tests/test_frontend_build.py",
             "backend/tests/test_llmops_api_contracts.py",
@@ -552,6 +561,7 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
             "backend/tests/test_llmops_search.py",
             "backend/tests/test_llmops_stores.py",
             "backend/tests/test_project_quality.py",
+            "backend/tests/test_upload_api.py",
             "scripts/check_development_lessons.py",
             "scripts/evaluate_quality.py",
         ],
@@ -560,6 +570,7 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
             "-m",
             "pytest",
             "backend/tests/test_api_contracts.py",
+            "backend/tests/test_container_packaging.py",
             "backend/tests/test_development_lessons.py",
             "backend/tests/test_frontend_build.py",
             "backend/tests/test_llmops_api_contracts.py",
@@ -567,6 +578,7 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
             "backend/tests/test_llmops_search.py",
             "backend/tests/test_llmops_stores.py",
             "backend/tests/test_project_quality.py",
+            "backend/tests/test_upload_api.py",
             "-m",
             "not integration",
             "-p",

@@ -39,12 +39,22 @@ class LlmopsFileSearcher:
     def close(self) -> None:
         """요청별 연결 방식이라 유지 중인 연결이 없다."""
 
-    def search(self, request: DocumentSearchRequest) -> DocumentSearchResponse:
+    def search(
+        self,
+        request: DocumentSearchRequest,
+        *,
+        search_terms: Iterable[str] | None = None,
+    ) -> DocumentSearchResponse:
         """자연어 검색문으로 활성 문서를 찾고 파일 선택용 최소 메타데이터만 반환한다."""
 
         started = time.perf_counter()
         normalized = intent.normalize_rule(request.query)
-        terms = [term for term in normalized.split() if term][:8]
+        raw_terms = [term for term in normalized.split() if term]
+        if search_terms is not None:
+            raw_terms.extend(term for term in search_terms if term.strip())
+        terms = list(dict.fromkeys(term.casefold() for term in raw_terms))[
+            : self._settings.llmops_file_search_llm_max_terms
+        ]
         limit = min(
             request.limit or self._settings.llmops_file_search_limit,
             self._settings.llmops_file_search_max_limit,
@@ -57,6 +67,8 @@ class LlmopsFileSearcher:
                 result_count=0,
                 elapsed_ms=round((time.perf_counter() - started) * 1000, 1),
                 source="llmops",
+                search_mode="postgresql",
+                queried_stores=["postgresql"],
             )
 
         patterns = [f"%{term}%" for term in terms]
@@ -89,7 +101,7 @@ class LlmopsFileSearcher:
                         WHERE c.doc_id = d.doc_id
                           AND c.revision_id = d.active_revision_id
                           AND c.active IS TRUE
-                          AND c.search_text ILIKE ALL(%s)
+                          AND c.search_text ILIKE ANY(%s)
                     ) AS content_matches
                 FROM {}.documents AS d
                 WHERE d.deleted_at IS NULL
@@ -107,9 +119,9 @@ class LlmopsFileSearcher:
                     similarity(metadata_text, %s),
                     content_score
                 ) + CASE WHEN metadata_text ILIKE ALL(%s) THEN 1.0 ELSE 0.5 END AS score,
-                CASE WHEN metadata_text ILIKE ALL(%s) THEN 'metadata' ELSE 'content' END AS match_source
+                CASE WHEN metadata_text ILIKE ANY(%s) THEN 'metadata' ELSE 'content' END AS match_source
             FROM candidates
-            WHERE metadata_text ILIKE ALL(%s) OR content_matches
+            WHERE metadata_text ILIKE ANY(%s) OR content_matches
             ORDER BY score DESC, source_modified_at DESC NULLS LAST, file_name
             LIMIT %s
             """
@@ -150,7 +162,62 @@ class LlmopsFileSearcher:
             elapsed_ms=elapsed_ms,
             over_budget=over_budget,
             source="llmops",
+            search_mode="postgresql",
+            queried_stores=["postgresql"],
+            timings_ms={"postgresql": elapsed_ms},
         )
+
+    def hydrate_document_refs(
+        self,
+        refs: dict[tuple[str, str], set[str]],
+        *,
+        limit: int,
+    ) -> list[DocumentSearchHit]:
+        """외부 저장소가 찾은 활성 문서 pair를 PostgreSQL 공개 메타데이터로 변환한다."""
+
+        pairs = list(refs)[: self._settings.llmops_file_search_source_limit]
+        if not pairs:
+            return []
+        pair_sql = sql.SQL(", ").join(sql.SQL("(%s::uuid, %s::uuid)") for _ in pairs)
+        query = sql.SQL(
+            """
+            WITH requested(doc_id, revision_id) AS (VALUES {})
+            SELECT
+                d.doc_id,
+                d.active_revision_id AS revision_id,
+                d.file_name,
+                COALESCE(d.title, d.logical_name, d.file_name) AS title,
+                COALESCE(d.extension, '') AS extension,
+                d.file_size,
+                d.source_modified_at,
+                0.75 AS score,
+                'metadata' AS match_source
+            FROM {}.documents AS d
+            JOIN requested AS requested
+              ON requested.doc_id = d.doc_id AND requested.revision_id = d.active_revision_id
+            WHERE d.deleted_at IS NULL
+            ORDER BY d.source_modified_at DESC NULLS LAST, d.file_name
+            LIMIT %s
+            """
+        ).format(pair_sql, sql.Identifier(self._settings.llmops_postgres_schema))
+        parameters = [value for pair in pairs for value in pair]
+        parameters.append(limit)
+        try:
+            with self._connect(**self._connection_kwargs()) as connection:
+                with connection.cursor(row_factory=dict_row) as cursor:
+                    cursor.execute(query, parameters)
+                    rows = cursor.fetchall()
+        except Exception as exc:
+            raise LlmopsSearchError(
+                "llmops_external_candidate_hydration_failed",
+                "다른 저장소에서 찾은 문서 후보를 확인할 수 없습니다.",
+            ) from exc
+        hits: list[DocumentSearchHit] = []
+        for row in rows:
+            key = (str(row["doc_id"]), str(row["revision_id"]))
+            stores = ["postgresql", *sorted(refs.get(key, set()))]
+            hits.append(self._row_to_hit(row, matched_stores=list(dict.fromkeys(stores))))
+        return hits
 
     def validate_active_selections(self, selections: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
         """선택한 doc/revision 쌍이 현재 활성 문서인지 한 번의 읽기 쿼리로 확인한다."""
@@ -235,7 +302,11 @@ class LlmopsFileSearcher:
         }
 
     @staticmethod
-    def _row_to_hit(row: dict[str, Any]) -> DocumentSearchHit:
+    def _row_to_hit(
+        row: dict[str, Any],
+        *,
+        matched_stores: list[str] | None = None,
+    ) -> DocumentSearchHit:
         score = float(row.get("score") or 0.0)
         return DocumentSearchHit(
             source="llmops",
@@ -248,4 +319,5 @@ class LlmopsFileSearcher:
             modified_at=row.get("source_modified_at"),
             score=round(score, 4),
             match_source="content" if row.get("match_source") == "content" else "metadata",
+            matched_stores=matched_stores or ["postgresql"],
         )

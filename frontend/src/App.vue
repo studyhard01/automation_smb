@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref } from "vue";
 
 import { ApiError, playgroundApi } from "@/api/client";
 import AppHeader from "@/components/AppHeader.vue";
@@ -7,6 +7,8 @@ import ChatWorkspace from "@/components/ChatWorkspace.vue";
 import FeatureSidebar from "@/components/FeatureSidebar.vue";
 import FileInspectorDialog from "@/components/FileInspectorDialog.vue";
 import FileSidebar from "@/components/FileSidebar.vue";
+import SettingsDialog from "@/components/SettingsDialog.vue";
+import { createUiId } from "@/utils/uiId";
 import type {
   ChatUiMessage,
   ConversationDefinition,
@@ -16,9 +18,10 @@ import type {
   DocumentVersionGraphResponse,
   FunctionDefinition,
   FunctionId,
+  PlaygroundSettingsResponse,
   SelectedFilePayload,
   StoresStatusResponse,
-  WorkspaceStatus,
+  UploadStatus,
 } from "@/types";
 
 const functions: FunctionDefinition[] = [
@@ -49,9 +52,6 @@ const chatDefinition: ConversationDefinition = {
   placeholder: "선택한 문서에 대해 궁금한 내용을 입력하세요",
 };
 
-const workspaceStatus = ref<WorkspaceStatus>("loading");
-const workspaceTitle = ref("저장소 확인 중");
-const workspaceDetail = ref("문서 DB 연결 상태를 확인하고 있습니다.");
 const stores = ref<StoresStatusResponse | null>(null);
 const conversationStatus = ref<ConversationStatus>("ready");
 
@@ -59,6 +59,15 @@ const fileResults = ref<DocumentSearchHit[]>([]);
 const selectedFiles = ref<DocumentSearchHit[]>([]);
 const fileSearchPending = ref(false);
 const fileSearchFeedback = ref("자연어로 찾을 파일을 설명해 주세요.");
+const uploadPending = ref(false);
+const uploadStatus = ref<UploadStatus>("idle");
+const uploadFeedback = ref("");
+
+const settings = ref<PlaygroundSettingsResponse | null>(null);
+const settingsPending = ref(false);
+const settingsSavePending = ref(false);
+const settingsFeedback = ref("");
+const settingsFeedbackStatus = ref<UploadStatus>("idle");
 
 const selectedFunction = ref<FunctionId>("summary");
 const messages = ref<ChatUiMessage[]>([]);
@@ -73,21 +82,33 @@ const previewPending = ref(false);
 const graphPending = ref(false);
 const inspectorError = ref("");
 const fileInspectorDialog = ref<{ open: () => void; openVersions: () => void; close: () => void } | null>(null);
+const settingsDialog = ref<{ open: () => void; close: () => void } | null>(null);
+
+const uploadEnabled = computed(() => Boolean(settings.value?.upload.enabled && settings.value.upload.configured));
+const allowedExtensions = computed(() => settings.value?.upload.allowed_extensions || []);
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError || error instanceof Error) return error.message;
   return "알 수 없는 오류가 발생했습니다.";
 }
 
-function userFacingApiError(error: unknown, context: "search" | "chat" | "preview" | "graph"): string {
+function userFacingApiError(error: unknown, context: "search" | "chat" | "preview" | "graph" | "upload" | "settings"): string {
   if (error instanceof ApiError && error.status === 409) {
     return "선택한 문서 버전이 변경됐습니다. 파일을 다시 검색해 주세요.";
   }
   if (error instanceof ApiError && error.status === 503) {
-    const label = context === "graph" ? "버전 저장소" : context === "preview" ? "문서 저장소" : "문서 DB";
+    const label = context === "graph"
+      ? "버전 저장소"
+      : context === "preview" || context === "upload"
+        ? "문서 저장소"
+        : context === "settings"
+          ? "설정 서비스"
+          : "문서 DB";
     return `${label}에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.`;
   }
-  if (error instanceof ApiError && error.status === 413) return "미리보기 허용 크기를 넘었습니다.";
+  if (error instanceof ApiError && error.status === 413) {
+    return context === "upload" ? "첨부할 수 있는 파일 크기를 넘었습니다." : "미리보기 허용 크기를 넘었습니다.";
+  }
   if (error instanceof ApiError && error.status === 404) return "선택한 문서를 찾지 못했습니다. 다시 검색해 주세요.";
   return errorMessage(error);
 }
@@ -110,19 +131,95 @@ async function loadStoreStatus(): Promise<void> {
   try {
     stores.value = await playgroundApi.getStoresStatus();
     if (!stores.value.postgresql.connected) {
-      workspaceStatus.value = "error";
-      workspaceTitle.value = "문서 DB 연결 필요";
-      workspaceDetail.value = stores.value.postgresql.message;
       return;
     }
-    workspaceStatus.value = "ready";
-    workspaceTitle.value = stores.value.overall === "degraded" ? "검색 준비 · 일부 기능 제한" : "검색 준비 완료";
-    const optional = [stores.value.minio, stores.value.neo4j].filter((store) => store.connected).length;
-    workspaceDetail.value = `PostgreSQL 연결 · 미리보기/버전 저장소 ${optional}/2 연결`;
+  } catch {
+    stores.value = null;
+  }
+}
+
+async function loadSettings(): Promise<void> {
+  if (settingsPending.value) return;
+  settingsPending.value = true;
+  settingsFeedback.value = "";
+  settingsFeedbackStatus.value = "idle";
+  try {
+    settings.value = await playgroundApi.getSettings();
   } catch (error) {
-    workspaceStatus.value = "error";
-    workspaceTitle.value = "저장소 상태 확인 실패";
-    workspaceDetail.value = userFacingApiError(error, "search");
+    settingsFeedback.value = `설정 확인 실패: ${userFacingApiError(error, "settings")}`;
+    settingsFeedbackStatus.value = "error";
+  } finally {
+    settingsPending.value = false;
+  }
+}
+
+async function reloadSettings(): Promise<void> {
+  await Promise.all([loadSettings(), loadStoreStatus()]);
+}
+
+async function saveUploadDirectory(relativeDirectory: string): Promise<void> {
+  if (settingsSavePending.value) return;
+  settingsSavePending.value = true;
+  settingsFeedback.value = "업로드 경로를 저장하고 있습니다.";
+  settingsFeedbackStatus.value = "pending";
+  try {
+    settings.value = await playgroundApi.updateUploadDirectory(relativeDirectory);
+    settingsFeedback.value = "업로드 상대 경로를 저장했습니다.";
+    settingsFeedbackStatus.value = "success";
+  } catch (error) {
+    settingsFeedback.value = `설정 저장 실패: ${userFacingApiError(error, "settings")}`;
+    settingsFeedbackStatus.value = "error";
+  } finally {
+    settingsSavePending.value = false;
+  }
+}
+
+function openSettings(): void {
+  settingsDialog.value?.open();
+  if (!settings.value && !settingsPending.value) void reloadSettings();
+}
+
+function fileExtension(fileName: string): string {
+  const index = fileName.lastIndexOf(".");
+  return index >= 0 ? fileName.slice(index).toLowerCase() : "";
+}
+
+async function uploadFile(file: File): Promise<void> {
+  if (uploadPending.value) return;
+  if (!settings.value || !uploadEnabled.value) {
+    uploadStatus.value = "error";
+    uploadFeedback.value = "설정에서 업로드 상대 경로를 먼저 확인해 주세요.";
+    return;
+  }
+
+  const allowed = new Set(settings.value.upload.allowed_extensions.map((extension) => (
+    extension.startsWith(".") ? extension.toLowerCase() : `.${extension.toLowerCase()}`
+  )));
+  if (!allowed.has(fileExtension(file.name))) {
+    uploadStatus.value = "error";
+    uploadFeedback.value = "허용되지 않은 파일 형식입니다. 설정에서 허용 확장자를 확인해 주세요.";
+    return;
+  }
+  if (file.size > settings.value.upload.max_size_bytes) {
+    uploadStatus.value = "error";
+    uploadFeedback.value = "파일이 설정된 최대 크기를 넘었습니다.";
+    return;
+  }
+
+  uploadPending.value = true;
+  uploadStatus.value = "pending";
+  uploadFeedback.value = "파일을 공유폴더에 업로드하고 있습니다.";
+  try {
+    const response = await playgroundApi.uploadFile(file);
+    uploadStatus.value = "success";
+    uploadFeedback.value = response.indexed
+      ? "업로드와 검색 반영이 완료됐습니다."
+      : "업로드 완료 · 아직 검색 인덱스에는 반영되지 않았습니다.";
+  } catch (error) {
+    uploadStatus.value = "error";
+    uploadFeedback.value = `파일 첨부 실패: ${userFacingApiError(error, "upload")}`;
+  } finally {
+    uploadPending.value = false;
   }
 }
 
@@ -134,11 +231,15 @@ async function searchFiles(query: string): Promise<void> {
   try {
     const response = await playgroundApi.searchFiles(query, 10);
     fileResults.value = response.hits;
-    fileSearchFeedback.value = `${response.result_count}건을 ${response.elapsed_ms.toFixed(1)}ms에 찾았습니다. 후보를 선택해 주세요.`;
+    const storeNames = { postgresql: "PostgreSQL", minio: "MinIO", neo4j: "Neo4j" } as const;
+    const storesUsed = (response.queried_stores || ["postgresql"]).map((store) => storeNames[store]).join(" · ");
+    const llmState = response.llm_expanded ? " · 로컬 LLM 검색어 확장" : "";
+    const degraded = response.warnings?.length ? " · 일부 검색 경로 제한" : "";
+    fileSearchFeedback.value = `${response.result_count}건 · ${response.elapsed_ms.toFixed(1)}ms · ${storesUsed}${llmState}${degraded}`;
     messages.value.push(
-      { id: crypto.randomUUID(), role: "user", content: query },
+      { id: createUiId(), role: "user", content: query },
       {
-        id: crypto.randomUUID(),
+        id: createUiId(),
         role: "assistant",
         content: response.result_count ? `관련 파일 ${response.result_count}개를 찾았습니다.` : "조건에 맞는 파일을 찾지 못했습니다.",
         searchResponse: response,
@@ -148,8 +249,8 @@ async function searchFiles(query: string): Promise<void> {
     const message = userFacingApiError(error, "search");
     fileSearchFeedback.value = `파일 검색 실패: ${message}`;
     messages.value.push(
-      { id: crypto.randomUUID(), role: "user", content: query },
-      { id: crypto.randomUUID(), role: "assistant", content: message, error: true },
+      { id: createUiId(), role: "user", content: query },
+      { id: createUiId(), role: "assistant", content: message, error: true },
     );
   } finally {
     fileSearchPending.value = false;
@@ -160,7 +261,6 @@ function toggleFile(file: DocumentSearchHit): void {
   const key = fileKey(file);
   if (selectedFiles.value.some((item) => fileKey(item) === key)) {
     selectedFiles.value = selectedFiles.value.filter((item) => fileKey(item) !== key);
-    fileSearchFeedback.value = `${file.file_name} 선택을 해제했습니다.`;
     return;
   }
   if (selectedFiles.value.length >= 5) {
@@ -168,7 +268,6 @@ function toggleFile(file: DocumentSearchHit): void {
     return;
   }
   selectedFiles.value = [...selectedFiles.value, file];
-  fileSearchFeedback.value = `${file.file_name}을 대화 범위에 추가했습니다.`;
 }
 
 function removeFile(file: DocumentSearchHit): void {
@@ -236,10 +335,10 @@ async function sendChat(message: string): Promise<void> {
   if (chatPending.value || !selectedFiles.value.length) return;
   chatPending.value = true;
   conversationStatus.value = "loading";
-  const pendingId = crypto.randomUUID();
+  const pendingId = createUiId();
   messages.value.push(
     {
-      id: crypto.randomUUID(),
+      id: createUiId(),
       role: "user",
       content: message,
       selectedFiles: selectedFiles.value.map((file) => file.file_name),
@@ -293,26 +392,30 @@ async function runFunction(functionId: FunctionId): Promise<void> {
   await sendChat(prompts[functionId]);
 }
 
-onMounted(loadStoreStatus);
+onMounted(() => Promise.all([loadStoreStatus(), loadSettings()]));
 </script>
 
 <template>
-  <AppHeader :workspace-status="workspaceStatus" :workspace-title="workspaceTitle" />
+  <AppHeader />
   <main class="app-shell">
     <FileSidebar
-      :workspace-status="workspaceStatus"
-      :workspace-title="workspaceTitle"
-      :workspace-detail="workspaceDetail"
       :results="fileResults"
       :selected-files="selectedFiles"
       :search-pending="fileSearchPending"
       :search-feedback="fileSearchFeedback"
+      :upload-enabled="uploadEnabled"
+      :upload-pending="uploadPending"
+      :upload-status="uploadStatus"
+      :upload-feedback="uploadFeedback"
+      :allowed-extensions="allowedExtensions"
       @new-conversation="startNewConversation"
       @search="searchFiles"
       @toggle-file="toggleFile"
       @remove-file="removeFile"
       @preview-file="previewFile"
       @inspect-versions="inspectFileVersions"
+      @upload-file="uploadFile"
+      @open-settings="openSettings"
     />
     <ChatWorkspace
       :definition="chatDefinition"
@@ -344,5 +447,16 @@ onMounted(loadStoreStatus);
     :graph-pending="graphPending"
     :error="inspectorError"
     @load-graph="loadFileGraph"
+  />
+  <SettingsDialog
+    ref="settingsDialog"
+    :settings="settings"
+    :stores="stores"
+    :loading="settingsPending"
+    :save-pending="settingsSavePending"
+    :feedback="settingsFeedback"
+    :feedback-status="settingsFeedbackStatus"
+    @save-upload-directory="saveUploadDirectory"
+    @reload="reloadSettings"
   />
 </template>

@@ -4,6 +4,8 @@ import type {
   DocumentPreviewResponse,
   DocumentSearchResponse,
   DocumentVersionGraphResponse,
+  FileUploadResponse,
+  PlaygroundSettingsResponse,
   SelectedFilePayload,
   StoresStatusResponse,
 } from "@/types";
@@ -70,6 +72,31 @@ export const playgroundApi = {
 
   async getStoresStatus(): Promise<StoresStatusResponse> {
     return parseResponse<StoresStatusResponse>(await fetch("/api/playground/stores/status"));
+  },
+
+  async getSettings(): Promise<PlaygroundSettingsResponse> {
+    return parseResponse<PlaygroundSettingsResponse>(await fetch("/api/playground/settings"));
+  },
+
+  async updateUploadDirectory(relativeDirectory: string): Promise<PlaygroundSettingsResponse> {
+    return parseResponse<PlaygroundSettingsResponse>(
+      await fetch("/api/playground/settings/upload", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ relative_directory: relativeDirectory }),
+      }),
+    );
+  },
+
+  async uploadFile(file: File): Promise<FileUploadResponse> {
+    const body = new FormData();
+    body.append("file", file);
+    return parseResponse<FileUploadResponse>(
+      await fetch("/api/playground/files/upload", {
+        method: "POST",
+        body,
+      }),
+    );
   },
 
   async sendChat(payload: Record<string, unknown>): Promise<ChatResponse> {

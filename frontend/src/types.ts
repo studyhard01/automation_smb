@@ -1,6 +1,6 @@
 export type FileSource = "llmops";
+export type SearchStore = "postgresql" | "minio" | "neo4j";
 export type FunctionId = "summary" | "report";
-export type WorkspaceStatus = "loading" | "ready" | "error";
 export type ConversationStatus = "ready" | "loading" | "success" | "error";
 
 export interface DocumentSearchHit {
@@ -14,6 +14,7 @@ export interface DocumentSearchHit {
   modified_at?: string | null;
   score: number;
   match_source: "metadata" | "content";
+  matched_stores?: SearchStore[];
 }
 
 export interface DocumentSearchResponse {
@@ -24,6 +25,11 @@ export interface DocumentSearchResponse {
   elapsed_ms: number;
   over_budget: boolean;
   source: FileSource;
+  search_mode?: "postgresql" | "multistore";
+  queried_stores?: SearchStore[];
+  llm_expanded?: boolean;
+  timings_ms?: Record<string, number>;
+  warnings?: string[];
 }
 
 export interface SelectedFilePayload {
@@ -81,6 +87,30 @@ export interface StoresStatusResponse {
   minio: StoreConnectionState;
   neo4j: StoreConnectionState;
 }
+
+export interface UploadSettings {
+  enabled: boolean;
+  configured: boolean;
+  relative_directory: string;
+  destination_label: string;
+  max_size_bytes: number;
+  allowed_extensions: string[];
+}
+
+export interface PlaygroundSettingsResponse {
+  upload: UploadSettings;
+  local_llm_configured: boolean;
+}
+
+export interface FileUploadResponse {
+  file_name: string;
+  size_bytes: number;
+  uploaded_at: string;
+  destination_label: string;
+  indexed: false;
+}
+
+export type UploadStatus = "idle" | "pending" | "success" | "error";
 
 export interface Citation {
   index: number;

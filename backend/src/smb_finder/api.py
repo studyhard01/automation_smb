@@ -13,10 +13,12 @@ from fastapi.staticfiles import StaticFiles
 from .config import load_settings
 from .llmops_artifacts import LlmopsArtifactReader
 from .llmops_graph import LlmopsGraphReader
+from .llmops_multistore_search import LlmopsMultiStoreFileSearcher
 from .llmops_retrieval import LlmopsScopedRetriever
 from .llmops_search import LlmopsFileSearcher
 from .models import ApiErrorResponse
 from .playground.document_api import DocumentRuntime, create_document_router
+from .playground.upload_api import create_upload_router
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -42,10 +44,15 @@ async def lifespan(_app: FastAPI):
 
     async with AsyncExitStack() as stack:
         stack.callback(_state.clear)
+        graph_reader = None
+        if _settings.llmops_neo4j_configured:
+            graph_reader = LlmopsGraphReader(_settings)
+            stack.callback(graph_reader.close)
+            _state["graph_reader"] = graph_reader
+
         if _settings.llmops_db_configured:
-            file_searcher = LlmopsFileSearcher(_settings)
-            stack.callback(file_searcher.close)
-            _state["file_searcher"] = file_searcher
+            postgres_searcher = LlmopsFileSearcher(_settings)
+            stack.callback(postgres_searcher.close)
 
             if _settings.ollama_base_url.strip() and _settings.embedding_model.strip():
                 scoped_retriever = LlmopsScopedRetriever(_settings)
@@ -56,11 +63,17 @@ async def lifespan(_app: FastAPI):
                 artifact_reader = LlmopsArtifactReader(_settings)
                 stack.callback(artifact_reader.close)
                 _state["artifact_reader"] = artifact_reader
+            else:
+                artifact_reader = None
 
-        if _settings.llmops_neo4j_configured:
-            graph_reader = LlmopsGraphReader(_settings)
-            stack.callback(graph_reader.close)
-            _state["graph_reader"] = graph_reader
+            file_searcher = LlmopsMultiStoreFileSearcher(
+                _settings,
+                postgres_searcher=postgres_searcher,
+                artifact_reader=artifact_reader,
+                graph_reader=graph_reader,
+            )
+            stack.callback(file_searcher.close)
+            _state["file_searcher"] = file_searcher
 
         _logger.info(
             "서비스 준비 완료: postgresql=%s retrieval=%s minio=%s neo4j=%s",
@@ -83,6 +96,7 @@ app = FastAPI(
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 app.mount("/playground/assets", StaticFiles(directory=str(_WEB_DIR / "assets")), name="playground-assets")
 app.include_router(create_document_router(_runtime))
+app.include_router(create_upload_router(_settings))
 
 
 @app.get("/playground", include_in_schema=False)

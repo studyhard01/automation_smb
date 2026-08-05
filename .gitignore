@@ -19,6 +19,7 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .tmp/
+.runtime/
 *.egg-info/
 dist/
 build/

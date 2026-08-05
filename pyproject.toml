@@ -12,6 +12,8 @@ dependencies = [
     "psycopg[binary]>=3.2,<4",
     "boto3>=1.35,<2",
     "neo4j>=5.26,<7",
+    "python-multipart>=0.0.20,<1",
+    "smbprotocol>=1.15,<2",
 ]
 
 [project.optional-dependencies]

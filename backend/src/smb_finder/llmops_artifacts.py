@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -160,6 +160,60 @@ class LlmopsArtifactReader:
                 "문서 보기 Registry를 확인할 수 없습니다.",
                 round((time.perf_counter() - started) * 1000, 1),
             ) from exc
+
+    def search_document_refs(self, terms: Iterable[str], *, limit: int) -> set[tuple[str, str]]:
+        """Artifact Object key와 실제 MinIO 존재 여부로 활성 문서 pair를 찾는다."""
+
+        normalized_terms = list(dict.fromkeys(term.casefold().strip() for term in terms if term.strip()))
+        if not normalized_terms:
+            return set()
+        try:
+            self._client.head_bucket(Bucket=self._settings.llmops_minio_bucket)
+        except Exception as exc:
+            raise LlmopsArtifactError(
+                "artifact_search_unavailable",
+                "MinIO 검색 저장소에 연결할 수 없습니다.",
+            ) from exc
+
+        schema = sql.Identifier(self._settings.llmops_postgres_schema)
+        query = sql.SQL(
+            """
+            SELECT DISTINCT
+                d.doc_id::text AS doc_id,
+                d.active_revision_id::text AS revision_id,
+                a.object_uri
+            FROM {}.artifacts AS a
+            JOIN {}.document_revisions AS r ON r.revision_id = a.revision_id
+            JOIN {}.documents AS d ON d.doc_id = r.doc_id
+            WHERE d.deleted_at IS NULL
+              AND d.active_revision_id = r.revision_id
+              AND upper(r.status::text) = 'ACTIVE'
+              AND a.object_uri ILIKE ANY(%s)
+            ORDER BY d.doc_id::text, d.active_revision_id::text
+            LIMIT %s
+            """
+        ).format(schema, schema, schema)
+        patterns = [f"%{term}%" for term in normalized_terms]
+        try:
+            with self._connect(**self._connection_kwargs()) as connection:
+                with connection.cursor(row_factory=dict_row) as cursor:
+                    cursor.execute(query, (patterns, limit))
+                    rows = cursor.fetchall()
+        except Exception as exc:
+            raise LlmopsArtifactError(
+                "artifact_registry_search_unavailable",
+                "MinIO Artifact 검색 Registry를 확인할 수 없습니다.",
+            ) from exc
+
+        matches: set[tuple[str, str]] = set()
+        for row in rows:
+            try:
+                bucket, key = self._parse_object_uri(str(row["object_uri"]))
+                self._client.head_object(Bucket=bucket, Key=key)
+            except Exception:
+                continue
+            matches.add((str(row["doc_id"]), str(row["revision_id"])))
+        return matches
 
     def _parse_object_uri(self, object_uri: str) -> tuple[str, str]:
         parsed = urlparse(object_uri)

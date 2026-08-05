@@ -45,4 +45,7 @@ def test_frontend_selected_file_contract_is_explicit() -> None:
 
     assert "selected_files: selectedFiles.value.map(selectedFilePayload)" in app_source
     assert 'role="option"' in sidebar_source
-    assert "대화 범위에 추가" in app_source
+    assert "선택했습니다" not in app_source
+    assert "선택을 해제했습니다" not in app_source
+    assert 'strong>{{ uploadPending ? "업로드 중" : "파일 첨부" }}</strong>' in sidebar_source
+    assert 'class="settings-button"' in sidebar_source

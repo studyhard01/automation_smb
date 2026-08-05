@@ -30,6 +30,9 @@ class FakePgCursor:
     def fetchone(self):
         return self.row
 
+    def fetchall(self):
+        return self.row if isinstance(self.row, list) else []
+
 
 class FakePgConnection:
     def __init__(self, row: dict | None) -> None:
@@ -141,6 +144,36 @@ def test_artifact_reader_rejects_oversized_object_before_get():
     assert [name for name, _ in s3.calls] == ["head_object"]
 
 
+def test_artifact_reader_searches_registry_and_confirms_minio_object():
+    doc_id = uuid4()
+    revision_id = uuid4()
+    connection = FakePgConnection(
+        [
+            {
+                "doc_id": str(doc_id),
+                "revision_id": str(revision_id),
+                "object_uri": "s3://synthetic-artifacts/previews/synthetic-wbs.md",
+            }
+        ]
+    )
+    s3 = FakeS3Client(body=b"unused")
+    reader = LlmopsArtifactReader(
+        _artifact_settings(),
+        s3_client=s3,
+        connect=lambda **_kwargs: connection,
+    )
+
+    refs = reader.search_document_refs(["synthetic", "wbs"], limit=10)
+
+    assert refs == {(str(doc_id), str(revision_id))}
+    assert [name for name, _ in s3.calls] == ["head_bucket", "head_object"]
+    sql_text = connection.cursor_instance.executions[0][0].as_string().upper()
+    assert "ILIKE ANY" in sql_text
+    assert "INSERT " not in sql_text
+    assert "UPDATE " not in sql_text
+    assert "DELETE " not in sql_text
+
+
 class FakeRecord:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
@@ -228,3 +261,27 @@ def test_graph_reader_uses_home_database_read_mode_and_space_scope():
     assert response.warnings == ["neo4j_logical_database_ignored_for_graph_space"]
     assert {edge.type for edge in response.edges} == {"HAS_REVISION", "LATEST"}
     assert "bolt://" not in response.model_dump_json()
+
+
+def test_graph_reader_searches_document_and_latest_revision_labels():
+    doc_id = uuid4()
+    revision_id = uuid4()
+    driver = FakeGraphDriver([{"doc_id": str(doc_id), "revision_id": str(revision_id)}])
+    settings = Settings(
+        _env_file=None,
+        neo4j_uri="bolt://neo4j.test",
+        neo4j_user="reader",
+        neo4j_password="secret",
+        llmops_graph_space="synthetic-space",
+    )
+
+    refs = LlmopsGraphReader(settings, driver=driver).search_document_refs(["WBS", "계획"], limit=10)
+
+    assert refs == {(str(doc_id), str(revision_id))}
+    assert driver.sessions == [{"database": None, "default_access_mode": READ_ACCESS}]
+    parameters = driver.tx.calls[0][1]
+    assert parameters == {"space_id": "synthetic-space", "terms": ["wbs", "계획"], "limit": 10}
+    cypher = str(driver.tx.calls[0][0]).upper()
+    assert "CREATE " not in cypher
+    assert "MERGE " not in cypher
+    assert "DELETE " not in cypher

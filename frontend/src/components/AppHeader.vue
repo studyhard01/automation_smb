@@ -1,12 +1,3 @@
-<script setup lang="ts">
-import type { WorkspaceStatus } from "@/types";
-
-defineProps<{
-  workspaceStatus: WorkspaceStatus;
-  workspaceTitle: string;
-}>();
-</script>
-
 <template>
   <header class="app-header">
     <div class="brand">
@@ -26,10 +17,6 @@ defineProps<{
 
     <div class="header-controls">
       <span class="environment-pill">테스트 화면</span>
-      <div class="conversation-state" :class="workspaceStatus" role="status">
-        <span class="status-dot" aria-hidden="true"></span>
-        {{ workspaceTitle }}
-      </div>
     </div>
   </header>
 </template>

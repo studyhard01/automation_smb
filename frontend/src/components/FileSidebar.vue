@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 
-import type { DocumentSearchHit, WorkspaceStatus } from "@/types";
+import type { DocumentSearchHit, UploadStatus } from "@/types";
 
 const props = defineProps<{
-  workspaceStatus: WorkspaceStatus;
-  workspaceTitle: string;
-  workspaceDetail: string;
   results: DocumentSearchHit[];
   selectedFiles: DocumentSearchHit[];
   searchPending: boolean;
   searchFeedback: string;
+  uploadEnabled: boolean;
+  uploadPending: boolean;
+  uploadStatus: UploadStatus;
+  uploadFeedback: string;
+  allowedExtensions: string[];
 }>();
 
 const emit = defineEmits<{
@@ -20,10 +22,16 @@ const emit = defineEmits<{
   removeFile: [file: DocumentSearchHit];
   previewFile: [file: DocumentSearchHit];
   inspectVersions: [file: DocumentSearchHit];
+  uploadFile: [file: File];
+  openSettings: [];
 }>();
 
 const query = ref("");
+const fileInput = ref<HTMLInputElement | null>(null);
 const selectedCount = computed(() => props.selectedFiles.length);
+const uploadAccept = computed(() => props.allowedExtensions.map((extension) => (
+  extension.startsWith(".") ? extension : `.${extension}`
+)).join(","));
 
 function key(file: DocumentSearchHit): string {
   return `${file.doc_id}:${file.revision_id}`;
@@ -43,6 +51,23 @@ function formatSize(value: number | null): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function matchedStoreLabel(file: DocumentSearchHit): string {
+  const labels = { postgresql: "PostgreSQL", minio: "MinIO", neo4j: "Neo4j" } as const;
+  return (file.matched_stores || ["postgresql"]).map((store) => labels[store]).join(" + ");
+}
+
+function openFilePicker(): void {
+  if (!props.uploadEnabled || props.uploadPending) return;
+  fileInput.value?.click();
+}
+
+function selectUpload(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (file) emit("uploadFile", file);
+  input.value = "";
 }
 </script>
 
@@ -71,6 +96,36 @@ function formatSize(value: number | null): string {
           {{ searchPending ? "검색 중" : "검색" }}
         </button>
       </form>
+      <div class="source-upload">
+        <button
+          class="file-upload-button"
+          type="button"
+          :disabled="!uploadEnabled || uploadPending"
+          :aria-describedby="uploadFeedback ? 'uploadFeedback' : undefined"
+          @click="openFilePicker"
+        >
+          <span class="file-upload-icon" aria-hidden="true">↑</span>
+          <span>
+            <strong>{{ uploadPending ? "업로드 중" : "파일 첨부" }}</strong>
+            <small>{{ uploadEnabled ? "설정된 공유폴더에 한 파일 저장" : "설정에서 업로드 경로를 확인하세요" }}</small>
+          </span>
+        </button>
+        <input
+          ref="fileInput"
+          class="visually-hidden"
+          type="file"
+          :accept="uploadAccept || undefined"
+          :disabled="!uploadEnabled || uploadPending"
+          @change="selectUpload"
+        />
+        <p
+          v-if="uploadFeedback"
+          id="uploadFeedback"
+          class="upload-feedback"
+          :class="uploadStatus"
+          :role="uploadStatus === 'error' ? 'alert' : 'status'"
+        >{{ uploadFeedback }}</p>
+      </div>
       <p class="search-feedback" aria-live="polite">{{ searchFeedback }}</p>
 
       <div class="file-search-results-section" :hidden="!results.length">
@@ -94,7 +149,8 @@ function formatSize(value: number | null): string {
               </span>
               <span class="file-search-result-title">{{ file.title || file.file_name }}</span>
               <span class="file-search-result-meta">
-                {{ file.match_source === "content" ? "내용 일치" : "메타데이터 일치" }} · {{ formatSize(file.size_bytes) }}
+                {{ file.match_source === "content" ? "내용 일치" : "메타데이터 일치" }} ·
+                {{ matchedStoreLabel(file) }} · {{ formatSize(file.size_bytes) }}
               </span>
             </button>
             <div class="file-search-result-actions">
@@ -132,11 +188,9 @@ function formatSize(value: number | null): string {
       </div>
     </section>
 
-    <section class="workspace-card" :class="workspaceStatus" aria-live="polite">
-      <strong><span class="status-dot" aria-hidden="true"></span>{{ workspaceTitle }}</strong>
-      <span>{{ workspaceDetail }}</span>
-    </section>
-
-    <p class="source-panel-note">검색 결과는 현재 연결된 문서 DB에서 조회합니다.</p>
+    <button class="settings-button" type="button" @click="emit('openSettings')">
+      <span aria-hidden="true">⚙</span>
+      <span>설정</span>
+    </button>
   </aside>
 </template>
