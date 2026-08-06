@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import path from "node:path";
 
-const backendTarget = process.env.VITE_BACKEND_URL || "http://127.0.0.1:8011";
+const backendTarget = process.env.VITE_BACKEND_URL || "http://127.0.0.1:8010";
 
 export default defineConfig({
   base: "/playground/",
@@ -19,7 +19,7 @@ export default defineConfig({
   },
   server: {
     port: 5173,
-    strictPort: true,
+    strictPort: false,
     proxy: {
       "/api": backendTarget,
       "/health": backendTarget,

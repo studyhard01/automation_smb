@@ -16,6 +16,7 @@ data/evaluation/*
 __pycache__/
 *.py[cod]
 .venv/
+backend/.venv/
 .ruff_cache/
 .pytest_cache/
 .tmp/
@@ -37,3 +38,6 @@ integrations/langgraph/.langgraph_api/
 
 # Local tool state
 .claude/settings.local.json
+
+# 머신별 Docker build 환경 (사내 SSL 검사 등)
+compose.override.yaml

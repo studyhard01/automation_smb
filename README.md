@@ -71,14 +71,72 @@ automation_smb/
 
 ## 설치와 실행
 
-```powershell
-cd C:\Users\AI_team\Desktop\project\automation_smb
-uv sync --python 3.11 --native-tls --extra dev
-Copy-Item .env.example .env
-npm.cmd --prefix .\frontend install
-npm.cmd --prefix .\frontend run build
+### Backend·Frontend 로컬 분리 실행
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_stack.ps1 -Action Start -Port 8011
+Docker 방식은 그대로 유지한다. 개발 중에는 Backend와 Frontend를 두 터미널에서 직접 실행한다.
+Backend는 `backend/.venv`의 Python 3.11 환경을 사용하고, Frontend는 프로젝트별 `frontend/node_modules`를 사용한다.
+Node.js/npm은 자체적으로 프로젝트 의존성을 격리하므로 Frontend용 Python 가상환경은 만들지 않는다.
+Backend package는 `backend/src`와 연결되는 editable 형태로 가상환경에 설치되므로 소스 수정이 reload에 바로 반영된다.
+
+최초 한 번 `.env`를 준비하고 의존성을 설치한다. `UV_PROJECT_ENVIRONMENT`는 설치 위치만
+`backend/.venv`로 지정하며, 설치가 끝나면 현재 터미널에서 제거한다. 기존 `.env`가 있으면 복사하지 않는다.
+
+```powershell
+cd C:\VSCodeWorkSpace\automation_smb
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+$env:UV_PROJECT_ENVIRONMENT = "$PWD\backend\.venv"
+uv sync --python 3.11 --native-tls --frozen --extra dev
+Remove-Item Env:UV_PROJECT_ENVIRONMENT
+npm.cmd --prefix .\frontend ci
+```
+
+사내 SSL 검사 때문에 `invalid peer certificate: UnknownIssuer`가 발생한 경우에만 공개 Python index와 wheel host를
+설치 명령 한 번에 한정해 허용한 후 다시 실행한다.
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = "$PWD\backend\.venv"
+uv sync --python 3.11 --native-tls --frozen --extra dev `
+  --allow-insecure-host pypi.org `
+  --allow-insecure-host files.pythonhosted.org
+Remove-Item Env:UV_PROJECT_ENVIRONMENT
+```
+
+첫 번째 터미널에서 Backend 가상환경을 활성화하고, Docker 기본 포트 `8011`과 충돌하지 않는 `8010`에서
+reload 개발 서버를 직접 실행한다.
+
+```powershell
+cd C:\VSCodeWorkSpace\automation_smb
+cd .\backend
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --reload --host 127.0.0.1 --port 8010
+```
+
+두 번째 터미널에서 Vite 개발 서버를 직접 시작한다. `/api`와 `/health` 요청은 기본적으로 Backend `8010`으로 전달된다.
+
+```powershell
+cd C:\VSCodeWorkSpace\automation_smb
+cd .\frontend
+npm run dev
+```
+
+- Frontend: `http://127.0.0.1:5173/playground/`
+- Backend OpenAPI: `http://127.0.0.1:8010/docs`
+- Backend health: `http://127.0.0.1:8010/health`
+- Backend·Frontend 중지: 각 실행 터미널에서 `Ctrl+C`
+- Backend 가상환경 종료: Backend 터미널에서 `deactivate`
+
+`backend/.venv`와 `frontend/node_modules`는 Git에서 제외된다. Backend 포트를 변경하려면 Frontend 실행 전에
+`$env:VITE_BACKEND_URL = "http://127.0.0.1:<변경한 포트>"`를 설정한다. Frontend `5173`이 이미 사용 중이면 Vite는
+`5174`처럼 다음 사용 가능한 포트로 자동 시작하므로, 터미널에 표시된 `Local` 주소로 접속한다.
+
+### 기존 단일 서비스 로컬 실행
+
+```powershell
+cd C:\VSCodeWorkSpace\automation_smb
+npm.cmd --prefix .\frontend run build
+cd .\backend
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --reload --host 127.0.0.1 --port 8011
 ```
 
 화면은 `http://127.0.0.1:8011/playground`, OpenAPI는 `http://127.0.0.1:8011/docs`에서 확인합니다. `.env`에는
@@ -100,8 +158,8 @@ docker compose up -d
 ## 테스트
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\evaluate_quality.py
-.\.venv\Scripts\python.exe -m pytest backend/tests/test_llmops_search.py backend/tests/test_llmops_retrieval.py backend/tests/test_llmops_stores.py backend/tests/test_llmops_api_contracts.py backend/tests/test_upload_api.py
+.\backend\.venv\Scripts\python.exe scripts\evaluate_quality.py
+.\backend\.venv\Scripts\python.exe -m pytest backend/tests/test_llmops_search.py backend/tests/test_llmops_retrieval.py backend/tests/test_llmops_stores.py backend/tests/test_llmops_api_contracts.py backend/tests/test_upload_api.py backend/tests/test_local_development.py
 npm.cmd --prefix .\frontend run typecheck
 npm.cmd --prefix .\frontend run test
 npm.cmd --prefix .\frontend run build
