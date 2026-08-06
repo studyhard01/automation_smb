@@ -20,6 +20,7 @@ from smb_finder.playground.upload_service import (
     SmbUploadWriter,
     UploadError,
     UploadManager,
+    build_upload_filename,
     normalize_relative_directory,
     sanitize_filename,
 )
@@ -34,6 +35,7 @@ def _settings(tmp_path: Path, **overrides) -> Settings:  # noqa: ANN003
         "smb_username": "synthetic-user",
         "smb_password": "synthetic-password",
         "smb_upload_runtime_settings_path": str(tmp_path / "settings.json"),
+        "smb_upload_registry_path": str(tmp_path / "upload-registry.json"),
         "smb_upload_default_relative_directory": "team/inbox",
         "smb_upload_allowed_extensions": ".pdf,.txt",
         "smb_upload_max_size_bytes": 32,
@@ -58,13 +60,20 @@ class StubWriter:
     def upload(self, source, original_name: str, relative_directory: str) -> FileUploadResponse:  # noqa: ANN001
         self.received = source.read()
         assert relative_directory == "team/inbox"
+        uploaded_at = datetime(2026, 1, 1, tzinfo=UTC)
         return FileUploadResponse(
-            file_name=original_name,
+            file_name=build_upload_filename(original_name, uploaded_at),
             size_bytes=len(self.received),
-            uploaded_at=datetime(2026, 1, 1, tzinfo=UTC),
+            uploaded_at=uploaded_at,
             destination_label="관리 공유폴더",
             indexed=False,
         )
+
+    def read(self, file_name: str, relative_directory: str, *, expected_size: int) -> bytes:
+        assert file_name
+        assert relative_directory == "team/inbox"
+        assert expected_size == len(self.received)
+        return self.received
 
 
 def _request(
@@ -212,11 +221,33 @@ def test_upload_api_uses_multipart_file_field_and_returns_no_path(tmp_path: Path
     )
 
     assert response.status_code == 201
-    assert response.json()["file_name"] == "synthetic.txt"
+    assert response.json()["file_name"] == "[업로드] synthetic_20260101_v1.0.txt"
     assert response.json()["size_bytes"] == 14
     assert response.json()["indexed"] is False
+    assert response.json()["conversation_ready"] is True
+    assert response.json()["selected_file"]["source"] == "upload"
+    assert response.json()["selected_file"]["file_name"] == "[업로드] synthetic_20260101_v1.0.txt"
     assert "path" not in response.text.lower()
     assert writer.received == b"synthetic body"
+
+
+def test_uploaded_file_is_immediately_retrievable_as_conversation_evidence(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    writer = StubWriter()
+    manager = UploadManager(settings, writer=writer)
+
+    response = manager.upload(io.BytesIO(b"Synthetic milestone is Friday."), "synthetic.txt")
+    assert response.selected_file is not None
+
+    result = manager.retrieve(
+        "When is the synthetic milestone?",
+        [(response.selected_file.doc_id, response.selected_file.revision_id)],
+    )
+
+    assert result.metadata.grounded is True
+    assert result.metadata.scope[0].doc_id == response.selected_file.doc_id
+    assert result.citations[0].location["source"] == "upload"
+    assert "Friday" in result.citations[0].excerpt
 
 
 def test_directory_and_filename_validation_rejects_path_semantics() -> None:
@@ -227,6 +258,16 @@ def test_directory_and_filename_validation_rejects_path_semantics() -> None:
         with pytest.raises(UploadError) as raised:
             sanitize_filename(name)
         assert raised.value.code == "invalid_file_name"
+
+
+def test_upload_filename_uses_korean_date_initial_version_and_preserves_extension() -> None:
+    uploaded_at = datetime(2026, 7, 29, 15, 30, tzinfo=UTC)
+
+    assert build_upload_filename("문서버전관리.docx", uploaded_at) == "[업로드] 문서버전관리_20260730_v1.0.docx"
+    assert (
+        build_upload_filename("[업로드] 문서버전관리_20260701_v1.0.docx", uploaded_at)
+        == "[업로드] 문서버전관리_20260730_v1.0.docx"
+    )
 
 
 class _RemoteBuffer(io.BytesIO):
@@ -309,11 +350,13 @@ def test_smb_writer_explicit_gate_blocks_before_any_smb_write(tmp_path: Path) ->
 def test_smb_writer_never_overwrites_when_destination_appears_during_rename(tmp_path: Path) -> None:
     fake = FakeSmb()
     fake.rename_race = True
-    writer = SmbUploadWriter(_settings(tmp_path), smb_module=fake)
+    uploaded_at = datetime(2026, 7, 29, 15, 30, tzinfo=UTC)
+    writer = SmbUploadWriter(_settings(tmp_path), smb_module=fake, clock=lambda: uploaded_at)
 
     with pytest.raises(UploadError) as raised:
         writer.upload(io.BytesIO(b"safe"), "synthetic.txt", "team/inbox")
 
     assert raised.value.code == "smb_upload_failed"
     assert b"other writer" in fake.files.values()
-    assert all(not path.endswith("synthetic.txt") or body == b"other writer" for path, body in fake.files.items())
+    expected_name = build_upload_filename("synthetic.txt", uploaded_at)
+    assert all(not path.endswith(expected_name) or body == b"other writer" for path, body in fake.files.items())

@@ -19,12 +19,14 @@ from .llmops_search import LlmopsFileSearcher
 from .models import ApiErrorResponse
 from .playground.document_api import DocumentRuntime, create_document_router
 from .playground.upload_api import create_upload_router
+from .playground.upload_service import UploadManager
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 _logger = logging.getLogger(__name__)
 _settings = load_settings()
+_upload_manager = UploadManager(_settings)
 _state: dict[str, object] = {}
 
 
@@ -35,6 +37,7 @@ def _runtime() -> DocumentRuntime:
         scoped_retriever=_state.get("scoped_retriever"),
         artifact_reader=_state.get("artifact_reader"),
         graph_reader=_state.get("graph_reader"),
+        upload_manager=_upload_manager,
     )
 
 
@@ -96,7 +99,7 @@ app = FastAPI(
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 app.mount("/playground/assets", StaticFiles(directory=str(_WEB_DIR / "assets")), name="playground-assets")
 app.include_router(create_document_router(_runtime))
-app.include_router(create_upload_router(_settings))
+app.include_router(create_upload_router(_settings, _upload_manager))
 
 
 @app.get("/playground", include_in_schema=False)

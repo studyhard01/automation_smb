@@ -17,7 +17,7 @@
 | MinIO 보기 | 완료 | Preview/Canonical read-only, Object URI 미노출 |
 | Neo4j 버전 관계 | 완료 | 각 검색 결과의 버전 확인 버튼에서 즉시 조회 |
 | 저장소 상태 | 완료 | PostgreSQL·MinIO·Neo4j 연결/degraded 상태 표시 |
-| 파일 첨부 | 완료 | 설정된 SMB share 하위 상대 경로에 크기·확장자 제한, 비덮어쓰기 저장 |
+| 파일 첨부 | 완료 | `[업로드] 문서명_YYYYMMDD_v1.0.확장자`로 SMB 비덮어쓰기 저장 후 대화 참고 파일 자동 추가, 인덱스 대기 없는 즉시 근거 추출 |
 | 환경 설정 | 완료 | 왼쪽 하단 설정에서 업로드 상대 경로와 저장소·로컬 LLM 상태 관리, 비밀·내부 주소 미노출 |
 | Docker 패키징 | 완료 | Vue/FastAPI 단일 non-root image, Compose runtime env·healthcheck·LAN port |
 | LAN 접속 | 부분 완료 | host LAN 주소 HTTP 200 확인, 다른 물리 PC와 Windows 방화벽 규칙은 관리자 확인 필요 |
@@ -37,7 +37,7 @@
 - `playground/document_chat.py`: 근거 검색과 로컬 LLM 합성
 - `playground/document_models.py`: 채팅 API 계약
 - `playground/upload_api.py`: 공개 설정 GET/PATCH와 multipart 파일 첨부 API
-- `playground/upload_service.py`: runtime 상대 경로 저장, SMB 제한 쓰기와 비덮어쓰기
+- `playground/upload_service.py`: runtime 상대 경로·업로드 UUID registry, SMB 제한 쓰기/읽기와 즉시 근거 추출
 - `playground/upload_models.py`: 비밀 없는 설정·첨부 응답 계약
 
 ## 현재 API
@@ -68,10 +68,10 @@
 
 ## 최근 검증
 
-- Backend 활성 Ruff·pytest: 통과, Docker·업로드 계약을 포함해 총 52개 테스트 통과
+- Backend 활성 Ruff·pytest: 통과, Docker·업로드 저장명·즉시 대화 계약을 포함해 총 56개 테스트 통과
 - Backend DB 수직 흐름 집중 테스트: 17개 통과
 - Backend 첨부·Docker·API 집중 테스트: 21개 통과
-- Frontend 테스트: 설정·첨부·LAN HTTP UUID fallback 회귀 테스트를 포함해 23개 통과
+- Frontend 테스트: 업로드 자동 선택·Enter/Shift+Enter·근거 기본 접힘을 포함해 25개 통과
 - Frontend typecheck/build: 통과
 - production bundle: `backend/src/smb_finder/web/` 갱신
 - Figma 기준 브라우저 확인: 1440×960에서 헤더 71px, 본문 889px, 3열 288/816/336px 일치
@@ -94,12 +94,13 @@
 - Docker 브라우저: 검색→선택→파일별 버전 확인→중앙 채팅 통과, console error 0건
 - LAN HTTP 호환성: secure context 밖에서 `crypto.randomUUID`가 없는 브라우저도 UI ID fallback으로 검색·선택 통과
 - LAN host 주소 smoke: HTTP 200 확인. 별도 물리 PC 접속과 방화벽 규칙 적용은 미검증
-- 설정·첨부 API: traversal 422, 금지 확장자 415, 비덮어쓰기·실제 byte 크기·명시적 활성화 단위 테스트 통과
+- 설정·첨부 API: traversal 422, 금지 확장자 415, 비덮어쓰기·실제 byte 크기·명시적 활성화·즉시 근거 추출 단위 테스트 통과
+- 업로드 저장명: 한국 시간 기준 `[업로드] 문서명_YYYYMMDD_v1.0.확장자`, 기존 형식 이름의 접두사·버전 중복 방지와 확장자 보존 통과
 - Docker 공개 설정: 업로드 enabled/configured, 상대 경로는 container 재시작 뒤 유지, host·username property 미노출
 - SMB 연결: 자격증명·경로를 출력하지 않는 read-only 확인에서 설정된 대상 폴더 존재 확인
-- 최종 브라우저: 검색 결과 3건, 선택·해제 feedback 불변, 제거 대상 상태 문구 0건, 파일 첨부·설정 버튼 활성,
-  연결 상태 4개 표시
-- 실제 SMB 쓰기: 공유폴더에 테스트 파일을 남기지 않기 위해 미실행. 사용자가 선택한 파일로 화면에서 실행 가능
+- 최종 브라우저: 합성 파일 첨부 직후 대화 참고 파일 1개 자동 추가, Enter 전송, Shift+Enter 줄바꿈, 근거 기본 닫힘과
+  펼치기/접기 동작 확인
+- 실제 SMB 수직 흐름: 승인된 합성 파일로 업로드 → `source=upload` 참조 → 원본 근거 1건 → grounded 답변 통과
 
 현재 Playground는 Figma 초안의 정보 구조를 기준으로 자연어 DB 검색 → 파일 첨부 → 후보 선택 → 대화 참고 파일 → 하단
 설정 순서로 정리했다. 파일 버전 확인은 오른쪽 공통 기능이 아니라 각 검색 후보의 직접 동작이며, 오른쪽 실행 기능은 문서

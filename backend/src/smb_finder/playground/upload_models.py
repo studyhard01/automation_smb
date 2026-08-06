@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -37,6 +39,22 @@ class UploadSettingsPatch(BaseModel):
     relative_directory: str = Field(min_length=1, max_length=240)
 
 
+class UploadedFileSelection(BaseModel):
+    """업로드 직후 대화 참고 파일에 넣을 수 있는 공개 식별자."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["upload"] = "upload"
+    doc_id: UUID
+    revision_id: UUID
+    file_name: str
+    title: str
+    extension: str = ""
+    size_bytes: int = Field(ge=1)
+    score: float = 1.0
+    match_source: Literal["content"] = "content"
+
+
 class FileUploadResponse(BaseModel):
     """SMB 업로드 결과. 실제 경로는 노출하지 않는다."""
 
@@ -47,3 +65,5 @@ class FileUploadResponse(BaseModel):
     uploaded_at: datetime
     destination_label: str
     indexed: bool = False
+    conversation_ready: bool = False
+    selected_file: UploadedFileSelection | None = None

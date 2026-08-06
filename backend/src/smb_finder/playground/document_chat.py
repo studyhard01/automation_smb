@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import httpx
 
 from smb_finder.config import Settings
-from smb_finder.models import ArtifactLink
+from smb_finder.models import ArtifactLink, RetrievalMetadata
 
 from .document_models import (
     ChatRequest,
@@ -73,6 +73,7 @@ class DocumentChatService:
         *,
         request_id: str = "",
         scoped_retriever: Any | None = None,
+        upload_manager: Any | None = None,
     ) -> ChatResponse:
         """선택 UUID scope를 검색하고 근거가 있을 때만 답변을 생성한다."""
 
@@ -92,7 +93,9 @@ class DocumentChatService:
                 "selected_file_required",
                 "왼쪽 파일 찾기에서 문서를 먼저 선택해 주세요.",
             )
-        if retriever is None:
+        database_files = [item for item in request.selected_files if item.source == "llmops"]
+        uploaded_files = [item for item in request.selected_files if item.source == "upload"]
+        if database_files and retriever is None:
             return self._error(
                 request_id,
                 session_id,
@@ -101,11 +104,30 @@ class DocumentChatService:
                 "llmops_retrieval_not_configured",
                 "선택 문서 검색기가 구성되지 않았습니다.",
             )
+        if uploaded_files and upload_manager is None:
+            return self._error(
+                request_id,
+                session_id,
+                model,
+                started,
+                "upload_context_unavailable",
+                "첨부 파일 대화 기능이 구성되지 않았습니다.",
+            )
 
-        selections = [(str(item.doc_id), str(item.revision_id)) for item in request.selected_files]
-        result = retriever.retrieve(request.message, selections)
-        citations = result.citations
-        retrieval = result.metadata
+        results: list[tuple[str, Any]] = []
+        if database_files:
+            selections = [(str(item.doc_id), str(item.revision_id)) for item in database_files]
+            results.append(("database", retriever.retrieve(request.message, selections)))
+        if uploaded_files:
+            upload_selections = [(item.doc_id, item.revision_id) for item in uploaded_files]
+            results.append(("upload", upload_manager.retrieve(request.message, upload_selections)))
+
+        citations, retrieval = self._merge_retrieval(results)
+        database_scopes = [
+            result.metadata.scope
+            for source, result in results
+            if source == "database"
+        ]
         artifacts = [
             ArtifactLink(
                 doc_id=scope.doc_id,
@@ -114,7 +136,8 @@ class DocumentChatService:
                 canonical_url=f"/api/playground/files/{scope.doc_id}/revisions/{scope.revision_id}/artifacts/canonical",
                 graph_url=f"/api/playground/files/{scope.doc_id}/graph",
             )
-            for scope in retrieval.scope
+            for scopes in database_scopes
+            for scope in scopes
         ]
         trace = ToolCallTrace(elapsed_ms=retrieval.elapsed_ms, result_count=retrieval.result_count)
         grounding = RagGroundingMetadata(
@@ -265,6 +288,54 @@ class DocumentChatService:
                 total_tokens=prompt_tokens + completion_tokens,
             ),
         )
+
+    def _merge_retrieval(self, results: list[tuple[str, Any]]) -> tuple[list[Any], RetrievalMetadata]:
+        """DB와 즉시 첨부 근거를 한쪽이 독점하지 않도록 교차 병합한다."""
+
+        citations: list[Any] = []
+        max_length = max((len(result.citations) for _, result in results), default=0)
+        for offset in range(max_length):
+            for _, result in results:
+                if offset < len(result.citations):
+                    citations.append(result.citations[offset])
+                if len(citations) >= self._settings.llmops_retrieval_top_k:
+                    break
+            if len(citations) >= self._settings.llmops_retrieval_top_k:
+                break
+        citations = [citation.model_copy(update={"index": index}) for index, citation in enumerate(citations, start=1)]
+
+        scopes = []
+        seen_scopes: set[tuple[Any, Any]] = set()
+        timings: dict[str, float] = {}
+        degraded: list[str] = []
+        candidate_count = 0
+        elapsed_ms = 0.0
+        for source, result in results:
+            metadata = result.metadata
+            candidate_count += metadata.candidate_count
+            elapsed_ms += metadata.elapsed_ms
+            degraded.extend(metadata.degraded_dependencies)
+            timings.update({f"{source}_{key}": value for key, value in metadata.timings_ms.items()})
+            for scope in metadata.scope:
+                key = (scope.doc_id, scope.revision_id)
+                if key not in seen_scopes:
+                    seen_scopes.add(key)
+                    scopes.append(scope)
+
+        elapsed_ms = round(elapsed_ms, 1)
+        retrieval = RetrievalMetadata(
+            trace_id=uuid.uuid4(),
+            scope=scopes,
+            result_count=len(citations),
+            candidate_count=candidate_count,
+            grounded=bool(citations),
+            decision="answerable" if citations else "insufficient_evidence",
+            degraded_dependencies=list(dict.fromkeys(degraded)),
+            timings_ms=timings,
+            elapsed_ms=elapsed_ms,
+            over_budget=elapsed_ms > self._settings.playground_agent_budget_ms,
+        )
+        return citations, retrieval
 
     def _chat_json(self, root_url: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Ollama native API 응답을 JSON 객체로 반환한다."""

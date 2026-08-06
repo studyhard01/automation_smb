@@ -72,4 +72,78 @@ describe("ChatWorkspace", () => {
     await wrapper.get('[aria-label="synthetic_wbs.xlsx 버전 확인"]').trigger("click");
     expect(wrapper.emitted("inspectVersions")?.[0]).toEqual([selectedFile]);
   });
+
+  it("Enter는 전송하고 Shift+Enter는 줄바꿈 입력을 유지한다", async () => {
+    const wrapper = mount(ChatWorkspace, {
+      props: {
+        definition,
+        messages: [],
+        selectedFiles: [selectedFile],
+        pending: false,
+        conversationStatus: "ready",
+      },
+    });
+    const textarea = wrapper.get("textarea");
+    await textarea.setValue("첨부 문서 질문");
+    await textarea.trigger("keydown", { key: "Enter", shiftKey: true });
+    expect(wrapper.emitted("send")).toBeUndefined();
+
+    await textarea.trigger("keydown", { key: "Enter", shiftKey: false });
+    expect(wrapper.emitted("send")?.[0]).toEqual(["첨부 문서 질문"]);
+  });
+
+  it("답변 근거는 기본으로 닫힌 details 패널에 표시한다", () => {
+    const wrapper = mount(ChatWorkspace, {
+      props: {
+        definition,
+        messages: [{
+          id: "grounded-answer",
+          role: "assistant",
+          content: "근거가 있는 답변입니다.",
+          response: {
+            request_id: "request-1",
+            session_id: "session-1",
+            provider_used: "local",
+            model_used: "synthetic-model",
+            assistant_message: "근거가 있는 답변입니다.",
+            tool_calls: [],
+            elapsed_ms: 20,
+            warnings: [],
+            error_code: "",
+            over_budget: false,
+            citations: [{
+              index: 1,
+              doc_id: selectedFile.doc_id,
+              revision_id: selectedFile.revision_id,
+              chunk_id: "55555555-5555-5555-5555-555555555555",
+              title: "Synthetic WBS",
+              section_path: ["Sheet1"],
+              location: {},
+              excerpt: "합성 근거 본문",
+              scores: { rrf: 0.1 },
+            }],
+            retrieval: {
+              trace_id: "66666666-6666-6666-6666-666666666666",
+              scope: [{ doc_id: selectedFile.doc_id, revision_id: selectedFile.revision_id }],
+              candidate_count: 1,
+              result_count: 1,
+              grounded: true,
+              decision: "answerable",
+              degraded_dependencies: [],
+              timings_ms: {},
+              elapsed_ms: 3,
+              over_budget: false,
+            },
+            artifacts: [],
+          },
+        }],
+        selectedFiles: [selectedFile],
+        pending: false,
+        conversationStatus: "success",
+      },
+    });
+    const details = wrapper.get("details.citation-panel");
+    expect(details.attributes("open")).toBeUndefined();
+    expect(details.get("summary").text()).toContain("답변 근거");
+  });
 });

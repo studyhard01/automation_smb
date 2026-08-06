@@ -75,11 +75,23 @@ const settingsResponse: PlaygroundSettingsResponse = {
 };
 
 const uploadResponse: FileUploadResponse = {
-  file_name: "synthetic-note.md",
+  file_name: "[업로드] synthetic-note_20260805_v1.0.md",
   size_bytes: 9,
   uploaded_at: "2026-08-05T00:00:00Z",
   destination_label: "공유폴더 업로드 영역",
   indexed: false,
+  conversation_ready: true,
+  selected_file: {
+    source: "upload",
+    doc_id: "33333333-3333-3333-3333-333333333333",
+    revision_id: "44444444-4444-4444-4444-444444444444",
+    file_name: "[업로드] synthetic-note_20260805_v1.0.md",
+    title: "synthetic-note",
+    extension: ".md",
+    size_bytes: 9,
+    score: 1,
+    match_source: "content",
+  },
 };
 
 const chatResponse: ChatResponse = {
@@ -181,7 +193,7 @@ describe("App DB document flow", () => {
     expect(sidebar.props("searchFeedback")).toBe(searchFeedback);
   });
 
-  it("검증된 파일을 업로드하고 indexed=false 완료 상태를 안내한다", async () => {
+  it("검증된 파일을 업로드하면 대화 참고 파일에 즉시 추가한다", async () => {
     const wrapper = mount(App);
     await flushPromises();
     const file = new File(["synthetic"], "synthetic-note.md", { type: "text/markdown" });
@@ -191,7 +203,14 @@ describe("App DB document flow", () => {
 
     expect(playgroundApi.uploadFile).toHaveBeenCalledWith(file);
     expect(wrapper.findComponent(FileSidebar).props("uploadStatus")).toBe("success");
-    expect(wrapper.findComponent(FileSidebar).props("uploadFeedback")).toContain("검색 인덱스에는 반영되지 않았습니다");
+    expect(wrapper.findComponent(FileSidebar).props("uploadFeedback")).toContain("대화 참고 파일에 추가했습니다");
+    expect(wrapper.findComponent(FileSidebar).props("selectedFiles")).toEqual([uploadResponse.selected_file]);
+
+    await wrapper.findComponent(ChatWorkspace).vm.$emit("send", "첨부 문서를 요약해 줘");
+    await flushPromises();
+    expect(playgroundApi.sendChat).toHaveBeenLastCalledWith(expect.objectContaining({
+      selected_files: [expect.objectContaining({ source: "upload" })],
+    }));
   });
 
   it("설정 대화상자에서 상대 경로만 PATCH하고 전체 설정 응답을 반영한다", async () => {

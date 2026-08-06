@@ -29,6 +29,7 @@ from smb_finder.models import (
 
 from .document_chat import DocumentChatService
 from .document_models import ChatRequest, ChatResponse
+from .upload_service import UploadError
 
 _logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class DocumentRuntime:
     scoped_retriever: Any | None = None
     artifact_reader: Any | None = None
     graph_reader: Any | None = None
+    upload_manager: Any | None = None
 
 
 def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> APIRouter:
@@ -173,7 +175,11 @@ def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> API
     )
     async def run_chat(request: ChatRequest) -> ChatResponse:
         runtime = runtime_getter()
-        selections = [(str(item.doc_id), str(item.revision_id)) for item in request.selected_files]
+        selections = [
+            (str(item.doc_id), str(item.revision_id))
+            for item in request.selected_files
+            if item.source == "llmops"
+        ]
         if selections:
             if runtime.file_searcher is None:
                 raise HTTPException(
@@ -190,6 +196,24 @@ def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> API
                     detail={"code": "selected_file_stale", "message": "선택한 파일의 활성 버전이 변경되었습니다. 다시 검색해 주세요."},
                 )
 
+        upload_selections = [
+            (item.doc_id, item.revision_id)
+            for item in request.selected_files
+            if item.source == "upload"
+        ]
+        if upload_selections:
+            if runtime.upload_manager is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "upload_context_unavailable", "message": "첨부 파일을 확인할 수 없습니다."},
+                )
+            valid_uploads = await run_in_threadpool(runtime.upload_manager.validate_selections, upload_selections)
+            if not valid_uploads:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "uploaded_file_stale", "message": "첨부 파일 참조가 만료됐습니다. 다시 첨부해 주세요."},
+                )
+
         request_id = str(uuid.uuid4())
         try:
             response = await run_in_threadpool(
@@ -197,11 +221,17 @@ def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> API
                 request,
                 runtime.scoped_retriever,
                 request_id=request_id,
+                upload_manager=runtime.upload_manager,
             )
         except LlmopsSearchError as exc:
             raise HTTPException(
                 status_code=503,
                 detail={"code": exc.code, "message": exc.message, "elapsed_ms": exc.elapsed_ms},
+            ) from exc
+        except UploadError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": exc.message},
             ) from exc
         log = _logger.warning if response.over_budget else _logger.info
         log(

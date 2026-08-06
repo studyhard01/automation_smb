@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     nas_pw: str = ""
     smb_upload_default_relative_directory: str = ""
     smb_upload_runtime_settings_path: str = ".runtime/playground_settings.json"
+    smb_upload_registry_path: str = ".runtime/upload_registry.json"
     smb_upload_max_size_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     smb_upload_allowed_extensions: str = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv"
     smb_upload_timeout_ms: int = Field(default=15_000, ge=1000, le=120_000)

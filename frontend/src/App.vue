@@ -119,7 +119,7 @@ function fileKey(file: DocumentSearchHit): string {
 
 function selectedFilePayload(file: DocumentSearchHit): SelectedFilePayload {
   return {
-    source: "llmops",
+    source: file.source,
     file_name: file.file_name,
     title: file.title || file.file_name,
     doc_id: file.doc_id,
@@ -211,10 +211,15 @@ async function uploadFile(file: File): Promise<void> {
   uploadFeedback.value = "파일을 공유폴더에 업로드하고 있습니다.";
   try {
     const response = await playgroundApi.uploadFile(file);
+    if (response.selected_file) {
+      const uploadedFile = response.selected_file;
+      const withoutDuplicate = selectedFiles.value.filter((item) => fileKey(item) !== fileKey(uploadedFile));
+      selectedFiles.value = [...withoutDuplicate.slice(-4), uploadedFile];
+    }
     uploadStatus.value = "success";
-    uploadFeedback.value = response.indexed
-      ? "업로드와 검색 반영이 완료됐습니다."
-      : "업로드 완료 · 아직 검색 인덱스에는 반영되지 않았습니다.";
+    uploadFeedback.value = response.selected_file
+      ? "업로드 완료 · 대화 참고 파일에 추가했습니다."
+      : "업로드는 완료됐지만 대화 참고 파일에 추가하지 못했습니다.";
   } catch (error) {
     uploadStatus.value = "error";
     uploadFeedback.value = `파일 첨부 실패: ${userFacingApiError(error, "upload")}`;

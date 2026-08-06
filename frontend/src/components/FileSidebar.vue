@@ -179,9 +179,14 @@ function selectUpload(event: Event): void {
           검색 결과에서 파일을 선택해 주세요.
         </div>
         <article v-for="file in selectedFiles" :key="key(file)" class="active-attachment-chip selected-document">
-          <button type="button" :aria-label="`${file.file_name} 미리보기`" @click="emit('previewFile', file)">
+          <button
+            type="button"
+            :disabled="file.source === 'upload'"
+            :aria-label="file.source === 'upload' ? `${file.file_name} 첨부 파일` : `${file.file_name} 미리보기`"
+            @click="emit('previewFile', file)"
+          >
             <strong>{{ file.file_name }}</strong>
-            <small>{{ file.title || "선택 문서" }}</small>
+            <small>{{ file.source === "upload" ? "방금 첨부 · 대화에 반영" : file.title || "선택 문서" }}</small>
           </button>
           <button type="button" :aria-label="`${file.file_name} 선택 해제`" @click="emit('removeFile', file)">×</button>
         </article>

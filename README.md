@@ -15,7 +15,7 @@ LLMOps 데이터셋을 읽기 전용으로 조회하고, 명시적으로 허용�
 - 답변: 온프레미스 Ollama만 사용, Citation과 검색 지연 반환
 - 문서 보기: MinIO Preview/Canonical read-only 조회
 - 버전 관계: Neo4j Document/Revision 관계 read-only 조회
-- 파일 첨부: 설정된 SMB share 내부 상대 경로에만 저장, 크기·확장자 제한과 기존 파일 비덮어쓰기 적용
+- 파일 첨부: `[업로드] 문서명_YYYYMMDD_v1.0.확장자` 저장 규칙으로 SMB share 내부 상대 경로에 비덮어쓰기 저장하고, 업로드 직후 대화 참고 파일에 자동 추가해 원본을 즉시 근거로 사용
 - 환경 설정: 왼쪽 하단 설정에서 업로드 상대 경로와 연결 상태만 관리하며 주소·계정·비밀번호는 노출하지 않음
 
 현재 제품 경계에서 제외한 항목은 Langflow, MCP, LangGraph Studio, 로컬 SQLite/SMB 직접 인덱싱, 범용 Tool/Skill
@@ -67,7 +67,8 @@ automation_smb/
 | Vue 화면 | `GET /playground` |
 
 파일 선택은 화면 상태만 믿지 않습니다. 채팅 요청 직전에 Backend가 선택한 UUID pair가 현재 활성 Revision인지 다시
-검증하며, 변경됐으면 `409 selected_file_stale`을 반환합니다.
+검증하며, 변경됐으면 `409 selected_file_stale`을 반환합니다. 업로드 파일도 서버 runtime registry의 UUID pair를 다시
+검증하며, 클라이언트가 보낸 파일명이나 경로를 원본 조회 경로로 신뢰하지 않습니다.
 
 ## 설치와 실행
 

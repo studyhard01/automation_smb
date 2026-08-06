@@ -244,3 +244,40 @@ def test_grounded_response_returns_citations_retrieval_and_artifact_links(monkey
     assert response.artifacts[0].canonical_url.endswith("/artifacts/canonical")
     assert response.artifacts[0].graph_url == f"/api/playground/files/{doc_id}/graph"
     assert all("s3://" not in artifact.model_dump_json() for artifact in response.artifacts)
+
+
+class FakeUploadManager:
+    def __init__(self, result: ScopedRetrievalResult) -> None:
+        self.result = result
+        self.calls: list[tuple[str, list[tuple[UUID, UUID]]]] = []
+
+    def retrieve(self, query: str, selections: list[tuple[UUID, UUID]]) -> ScopedRetrievalResult:
+        self.calls.append((query, selections))
+        return self.result
+
+
+def test_uploaded_file_can_answer_without_database_retriever(monkeypatch, tmp_path):
+    doc_id = uuid4()
+    revision_id = uuid4()
+    upload_manager = FakeUploadManager(_retrieval_result(doc_id, revision_id, citations=True))
+    request = ChatRequest(
+        message="Summarize the uploaded synthetic document.",
+        selected_files=[
+            SelectedFileContext(
+                source="upload",
+                doc_id=doc_id,
+                revision_id=revision_id,
+                file_name="synthetic-note.md",
+                title="Synthetic note",
+            )
+        ],
+    )
+    agent = DocumentChatService(_settings(tmp_path))
+    monkeypatch.setattr(agent, "_chat_json", lambda *_args, **_kwargs: {"answer": "Uploaded evidence [1]."})
+
+    response = agent.run(request, None, upload_manager=upload_manager)
+
+    assert response.assistant_message == "Uploaded evidence [1]."
+    assert response.citations[0].doc_id == doc_id
+    assert response.artifacts == []
+    assert upload_manager.calls == [(request.message, [(doc_id, revision_id)])]

@@ -95,8 +95,10 @@ Invoke-RestMethod http://127.0.0.1:8011/api/playground/settings
 ```
 
 응답에는 내부 주소와 자격증명이 없으며 `upload.enabled`와 `upload.configured`로 사용 가능 여부만 확인한다. 실제 합성 파일
-첨부 smoke는 설정 화면의 `파일 첨부` 버튼으로 수행한다. 성공해도 `indexed=false`이므로 별도 ingestion 전에는 검색 결과에
-표시되지 않는다. 동일 이름 파일은 덮어쓰지 않고 거부한다.
+첨부 smoke는 설정 화면의 `파일 첨부` 버튼으로 수행한다. 성공한 파일은 `대화 참고 파일`에 즉시 추가되어 중앙 채팅에서
+SMB 원본 근거로 사용된다. 물리 저장명은 한국 시간 기준 `[업로드] 문서명_YYYYMMDD_v1.0.확장자`로 생성한다.
+`indexed=false`이므로 별도 ingestion 전에는 전역 검색 결과에 표시되지 않으며, 같은 날짜·문서명의 생성 파일은 덮어쓰지 않고
+409로 거부한다. 업로드 UUID registry와 비밀이 아닌 상대 설정은 host의 `.runtime/` volume에 유지한다.
 
 ## 다른 로컬 컴퓨터에서 접속
 

@@ -42,9 +42,17 @@ function submit(): void {
   }
 }
 
+function handleComposerKeydown(event: KeyboardEvent): void {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  submit();
+}
+
 onUpdated(async () => {
   await nextTick();
-  stream.value?.scrollTo({ top: stream.value.scrollHeight, behavior: "smooth" });
+  if (typeof stream.value?.scrollTo === "function") {
+    stream.value.scrollTo({ top: stream.value.scrollHeight, behavior: "smooth" });
+  }
 });
 </script>
 
@@ -63,7 +71,14 @@ onUpdated(async () => {
 
     <div v-if="selectedFiles.length" class="conversation-file-context" aria-label="현재 선택 문서">
       <strong>대화 범위</strong>
-      <button v-for="file in selectedFiles" :key="fileKey(file)" type="button" @click="emit('previewFile', file)">
+      <button
+        v-for="file in selectedFiles"
+        :key="fileKey(file)"
+        type="button"
+        :disabled="file.source === 'upload'"
+        :title="file.source === 'upload' ? '방금 첨부한 파일은 대화 근거로 바로 사용됩니다.' : '미리보기'"
+        @click="emit('previewFile', file)"
+      >
         {{ file.file_name }}
       </button>
     </div>
@@ -116,11 +131,14 @@ onUpdated(async () => {
         </section>
 
         <template v-if="item.response">
-          <section v-if="item.response.citations.length" class="citation-panel">
-            <header>
-              <strong>답변 근거</strong>
-              <span>{{ item.response.citations.length }}개 · 검색 {{ item.response.retrieval?.elapsed_ms.toFixed(1) }}ms</span>
-            </header>
+          <details v-if="item.response.citations.length" class="citation-panel">
+            <summary>
+              <span>
+                <strong>답변 근거</strong>
+                <small>{{ item.response.citations.length }}개 · 검색 {{ item.response.retrieval?.elapsed_ms.toFixed(1) }}ms</small>
+              </span>
+              <span class="citation-toggle-label">펼쳐보기</span>
+            </summary>
             <ol>
               <li v-for="citation in item.response.citations" :key="citation.chunk_id">
                 <strong>[{{ citation.index }}] {{ citation.title }}</strong>
@@ -128,7 +146,7 @@ onUpdated(async () => {
                 <p>{{ citation.excerpt }}</p>
               </li>
             </ol>
-          </section>
+          </details>
           <footer class="message-meta">
             <span>{{ item.response.model_used || "local LLM" }}</span>
             <span>{{ item.response.elapsed_ms.toFixed(1) }}ms</span>
@@ -151,11 +169,11 @@ onUpdated(async () => {
           rows="2"
           :placeholder="definition.placeholder"
           :disabled="pending"
-          @keydown.ctrl.enter.prevent="submit"
+          @keydown="handleComposerKeydown"
         ></textarea>
         <button type="submit" :disabled="pending || !selectedFiles.length">{{ pending ? "생성 중" : "전송" }}</button>
       </div>
-      <p class="composer-note">Ctrl + Enter로 전송 · 선택한 DB 문서 밖의 내용은 답변 근거로 사용하지 않습니다.</p>
+      <p class="composer-note">Enter로 전송 · Shift + Enter로 줄바꿈 · 선택한 문서만 답변 근거로 사용합니다.</p>
     </form>
   </section>
 </template>

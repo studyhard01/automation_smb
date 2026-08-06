@@ -16,11 +16,23 @@ const settingsResponse: PlaygroundSettingsResponse = {
 };
 
 const uploadResponse: FileUploadResponse = {
-  file_name: "synthetic.md",
+  file_name: "[업로드] synthetic_20260805_v1.0.md",
   size_bytes: 9,
   uploaded_at: "2026-08-05T00:00:00Z",
   destination_label: "공유폴더 업로드 영역",
   indexed: false,
+  conversation_ready: true,
+  selected_file: {
+    source: "upload",
+    doc_id: "33333333-3333-3333-3333-333333333333",
+    revision_id: "44444444-4444-4444-4444-444444444444",
+    file_name: "[업로드] synthetic-note_20260805_v1.0.md",
+    title: "synthetic-note",
+    extension: ".md",
+    size_bytes: 9,
+    score: 1,
+    match_source: "content",
+  },
 };
 
 function response(body: unknown): Response {

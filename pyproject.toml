@@ -14,6 +14,7 @@ dependencies = [
     "neo4j>=5.26,<7",
     "python-multipart>=0.0.20,<1",
     "smbprotocol>=1.15,<2",
+    "pypdf>=6.0,<7",
 ]
 
 [project.optional-dependencies]

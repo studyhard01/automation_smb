@@ -1,4 +1,4 @@
-export type FileSource = "llmops";
+export type FileSource = "llmops" | "upload";
 export type SearchStore = "postgresql" | "minio" | "neo4j";
 export type FunctionId = "summary" | "report";
 export type ConversationStatus = "ready" | "loading" | "success" | "error";
@@ -107,7 +107,9 @@ export interface FileUploadResponse {
   size_bytes: number;
   uploaded_at: string;
   destination_label: string;
-  indexed: false;
+  indexed: boolean;
+  conversation_ready: boolean;
+  selected_file: DocumentSearchHit | null;
 }
 
 export type UploadStatus = "idle" | "pending" | "success" | "error";

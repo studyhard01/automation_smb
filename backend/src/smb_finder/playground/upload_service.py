@@ -8,19 +8,29 @@ import re
 import threading
 import time
 import uuid
-from datetime import UTC, datetime
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, BinaryIO
+from uuid import UUID
 
 import smbclient
 
 from smb_finder.config import Settings
+from smb_finder.extract import SUPPORTED_EXTENSIONS, extract_text
+from smb_finder.llmops_retrieval import ScopedRetrievalResult
+from smb_finder.models import DocumentCitation, RetrievalMetadata, RetrievalScope, RetrievalScores
 
-from .upload_models import FileUploadResponse, PlaygroundSettingsResponse, UploadSettingsView
+from .upload_models import FileUploadResponse, PlaygroundSettingsResponse, UploadedFileSelection, UploadSettingsView
 
 _logger = logging.getLogger(__name__)
 _DESTINATION_LABEL = "관리 공유폴더"
 _CHUNK_SIZE = 64 * 1024
+_UPLOAD_PREFIX = "[업로드] "
+_INITIAL_UPLOAD_VERSION = "v1.0"
+_KST = timezone(timedelta(hours=9))
+_VERSIONED_UPLOAD_SUFFIX = re.compile(r"_\d{8}_v\d+(?:\.\d+)+$", re.IGNORECASE)
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _WINDOWS_RESERVED_NAMES = {
     "CON",
@@ -30,6 +40,18 @@ _WINDOWS_RESERVED_NAMES = {
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 }
+
+
+@dataclass(frozen=True)
+class UploadedFileRecord:
+    """클라이언트 경로를 신뢰하지 않고 업로드 원본을 다시 찾기 위한 런타임 레코드."""
+
+    doc_id: UUID
+    revision_id: UUID
+    file_name: str
+    relative_directory: str
+    size_bytes: int
+    uploaded_at: datetime
 
 
 class UploadError(RuntimeError):
@@ -79,6 +101,23 @@ def sanitize_filename(value: str) -> str:
     if stem.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES:
         raise UploadError("invalid_file_name", "올바른 파일명이 필요합니다.", 400)
     return value
+
+
+def build_upload_filename(original_name: str, uploaded_at: datetime) -> str:
+    """원본 확장자를 보존해 `[업로드] 문서명_YYYYMMDD_v1.0` 규칙의 저장명을 만든다."""
+
+    safe_name = sanitize_filename(original_name)
+    suffix = Path(safe_name).suffix
+    document_name = safe_name[: -len(suffix)] if suffix else safe_name
+    if document_name.startswith(_UPLOAD_PREFIX):
+        document_name = document_name[len(_UPLOAD_PREFIX) :]
+    document_name = _VERSIONED_UPLOAD_SUFFIX.sub("", document_name).strip()
+    if not document_name:
+        raise UploadError("invalid_file_name", "저장할 문서 이름이 필요합니다.", 400)
+
+    normalized_time = uploaded_at if uploaded_at.tzinfo is not None else uploaded_at.replace(tzinfo=UTC)
+    upload_date = normalized_time.astimezone(_KST).strftime("%Y%m%d")
+    return sanitize_filename(f"{_UPLOAD_PREFIX}{document_name}_{upload_date}_{_INITIAL_UPLOAD_VERSION}{suffix}")
 
 
 class RuntimeUploadSettingsStore:
@@ -134,12 +173,108 @@ class RuntimeUploadSettingsStore:
         return normalized
 
 
+class UploadRegistry:
+    """업로드 UUID와 SMB 상대 위치를 비커밋 runtime JSON에 원자적으로 보관한다."""
+
+    def __init__(self, path: Path, *, max_records: int = 500) -> None:
+        self._path = path
+        self._max_records = max_records
+        self._lock = threading.RLock()
+
+    def register(
+        self,
+        file_name: str,
+        relative_directory: str,
+        size_bytes: int,
+        uploaded_at: datetime,
+    ) -> UploadedFileRecord:
+        """새 업로드에 외부 경로와 무관한 UUID를 발급하고 기록한다."""
+
+        record = UploadedFileRecord(
+            doc_id=uuid.uuid4(),
+            revision_id=uuid.uuid4(),
+            file_name=sanitize_filename(file_name),
+            relative_directory=normalize_relative_directory(relative_directory),
+            size_bytes=size_bytes,
+            uploaded_at=uploaded_at,
+        )
+        with self._lock:
+            records = [*self._load(), record][-self._max_records :]
+            payload = {
+                "version": 1,
+                "uploads": [
+                    {
+                        "doc_id": str(item.doc_id),
+                        "revision_id": str(item.revision_id),
+                        "file_name": item.file_name,
+                        "relative_directory": item.relative_directory,
+                        "size_bytes": item.size_bytes,
+                        "uploaded_at": item.uploaded_at.isoformat(),
+                    }
+                    for item in records
+                ],
+            }
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self._path.with_name(f".{self._path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                temporary.replace(self._path)
+            finally:
+                if temporary.exists():
+                    temporary.unlink()
+        return record
+
+    def find(self, doc_id: UUID, revision_id: UUID) -> UploadedFileRecord | None:
+        """사용자 입력 경로 대신 서버가 발급한 두 UUID가 모두 일치하는 레코드만 반환한다."""
+
+        with self._lock:
+            return next(
+                (
+                    record
+                    for record in self._load()
+                    if record.doc_id == doc_id and record.revision_id == revision_id
+                ),
+                None,
+            )
+
+    def _load(self) -> list[UploadedFileRecord]:
+        try:
+            payload = json.loads(self._path.read_text(encoding="utf-8"))
+            rows = payload.get("uploads", [])
+        except (FileNotFoundError, OSError, json.JSONDecodeError, AttributeError, TypeError):
+            return []
+
+        records: list[UploadedFileRecord] = []
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                records.append(
+                    UploadedFileRecord(
+                        doc_id=UUID(str(row["doc_id"])),
+                        revision_id=UUID(str(row["revision_id"])),
+                        file_name=sanitize_filename(str(row["file_name"])),
+                        relative_directory=normalize_relative_directory(str(row["relative_directory"])),
+                        size_bytes=int(row["size_bytes"]),
+                        uploaded_at=datetime.fromisoformat(str(row["uploaded_at"])),
+                    )
+                )
+            except (KeyError, TypeError, ValueError, UploadError):
+                continue
+        return records
+
+
 class SmbUploadWriter:
     """제한된 동시성과 시간 예산으로 SMB 대상 폴더에 한 파일을 기록한다."""
 
-    def __init__(self, settings: Settings, *, smb_module: Any = smbclient) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        smb_module: Any = smbclient,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._settings = settings
         self._smb = smb_module
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._slots = threading.BoundedSemaphore(settings.smb_upload_max_concurrency)
         self._session_lock = threading.Lock()
         self._connected = False
@@ -179,10 +314,12 @@ class SmbUploadWriter:
             raise UploadError("upload_not_configured", "공유폴더 연결 설정이 필요합니다.", 503)
 
         normalized_directory = normalize_relative_directory(relative_directory)
-        file_name = sanitize_filename(original_name)
-        extension = Path(file_name).suffix.lower()
+        original_file_name = sanitize_filename(original_name)
+        extension = Path(original_file_name).suffix.lower()
         if not extension or extension not in self.allowed_extensions:
             raise UploadError("file_type_not_allowed", "허용되지 않은 파일 형식입니다.", 415)
+        uploaded_at = self._clock()
+        file_name = build_upload_filename(original_file_name, uploaded_at)
         if not self._slots.acquire(blocking=False):
             raise UploadError("upload_busy", "다른 파일을 업로드하고 있습니다. 잠시 후 다시 시도해 주세요.", 429)
 
@@ -227,7 +364,7 @@ class SmbUploadWriter:
             return FileUploadResponse(
                 file_name=file_name,
                 size_bytes=size_bytes,
-                uploaded_at=datetime.now(UTC),
+                uploaded_at=uploaded_at,
                 destination_label=_DESTINATION_LABEL,
                 indexed=False,
             )
@@ -242,6 +379,46 @@ class SmbUploadWriter:
                     self._smb.remove(partial_path)
                 except Exception:  # noqa: BLE001 - 생성한 임시 파일 정리 실패만 기록한다.
                     _logger.warning("SMB 업로드 임시 파일 정리 실패")
+            self._slots.release()
+
+    def read(self, file_name: str, relative_directory: str, *, expected_size: int) -> bytes:
+        """등록된 업로드 원본을 제한된 크기와 시간 안에서 다시 읽는다."""
+
+        normalized_directory = normalize_relative_directory(relative_directory)
+        safe_name = sanitize_filename(file_name)
+        if expected_size < 1 or expected_size > self._settings.smb_upload_max_size_bytes:
+            raise UploadError("uploaded_file_too_large", "첨부 파일 크기를 안전하게 확인할 수 없습니다.", 413)
+        if not self._slots.acquire(blocking=False):
+            raise UploadError("upload_busy", "다른 파일 작업을 처리하고 있습니다. 잠시 후 다시 시도해 주세요.", 429)
+
+        try:
+            self._connect()
+            deadline = time.monotonic() + self._settings.smb_upload_timeout_ms / 1000
+            root = rf"\\{self._settings.effective_smb_upload_host}\{self._settings.effective_smb_upload_share_name}"
+            source_path = str(PureWindowsPath(root, *normalized_directory.split("/"), safe_name))
+            if not self._smb.path.exists(source_path):
+                raise UploadError("uploaded_file_not_found", "첨부한 파일을 공유폴더에서 찾을 수 없습니다.", 404)
+
+            data = bytearray()
+            with self._smb.open_file(source_path, mode="rb") as source:
+                while True:
+                    if time.monotonic() > deadline:
+                        raise UploadError("uploaded_file_read_timeout", "첨부 파일을 읽는 시간이 초과됐습니다.", 504)
+                    chunk = source.read(_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > self._settings.smb_upload_max_size_bytes:
+                        raise UploadError("uploaded_file_too_large", "첨부 파일 크기가 허용 범위를 넘었습니다.", 413)
+            if not data:
+                raise UploadError("uploaded_file_empty", "첨부 파일 내용이 비어 있습니다.", 422)
+            return bytes(data)
+        except UploadError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 내부 SMB 예외를 사용자에게 노출하지 않는다.
+            _logger.warning("SMB 첨부 파일 읽기 실패: error_type=%s", type(exc).__name__)
+            raise UploadError("uploaded_file_read_failed", "첨부 파일을 공유폴더에서 읽지 못했습니다.", 503) from exc
+        finally:
             self._slots.release()
 
     @property
@@ -269,6 +446,7 @@ class UploadManager:
         *,
         store: RuntimeUploadSettingsStore | None = None,
         writer: SmbUploadWriter | None = None,
+        registry: UploadRegistry | None = None,
     ) -> None:
         self.settings = settings
         default_directory = settings.effective_smb_upload_default_relative_directory
@@ -278,6 +456,7 @@ class UploadManager:
             legacy_relative_directory=settings.nas_fold_path,
         )
         self.writer = writer or SmbUploadWriter(settings)
+        self.registry = registry or UploadRegistry(Path(settings.smb_upload_registry_path))
 
     def close(self) -> None:
         """SMB writer를 종료한다."""
@@ -312,4 +491,122 @@ class UploadManager:
         relative_directory = self.store.get_relative_directory()
         if not relative_directory:
             raise UploadError("upload_directory_not_configured", "업로드 폴더를 먼저 설정해 주세요.", 503)
-        return self.writer.upload(source, original_name, relative_directory)
+        response = self.writer.upload(source, original_name, relative_directory)
+        record = self.registry.register(
+            response.file_name,
+            relative_directory,
+            response.size_bytes,
+            response.uploaded_at,
+        )
+        conversation_ready = Path(record.file_name).suffix.lower() in SUPPORTED_EXTENSIONS
+        return response.model_copy(
+            update={
+                "conversation_ready": conversation_ready,
+                "selected_file": UploadedFileSelection(
+                    doc_id=record.doc_id,
+                    revision_id=record.revision_id,
+                    file_name=record.file_name,
+                    title=Path(record.file_name).stem,
+                    extension=Path(record.file_name).suffix.lower(),
+                    size_bytes=record.size_bytes,
+                ),
+            }
+        )
+
+    def validate_selections(self, selections: list[tuple[UUID, UUID]]) -> bool:
+        """업로드 문서 UUID가 모두 서버 레지스트리에 등록돼 있는지 확인한다."""
+
+        return all(self.registry.find(doc_id, revision_id) is not None for doc_id, revision_id in selections)
+
+    def retrieve(self, query: str, selections: list[tuple[UUID, UUID]]) -> ScopedRetrievalResult:
+        """업로드한 SMB 원본을 즉시 추출해 선택 문서 대화용 근거를 만든다."""
+
+        started = time.perf_counter()
+        read_ms = 0.0
+        extract_ms = 0.0
+        candidates: list[tuple[UploadedFileRecord, int, str, float]] = []
+        scopes: list[RetrievalScope] = []
+        degraded: list[str] = []
+        query_tokens = self._query_tokens(query)
+
+        for doc_id, revision_id in selections:
+            record = self.registry.find(doc_id, revision_id)
+            if record is None:
+                raise UploadError("uploaded_file_not_found", "첨부 파일 참조가 만료됐습니다. 다시 첨부해 주세요.", 404)
+            scopes.append(RetrievalScope(doc_id=record.doc_id, revision_id=record.revision_id))
+
+            read_started = time.perf_counter()
+            data = self.writer.read(
+                record.file_name,
+                record.relative_directory,
+                expected_size=record.size_bytes,
+            )
+            read_ms += (time.perf_counter() - read_started) * 1000
+
+            extract_started = time.perf_counter()
+            extracted = extract_text(
+                record.file_name,
+                data,
+                max_chars=max(self.settings.llmops_chunk_max_chars, 200_000),
+            )
+            extract_ms += (time.perf_counter() - extract_started) * 1000
+            if extracted.status != "ok":
+                degraded.append(f"uploaded_file_{extracted.status}")
+                continue
+            for chunk_index, text in enumerate(self._chunks(extracted.text, self.settings.llmops_chunk_max_chars)):
+                folded = text.casefold()
+                matches = sum(folded.count(token) for token in query_tokens)
+                lexical = matches / max(1, len(query_tokens))
+                candidates.append((record, chunk_index, text, lexical))
+
+        ranked = sorted(candidates, key=lambda item: (-item[3], item[1]))
+        if ranked and not any(item[3] > 0 for item in ranked):
+            ranked = sorted(ranked, key=lambda item: item[1])
+        selected = ranked[: self.settings.llmops_retrieval_top_k]
+        citations = [
+            DocumentCitation(
+                index=index,
+                doc_id=record.doc_id,
+                revision_id=record.revision_id,
+                chunk_id=uuid.uuid5(record.revision_id, f"upload-chunk-{chunk_index}"),
+                title=Path(record.file_name).stem,
+                section_path=["첨부 문서"],
+                location={"source": "upload", "chunk": chunk_index + 1},
+                excerpt=text,
+                scores=RetrievalScores(
+                    lexical=round(lexical, 6),
+                    rrf=round(1 / (60 + index), 6),
+                ),
+            )
+            for index, (record, chunk_index, text, lexical) in enumerate(selected, start=1)
+        ]
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        metadata = RetrievalMetadata(
+            trace_id=uuid.uuid4(),
+            scope=scopes,
+            result_count=len(citations),
+            candidate_count=len(candidates),
+            grounded=bool(citations),
+            decision="answerable" if citations else "insufficient_evidence",
+            degraded_dependencies=list(dict.fromkeys(degraded)),
+            timings_ms={
+                "smb_read": round(read_ms, 1),
+                "extract": round(extract_ms, 1),
+            },
+            elapsed_ms=elapsed_ms,
+            over_budget=elapsed_ms > self.settings.playground_agent_budget_ms,
+        )
+        return ScopedRetrievalResult(citations=citations, metadata=metadata)
+
+    @staticmethod
+    def _query_tokens(query: str) -> tuple[str, ...]:
+        """즉시 근거 정렬에 쓸 중복 없는 한국어·영문 토큰을 만든다."""
+
+        return tuple(dict.fromkeys(token for token in re.findall(r"[0-9A-Za-z가-힣_]+", query.casefold()) if len(token) > 1))
+
+    @staticmethod
+    def _chunks(text: str, max_chars: int) -> list[str]:
+        """본문을 LLM 근거 상한에 맞는 고정 크기 조각으로 나눈다."""
+
+        normalized = re.sub(r"\n{3,}", "\n\n", text).strip()
+        return [normalized[offset : offset + max_chars] for offset in range(0, len(normalized), max_chars)]

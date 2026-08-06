@@ -101,6 +101,37 @@ def test_chat_rejects_stale_selected_revision_before_retrieval():
     assert response.json()["detail"]["code"] == "selected_file_stale"
 
 
+class StaleUploadManager:
+    def validate_selections(self, _selections):  # noqa: ANN001
+        return False
+
+
+def test_chat_rejects_unknown_uploaded_file_reference():
+    runtime = DocumentRuntime(settings=_settings(), upload_manager=StaleUploadManager())
+
+    response = _request(
+        _app(runtime),
+        "POST",
+        "/api/playground/chat",
+        json={
+            "message": "Summarize this uploaded synthetic document.",
+            "mode": "document_qa",
+            "selected_files": [
+                {
+                    "source": "upload",
+                    "doc_id": "33333333-3333-3333-3333-333333333333",
+                    "revision_id": "44444444-4444-4444-4444-444444444444",
+                    "file_name": "synthetic-note.md",
+                    "title": "Synthetic note",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "uploaded_file_stale"
+
+
 class StatusAdapter:
     def __init__(self, state: StoreConnectionState) -> None:
         self.state = state
