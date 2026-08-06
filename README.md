@@ -35,6 +35,7 @@ automation_smb/
 │  │  ├─ llmops_retrieval.py         # 선택 Revision Hybrid/RRF 검색
 │  │  ├─ llmops_artifacts.py         # MinIO 문서 보기
 │  │  ├─ llmops_graph.py             # Neo4j 버전 관계
+│  │  ├─ auth/                        # 별도 PostgreSQL 로그인·사용자·서비스 권한
 │  │  ├─ playground/document_*.py    # 선택 문서 채팅 API·서비스·계약
 │  │  └─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
 │  └─ tests/                         # Backend 단위·계약 테스트
@@ -63,8 +64,10 @@ automation_smb/
 | 공개 설정 조회 | `GET /api/playground/settings` |
 | 업로드 상대 경로 변경 | `PATCH /api/playground/settings/upload` |
 | 공유폴더 파일 첨부 | `POST /api/playground/files/upload` |
+| 회원가입 / 로그인 / 현재 사용자 / 로그아웃 | `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout` |
+| 관리자 사용자 목록·권한 변경 | `GET /api/users`, `PATCH /api/users/{user_id}` |
 | 서비스 상태 | `GET /health` |
-| Vue 화면 | `GET /playground` |
+| Vue 화면 | `GET /playground`, `GET /login`, `GET /register`, `GET /user` |
 
 파일 선택은 화면 상태만 믿지 않습니다. 채팅 요청 직전에 Backend가 선택한 UUID pair가 현재 활성 Revision인지 다시
 검증하며, 변경됐으면 `409 selected_file_stale`을 반환합니다.
@@ -128,6 +131,13 @@ npm run dev
 `backend/.venv`와 `frontend/node_modules`는 Git에서 제외된다. Backend 포트를 변경하려면 Frontend 실행 전에
 `$env:VITE_BACKEND_URL = "http://127.0.0.1:<변경한 포트>"`를 설정한다. Frontend `5173`이 이미 사용 중이면 Vite는
 `5174`처럼 다음 사용 가능한 포트로 자동 시작하므로, 터미널에 표시된 `Local` 주소로 접속한다.
+
+인증 저장소는 기존 LLMOps read-only 계정과 분리한다. `.env`의 `AUTH_DB_USER`·`AUTH_DB_PASSWORD`에 `AUTH_DB_SCHEMA`을
+생성하고 쓸 수 있는 별도 계정을 넣으면 Backend 시작 시 `users`, `services`, `user_service_permissions`, `sessions`를
+idempotent하게 만든다. 최초 관리자 생성 시에만 `AUTH_INITIAL_ADMIN_PASSWORD`를 넣고, 생성 확인 뒤 즉시 값을 지운다.
+가입 사용자는 기본적으로 `user`, 서비스 접근 없음이며 관리자가 `/user` 화면에서 권한을 명시적으로 부여한다.
+합성 데이터 전용 로컬 DB의 기존 계정에 인증 schema 쓰기 권한을 따로 확인한 경우에만
+`AUTH_DB_USE_LLMOPS_CREDENTIALS=true`로 명시적 재사용할 수 있으며, 운영에서는 별도 최소 권한 계정을 사용한다.
 
 ### 기존 단일 서비스 로컬 실행
 

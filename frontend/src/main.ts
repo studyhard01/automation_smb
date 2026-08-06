@@ -1,6 +1,6 @@
 import { createApp } from "vue";
 
-import App from "./App.vue";
+import AppRouter from "./AppRouter.vue";
 import "./app.css";
 
-createApp(App).mount("#app");
+createApp(AppRouter).mount("#app");

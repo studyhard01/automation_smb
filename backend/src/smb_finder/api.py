@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -10,6 +11,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .auth import AuthService, AuthSettings, PostgresAuthStore, create_auth_router
+from .auth.security import hash_password
+from .auth.store import AuthStoreError
 from .config import load_settings
 from .llmops_artifacts import LlmopsArtifactReader
 from .llmops_graph import LlmopsGraphReader
@@ -25,6 +29,9 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 _logger = logging.getLogger(__name__)
 _settings = load_settings()
+_auth_settings = AuthSettings()
+_auth_store = PostgresAuthStore(_auth_settings)
+_auth_service = AuthService(_auth_store, session_ttl_seconds=_auth_settings.auth_session_ttl_seconds)
 _state: dict[str, object] = {}
 
 
@@ -44,6 +51,22 @@ async def lifespan(_app: FastAPI):
 
     async with AsyncExitStack() as stack:
         stack.callback(_state.clear)
+        stack.callback(_auth_store.close)
+        if _auth_settings.configured:
+            initial_password_hash = None
+            if _auth_settings.auth_initial_admin_password:
+                initial_password_hash = await asyncio.to_thread(
+                    hash_password,
+                    _auth_settings.auth_initial_admin_password,
+                )
+            try:
+                await asyncio.to_thread(
+                    _auth_store.initialize,
+                    initial_password_hash=initial_password_hash,
+                )
+            except AuthStoreError:
+                # 인증 저장소 장애는 신규 인증 화면만 degraded 처리하고 기존 Playground 기동은 유지한다.
+                pass
         graph_reader = None
         if _settings.llmops_neo4j_configured:
             graph_reader = LlmopsGraphReader(_settings)
@@ -97,11 +120,22 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 app.mount("/playground/assets", StaticFiles(directory=str(_WEB_DIR / "assets")), name="playground-assets")
 app.include_router(create_document_router(_runtime))
 app.include_router(create_upload_router(_settings))
+app.include_router(create_auth_router(_auth_settings, _auth_service))
 
 
 @app.get("/playground", include_in_schema=False)
+@app.get("/playground/", include_in_schema=False)
 async def playground_page() -> FileResponse:
     """Vue production bundle을 반환한다."""
+
+    return FileResponse(_WEB_DIR / "index.html")
+
+
+@app.get("/login", include_in_schema=False)
+@app.get("/register", include_in_schema=False)
+@app.get("/user", include_in_schema=False)
+async def auth_spa_page() -> FileResponse:
+    """Vue SPA의 로그인·회원가입·사용자 관리 route를 반환한다."""
 
     return FileResponse(_WEB_DIR / "index.html")
 
