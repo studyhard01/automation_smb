@@ -2,14 +2,16 @@
 
 이 문서는 현재 기능 검증 범위와 온프레미스 운영 전환 시 지켜야 할 경계를 정의한다. 현재 제품은 기존 데이터셋 구축
 파이프라인을 다시 구현하지 않고, 구축된 DB 저장소를 읽기 전용으로 소비한다. 쓰기는 사용자가 명시적으로 첨부한 파일을
-승인된 SMB share의 제한된 하위 폴더에 저장하는 경로 하나로만 허용한다.
+승인된 SMB share의 제한된 하위 폴더에 저장하는 경로와 별도 PostgreSQL `auth` schema에 계정·세션·권한을 저장하는
+경로로 제한한다.
 
 ## 현재 제품 경계
 
 ```text
 사용자
-  └─ Vue Playground
+  └─ Vue 로그인·회원가입·사용자 관리·Playground
        └─ FastAPI
+            ├─ PostgreSQL auth      ─ 사용자·서비스 권한·서버 세션
             ├─ PostgreSQL/pgvector ─ 문서 메타데이터·chunk·활성 문서 기준
             ├─ MinIO               ─ artifact object key·존재 확인, 원본·미리보기
             ├─ Neo4j               ─ 문서·revision 명칭 검색과 version 관계
@@ -25,10 +27,13 @@ Compose가 host port를 게시한다. build context는 allowlist 방식이라 `.
 - 사용자가 선택한 `(doc_id, revision_id)`는 채팅 요청의 검색 범위를 제한한다.
 - 채팅은 선택 범위의 Hybrid/RRF 검색 결과가 있을 때만 로컬 Ollama를 호출하고, 답변과 citation을 함께 반환한다.
 - PostgreSQL은 최종 활성 UUID와 공개 메타데이터의 기준이며 MinIO·Neo4j 후보도 PostgreSQL에서 재검증한다.
-- PostgreSQL·MinIO·Neo4j 접근은 읽기 전용이다. 이 서비스는 SMB 전체 순회·문서 변환·embedding 생성·DB 적재를
+- 문서 저장소 PostgreSQL·MinIO·Neo4j 접근은 읽기 전용이다. 이 서비스는 SMB 전체 순회·문서 변환·embedding 생성·DB 적재를
   수행하지 않는다.
 - SMB 쓰기는 웹 설정에 저장된 share 기준 상대 경로 하나로 제한하고, 자격증명·전체 경로는 API와 로그에 노출하지 않는다.
 - 첨부 성공 응답은 `indexed=false`이며, 별도 ingestion 전까지 검색 결과에 포함됐다고 간주하지 않는다.
+- 인증 PostgreSQL은 문서 조회 adapter와 분리된 schema·저장소 객체를 사용하고 장애가 나도 기존 Playground 기동을
+  막지 않는다.
+- 개발 단계의 기존 직접 접속 요구로 `/playground/`와 업무 API에는 아직 로그인·서비스 권한을 강제하지 않는다.
 
 ## 이번 단계에서 제외한 구성
 
@@ -37,7 +42,7 @@ Compose가 host port를 게시한다. build context는 allowlist 방식이라 `.
 - Tool Lab, Skills CRUD, QC·핵형·NGS 보고서 데모
 - 외부 OpenAI provider와 외부 검색 API
 - MLflow 기반 평가·artifact 파이프라인
-- PostgreSQL·MinIO·Neo4j에 대한 쓰기 API
+- 문서 저장소 PostgreSQL·MinIO·Neo4j에 대한 쓰기 API
 - 첨부 파일의 자동 변환·인덱싱·버전 관계 생성
 
 제외된 기능은 사용 근거와 운영 책임이 합의되기 전까지 실행 경로와 배포 dependency에 포함하지 않는다.
@@ -46,6 +51,7 @@ Compose가 host port를 게시한다. build context는 allowlist 방식이라 `.
 
 | 구성 | 책임 | 장애 시 동작 |
 |---|---|---|
+| PostgreSQL auth | 사용자, 역할, 서비스별 권한, 서버 세션 | 인증 API만 unavailable로 반환하고 기존 Playground 기동은 유지한다. |
 | PostgreSQL/pgvector | 기준 후보 검색, 외부 후보 hydrate, active revision 검증, 선택 범위 chunk 검색 | 파일 검색과 채팅을 unavailable로 반환한다. |
 | MinIO | Artifact Registry/Object key 검색·존재 확인, 미리보기·원본 조회 | `minio_search_degraded`와 PostgreSQL·Neo4j 부분 결과를 반환한다. |
 | Neo4j | 문서/최신 Revision label 검색, revision/version 관계 조회 | `neo4j_search_degraded`와 PostgreSQL·MinIO 부분 결과를 반환한다. |
@@ -66,7 +72,7 @@ Compose가 host port를 게시한다. build context는 allowlist 방식이라 `.
 
 ## 운영 전환 전 승인 항목
 
-1. SSO 또는 reverse proxy 인증과 사용자별 문서 접근 권한 모델
+1. 현재 로그인·서비스 권한을 Playground·업로드 API에 강제하고 SSO 또는 reverse proxy·문서 접근 권한 모델 확정
 2. 실제 업무 데이터 사용 승인과 로그·citation·미리보기의 비식별/보존 정책
 3. PostgreSQL, MinIO, Neo4j의 서비스 계정·TLS·backup·복구·retention 정책
 4. Ollama model, GPU 용량, 동시성, timeout과 응답 지연 SLO
@@ -85,5 +91,6 @@ Compose가 host port를 게시한다. build context는 allowlist 방식이라 `.
 - 비밀이 아닌 업로드 상대 경로만 별도 runtime volume에 저장한다. SMB 자격증명은 계속 runtime env로만 주입한다.
 - host loopback endpoint는 container loopback과 다르므로 필요할 때만 `.env.docker`에서
   `host.docker.internal` 또는 승인된 LAN endpoint로 바꾼다.
-- 같은 LAN 공개도 인증 없는 서비스 노출이다. 합성 데이터 테스트 범위를 벗어나면 방화벽만으로 운영하지 않는다.
+- 현재 Playground 직접 접속은 인증 없는 서비스 노출이다. 합성 데이터 테스트 범위를 벗어나면 권한 강제 없이 방화벽만으로
+  운영하지 않는다.
 - 상세 실행 절차와 제한된 방화벽 규칙은 [Docker 배포 문서](DOCKER_DEPLOYMENT.md)를 따른다.

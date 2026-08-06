@@ -31,6 +31,8 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 - 중앙 선택 문서 대화와 별도 실행 기능 `문서 요약`, `보고서 초안`
 - MinIO Preview/Canonical read-only 조회
 - 명시적으로 활성화한 SMB 파일 첨부와 비밀 없는 상대 경로 설정
+- 로그인·회원가입·관리자 사용자 관리와 PostgreSQL `auth` schema 권한 저장
+- 관리자·최고 관리자 분리와 전체 또는 서비스별 접근 권한 모델
 
 ### 현재 제외
 
@@ -40,7 +42,7 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 - 첨부 파일 자동 변환·DB 인덱싱·버전 관계 생성
 - QC 감사, 핵형·NGS 등 별도 업무 데모
 - 외부 OpenAI provider
-- DB schema/object/graph 생성·수정·삭제
+- 문서 저장소 DB schema/object/graph 생성·수정·삭제. 별도 `auth` schema의 인증 쓰기는 예외
 - 실제 의료데이터 운영
 
 데이터 수집·변환·Chunk·Embedding 적재는 upstream Mage 파이프라인이 소유한다. 이 저장소는 해당 계약을 복제하지
@@ -64,7 +66,8 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 
 ### P2 — 운영 준비
 
-- 사내 인증, 사용자/그룹 ACL, 감사 로그
+- 현재 계정·서비스 권한을 Playground와 업무 API에 강제 적용
+- 사내 SSO 또는 reverse proxy 연동, 사용자/그룹·문서 ACL, 감사 로그
 - 운영 read-only 계정과 secret 주입
 - 장애·재시도·degraded 상태 관측
 - 합성 단계 완료 후 의료데이터 보안 검토와 운영 승인

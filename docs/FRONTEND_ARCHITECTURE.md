@@ -1,16 +1,18 @@
 # Vue Frontend 아키텍처
 
 - 적용일: 2026-08-04
-- 상태: Vue 3 전환, 최신 Figma 3열 UI, 실제 LLMOps 저장소 흐름 적용 완료
-- 범위: 합성 데이터 전용 Playground UI
+- 상태: Vue 3 전환, 최신 Figma 3열 UI, 인증·사용자 관리와 실제 LLMOps 저장소 흐름 적용 완료
+- 범위: 합성 데이터 전용 Playground와 로그인·회원가입·사용자 관리 UI
 
 ## 결정
 
 Frontend는 Vue 3, Vite, TypeScript로 구현하고 FastAPI Backend와 dependency·개발 프로세스를 분리한다. Backend의
-Pydantic/OpenAPI 계약은 유지하며 Frontend는 같은 origin의 `/api/playground/*` endpoint만 호출한다.
+Pydantic/OpenAPI 계약은 유지하며 Frontend는 같은 origin의 `/api/playground/*`, `/api/auth/*`, `/api/users*` endpoint만
+호출한다.
 
-Nuxt, Vue Router와 Pinia는 현재 사용하지 않는다. 단일 Playground 화면이므로 Vue Composition API의 상위 상태와
-명시적 props/emits로 충분하다. 화면 route나 전역 domain store가 실제로 둘 이상 필요해질 때만 추가한다.
+Nuxt, Vue Router와 Pinia는 현재 사용하지 않는다. `AppRouter.vue`가 Browser pathname을 기준으로 `/login`, `/register`,
+`/user`, Playground 화면을 선택하며, 각 화면은 독립 API 상태를 사용한다. 인증 상태를 여러 업무 route가 공유하거나
+중첩 route·navigation guard가 필요해질 때 Vue Router와 전역 domain store 도입을 재평가한다.
 
 ## 디렉터리 경계
 
@@ -20,9 +22,12 @@ frontend/
   package-lock.json        # 재현 가능한 npm dependency
   vite.config.ts           # /playground base, /api proxy, production outDir
   src/
-    App.vue                # 화면 상태와 API orchestration
+    AppRouter.vue          # Browser pathname에 따른 화면 선택
+    App.vue                # Playground 상태와 API orchestration
     api/client.ts          # typed fetch와 안전한 오류 변환
-    components/            # 파일, 대화, 문서 기능, 저장소 상태 UI
+    api/auth.ts            # cookie 기반 인증·사용자 관리 API
+    components/            # 인증, 사용자, 파일, 대화, 문서 기능 UI
+    authTypes.ts           # 인증·사용자·서비스 권한 TypeScript type
     types.ts               # Backend 공개 응답에 대응하는 TypeScript type
     app.css                # 공통·반응형 스타일
 
@@ -71,7 +76,12 @@ npm run build
 
 | 컴포넌트 | 책임 |
 |---|---|
+| `AppRouter.vue` | `/login`, `/register`, `/user`와 기존 Playground 화면 선택 |
 | `App.vue` | 공통 상태, API 호출 orchestration, 선택 파일·대화 계약 연결 |
+| `AuthShell.vue` | Playground 테마를 공유하는 로그인·회원가입 공통 전체 화면 |
+| `LoginScreen.vue` | 로그인, 오류 안내, 성공 시 Playground 이동 |
+| `RegisterScreen.vue` | 회원가입 입력 검증과 성공 안내 |
+| `UserManagementScreen.vue` | 관리자 사용자 검색, 역할·계정·서비스 권한 관리 |
 | `AppHeader.vue` | 서비스와 저장소 준비 상태 |
 | `FileSidebar.vue` | 멀티스토어 자연어 검색, 저장소별 매칭 출처, 후보 선택·해제, 결과별 버전 확인 |
 | `SettingsDialog.vue` | 비밀 없는 SMB 업로드 상대 경로와 저장소 연결 상태 관리 |
@@ -97,8 +107,9 @@ npm run build
 - 1024px 이하: 왼쪽 248px·중앙 가변 폭으로 축소
 - 760px 이하: 단일 열로 전환하고 각 패널을 문서 흐름에 배치
 
-파일 첨부와 설정은 실제 Backend API에 연결한다. 대화 이력과 범용 관리자 메뉴는 현재 제품 경계에서 제외하며,
-화면 유사도를 위한 가짜 버튼이나 rule-based 결과를 만들지 않는다.
+파일 첨부, 설정, 인증과 사용자 관리는 실제 Backend API에 연결한다. 인증 화면과 DB 구조의 상세 계약은
+[로그인·회원가입·사용자 권한 관리](AUTHENTICATION_AND_USER_MANAGEMENT.md)를 따른다. 대화 이력과 범용 관리자 메뉴는 현재
+제품 경계에서 제외하며, 화면 유사도를 위한 가짜 버튼이나 rule-based 결과를 만들지 않는다.
 
 ## 보안·데이터 경계
 
@@ -126,6 +137,6 @@ Frontend 단위 테스트는 자연어 파일 검색 event, 결과 선택, 결�
 ## 다음 단계
 
 1. Pydantic OpenAPI에서 TypeScript type을 생성해 수동 계약 중복을 줄인다.
-2. 컴포넌트 상태가 여러 route에서 공유될 때만 Pinia와 Vue Router 도입을 재평가한다.
+2. 인증 상태가 여러 업무 route에서 공유되거나 navigation guard가 필요할 때 Pinia와 Vue Router 도입을 재평가한다.
 3. 좁은 화면의 좌·우 패널 전환과 키보드 focus 회귀 테스트를 자동화한다.
 4. 긴 Citation 본문의 접기·펼치기와 문서 표 미리보기 렌더링을 고도화한다.

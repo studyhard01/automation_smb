@@ -68,5 +68,8 @@ runtime 설정 migration과 비밀 비노출을 검증한다. 실제 SMB 쓰기 
 
 ## 운영 전 승인 항목
 
-현재 LAN Playground에는 사용자 인증이 없다. 실제 업무 운영 전에 reverse proxy/SSO, 사용자별 쓰기 권한, 감사 로그,
-악성 파일 검사, 파일 보존·삭제 정책과 자동 ingestion 책임을 승인해야 한다.
+로그인·회원가입·사용자 관리와 서비스 권한 저장은 구현됐지만, 개발 단계의 직접 접속 호환성을 위해 현재 LAN
+Playground와 업로드 API에는 인증·서비스 권한을 강제하지 않는다. 실제 업무 운영 전에 Playground·업로드 API의
+`playground` 권한 검사, reverse proxy/SSO, 사용자별 쓰기 권한, 감사 로그, 악성 파일 검사, 파일 보존·삭제 정책과 자동
+ingestion 책임을 승인해야 한다. 인증 구조의 상세 내용은
+[로그인·회원가입·사용자 권한 관리](AUTHENTICATION_AND_USER_MANAGEMENT.md)를 따른다.

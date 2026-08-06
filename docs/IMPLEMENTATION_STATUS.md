@@ -1,6 +1,6 @@
 # 구현 현황
 
-기준일: 2026-08-05
+기준일: 2026-08-06
 
 ## 한눈에 보기
 
@@ -19,10 +19,13 @@
 | 저장소 상태 | 완료 | PostgreSQL·MinIO·Neo4j 연결/degraded 상태 표시 |
 | 파일 첨부 | 완료 | 설정된 SMB share 하위 상대 경로에 크기·확장자 제한, 비덮어쓰기 저장 |
 | 환경 설정 | 완료 | 왼쪽 하단 설정에서 업로드 상대 경로와 저장소·로컬 LLM 상태 관리, 비밀·내부 주소 미노출 |
+| 로그인·회원가입·사용자 관리 | 완료 | Vue 화면, FastAPI API, PostgreSQL `auth` schema의 사용자·서비스·권한·세션 연동 |
+| 서비스 권한 저장 | 완료 | 관리자·최고 관리자 분리, 전체 또는 서비스별 권한, 자기 잠금·마지막 최고 관리자 보호 |
+| Playground 권한 강제 | 미구현 | 개발 단계 직접 접속 요구로 `/playground/`와 업무 API에는 아직 인증·서비스 권한을 강제하지 않음 |
 | Docker 패키징 | 완료 | Vue/FastAPI 단일 non-root image, Compose runtime env·healthcheck·LAN port |
 | LAN 접속 | 부분 완료 | host LAN 주소 HTTP 200 확인, 다른 물리 PC와 Windows 방화벽 규칙은 관리자 확인 필요 |
 | 지연 목표 | 미달 | 검색은 목표권, LLM 포함 채팅은 추가 개선 필요 |
-| 인증·ACL·감사 | 미구현 | 운영 전 별도 설계·승인 필요 |
+| 문서별 ACL·감사 | 미구현 | 운영 전 서비스 권한 강제, 문서별 접근 제어와 권한 변경 감사 설계·승인 필요 |
 | 실제 보고서 Artifact | 미구현 | 현재는 선택 문서 기반 텍스트 초안만 생성 |
 
 ## 활성 Backend 경로
@@ -39,6 +42,9 @@
 - `playground/upload_api.py`: 공개 설정 GET/PATCH와 multipart 파일 첨부 API
 - `playground/upload_service.py`: runtime 상대 경로 저장, SMB 제한 쓰기와 비덮어쓰기
 - `playground/upload_models.py`: 비밀 없는 설정·첨부 응답 계약
+- `auth/api.py`: 회원가입·로그인·세션·관리자 사용자 API
+- `auth/service.py`: 비밀번호 검증과 관리자·최고 관리자 정책
+- `auth/store.py`: 별도 PostgreSQL `auth` schema와 사용자·서비스 권한·세션 transaction
 
 ## 현재 API
 
@@ -50,8 +56,15 @@
 - `GET /api/playground/settings`
 - `PATCH /api/playground/settings/upload`
 - `POST /api/playground/files/upload`
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/auth/me`
+- `POST /api/auth/logout`
+- `GET /api/users`
+- `PATCH /api/users/{user_id}`
 - `GET /health`
 - `GET /playground`
+- `GET /login`, `GET /register`, `GET /user`
 
 ## 제거 대상 판정
 
@@ -68,10 +81,12 @@
 
 ## 최근 검증
 
-- Backend 활성 Ruff·pytest: 통과, Docker·업로드 계약을 포함해 총 52개 테스트 통과
+- Backend 활성 Ruff·pytest와 Docker·업로드·인증 집중 테스트: 통과
 - Backend DB 수직 흐름 집중 테스트: 17개 통과
 - Backend 첨부·Docker·API 집중 테스트: 21개 통과
-- Frontend 테스트: 설정·첨부·LAN HTTP UUID fallback 회귀 테스트를 포함해 23개 통과
+- Frontend 테스트: 인증·설정·첨부·LAN HTTP UUID fallback 회귀 테스트를 포함해 34개 통과
+- 인증 Backend 집중 테스트: 13개 통과
+- 인증 Browser 흐름: 로그인·회원가입·역할·서비스 권한 저장·로그아웃 확인
 - Frontend typecheck/build: 통과
 - production bundle: `backend/src/smb_finder/web/` 갱신
 - Figma 기준 브라우저 확인: 1440×960에서 헤더 71px, 본문 889px, 3열 288/816/336px 일치

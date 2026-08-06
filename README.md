@@ -195,6 +195,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8011/api/playground/stores/status
 - [정리 인벤토리](docs/CLEANUP_INVENTORY.md)
 - [DB 연동 계약](docs/DATASET_DB_INTEGRATION_PLAN.md)
 - [Frontend 구조](docs/FRONTEND_ARCHITECTURE.md)
+- [로그인·회원가입·사용자 권한 관리](docs/AUTHENTICATION_AND_USER_MANAGEMENT.md)
 - [개발 환경](docs/DEVELOPMENT_SETUP.md)
 - [Docker 배포와 LAN 접속](docs/DOCKER_DEPLOYMENT.md)
 - [파일 첨부와 설정](docs/FILE_UPLOAD_AND_SETTINGS.md)
