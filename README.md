@@ -64,7 +64,7 @@ automation_smb/
 | 공개 설정 조회 | `GET /api/playground/settings` |
 | 업로드 상대 경로 변경 | `PATCH /api/playground/settings/upload` |
 | 공유폴더 파일 첨부 | `POST /api/playground/files/upload` |
-| 회원가입 / 로그인 / 현재 사용자 / 로그아웃 | `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout` |
+| 회원가입 / 로컬·SeeLIS 로그인 / 현재 사용자 / 로그아웃 | `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/seelis-login`, `GET /api/auth/me`, `POST /api/auth/logout` |
 | 관리자 사용자 목록·권한 변경 | `GET /api/users`, `PATCH /api/users/{user_id}` |
 | 서비스 상태 | `GET /health` |
 | Vue 화면 | `GET /playground`, `GET /login`, `GET /register`, `GET /user` |

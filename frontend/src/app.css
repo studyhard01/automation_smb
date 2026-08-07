@@ -2188,6 +2188,37 @@ a:focus-visible {
   gap: 18px;
 }
 
+.auth-mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px;
+  background: var(--surface-subtle);
+}
+
+.auth-mode-tabs button {
+  min-height: 40px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-mode-tabs button[aria-selected="true"] {
+  color: var(--accent-strong);
+  background: var(--panel);
+  box-shadow: 0 2px 8px rgba(74, 25, 40, 0.1);
+}
+
+.auth-mode-tabs button:hover:not(:disabled) {
+  color: var(--text);
+}
+
 .register-form {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
@@ -2344,6 +2375,10 @@ a:focus-visible {
 .auth-switch {
   text-align: center;
   font-size: 12px;
+}
+
+.auth-mode-note {
+  min-height: 19px;
 }
 
 .auth-switch a,

@@ -16,6 +16,7 @@ from .config import AuthSettings
 from .models import ServiceSummary, UserResponse, UserUpdateRequest
 
 _logger = logging.getLogger(__name__)
+EXTERNAL_PASSWORD_SENTINEL = "!external-auth-only!"
 
 
 class AuthStoreError(RuntimeError):
@@ -64,6 +65,9 @@ class PostgresAuthStore:
                     email varchar(254),
                     display_name varchar(100) NOT NULL,
                     password_hash text NOT NULL,
+                    auth_provider varchar(32) NOT NULL DEFAULT 'local',
+                    external_subject varchar(255),
+                    department varchar(100),
                     system_role varchar(32) NOT NULL DEFAULT 'user'
                         CHECK (system_role IN ('admin', 'user')),
                     is_superuser boolean NOT NULL DEFAULT false,
@@ -79,12 +83,22 @@ class PostgresAuthStore:
                 )
                 """
             ).format(schema),
+            sql.SQL(
+                "ALTER TABLE {}.users ADD COLUMN IF NOT EXISTS auth_provider "
+                "varchar(32) NOT NULL DEFAULT 'local'"
+            ).format(schema),
+            sql.SQL("ALTER TABLE {}.users ADD COLUMN IF NOT EXISTS external_subject varchar(255)").format(schema),
+            sql.SQL("ALTER TABLE {}.users ADD COLUMN IF NOT EXISTS department varchar(100)").format(schema),
             sql.SQL("CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uidx ON {}.users (lower(username))").format(
                 schema
             ),
             sql.SQL(
                 "CREATE UNIQUE INDEX IF NOT EXISTS users_email_lower_uidx ON {}.users (lower(email)) "
                 "WHERE email IS NOT NULL"
+            ).format(schema),
+            sql.SQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS users_provider_subject_uidx "
+                "ON {}.users (auth_provider, external_subject) WHERE external_subject IS NOT NULL"
             ).format(schema),
             sql.SQL(
                 """
@@ -188,8 +202,8 @@ class PostgresAuthStore:
                     cursor.execute(
                         sql.SQL(
                             """
-                            INSERT INTO {}.users (id, username, email, display_name, password_hash)
-                            VALUES (%s, %s, %s, %s, %s)
+                            INSERT INTO {}.users (id, username, email, display_name, password_hash, auth_provider)
+                            VALUES (%s, %s, %s, %s, %s, 'local')
                             """
                         ).format(schema),
                         (user_id, username, email, display_name, password_hash),
@@ -205,13 +219,102 @@ class PostgresAuthStore:
             raise AuthStoreError("auth_unavailable", "생성된 사용자를 확인할 수 없습니다.", 503)
         return user
 
+    def upsert_seelis_user(
+        self,
+        *,
+        subject: str,
+        username: str,
+        email: str | None,
+        display_name: str,
+        department: str | None,
+    ) -> UserResponse:
+        """검증 완료된 SeeLIS 사용자를 안전하게 생성하거나 표시 정보만 동기화한다."""
+
+        self._ensure_ready()
+        schema = sql.Identifier(self.settings.auth_db_schema)
+        user_id: UUID
+        try:
+            with self._connect(**self.settings.connection_kwargs()) as connection:
+                with connection.cursor(row_factory=dict_row) as cursor:
+                    cursor.execute(
+                        sql.SQL(
+                            "SELECT id, username, is_active FROM {}.users "
+                            "WHERE auth_provider = 'seelis' AND external_subject = %s "
+                            "AND deleted_at IS NULL FOR UPDATE"
+                        ).format(schema),
+                        (subject,),
+                    )
+                    existing = cursor.fetchone()
+                    if existing:
+                        if not bool(existing["is_active"]):
+                            raise AuthStoreError("account_inactive", "비활성화된 계정입니다.", 403)
+                        user_id = UUID(str(existing["id"]))
+                        cursor.execute(
+                            sql.SQL(
+                                "UPDATE {}.users SET display_name = %s, email = %s, department = %s, "
+                                "last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
+                            ).format(schema),
+                            (display_name, email, department, user_id),
+                        )
+                    else:
+                        cursor.execute(
+                            sql.SQL(
+                                "SELECT auth_provider FROM {}.users WHERE lower(username) = lower(%s) "
+                                "AND deleted_at IS NULL FOR UPDATE"
+                            ).format(schema),
+                            (username,),
+                        )
+                        if cursor.fetchone() is not None:
+                            raise AuthStoreError(
+                                "external_username_collision",
+                                "같은 사용자 ID의 기존 계정이 있어 자동으로 연결할 수 없습니다.",
+                                409,
+                            )
+                        user_id = uuid4()
+                        cursor.execute(
+                            sql.SQL(
+                                """
+                                INSERT INTO {}.users (
+                                    id, username, email, display_name, password_hash, auth_provider,
+                                    external_subject, department, system_role, is_superuser, is_active,
+                                    all_services_access, last_login_at
+                                )
+                                VALUES (%s, %s, %s, %s, %s, 'seelis', %s, %s, 'user', false, true,
+                                    false, CURRENT_TIMESTAMP)
+                                """
+                            ).format(schema),
+                            (
+                                user_id,
+                                username,
+                                email,
+                                display_name,
+                                EXTERNAL_PASSWORD_SENTINEL,
+                                subject,
+                                department,
+                            ),
+                        )
+        except AuthStoreError:
+            raise
+        except psycopg.errors.UniqueViolation as exc:
+            raise AuthStoreError(
+                "external_identity_collision",
+                "기존 계정과 안전하게 연결할 수 없습니다.",
+                409,
+            ) from exc
+        except Exception as exc:
+            raise self._unavailable(exc) from exc
+        user = self.get_user(user_id)
+        if user is None:  # pragma: no cover - commit 직후 DB 이상 방어
+            raise AuthStoreError("auth_unavailable", "로그인한 사용자를 확인할 수 없습니다.", 503)
+        return user
+
     def get_login_record(self, username: str) -> dict[str, Any] | None:
         """로그인 검증에 필요한 최소 내부 필드를 조회한다."""
 
         self._ensure_ready()
         query = sql.SQL(
             "SELECT id, password_hash, is_active, failed_login_attempts, locked_until "
-            "FROM {}.users WHERE deleted_at IS NULL AND lower(username) = lower(%s)"
+            "FROM {}.users WHERE deleted_at IS NULL AND auth_provider = 'local' AND lower(username) = lower(%s)"
         ).format(sql.Identifier(self.settings.auth_db_schema))
         try:
             with self._connect(**self.settings.connection_kwargs()) as connection:

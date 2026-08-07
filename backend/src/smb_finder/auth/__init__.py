@@ -2,7 +2,8 @@
 
 from .api import create_auth_router
 from .config import AuthSettings
+from .seelis import SeeLisClient
 from .service import AuthService
 from .store import PostgresAuthStore
 
-__all__ = ["AuthService", "AuthSettings", "PostgresAuthStore", "create_auth_router"]
+__all__ = ["AuthService", "AuthSettings", "PostgresAuthStore", "SeeLisClient", "create_auth_router"]

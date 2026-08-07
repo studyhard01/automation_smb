@@ -3,6 +3,7 @@ import type {
   AuthUserResponse,
   LoginPayload,
   RegisterPayload,
+  SeelisLoginPayload,
   UserAccessUpdate,
   UsersResponse,
 } from "@/authTypes";
@@ -51,6 +52,10 @@ function jsonOptions(method: "POST" | "PATCH", body?: unknown): RequestInit {
 export const authApi = {
   async login(payload: LoginPayload): Promise<AuthUserResponse> {
     return request<AuthUserResponse>("/api/auth/login", jsonOptions("POST", payload));
+  },
+
+  async seelisLogin(payload: SeelisLoginPayload): Promise<AuthUserResponse> {
+    return request<AuthUserResponse>("/api/auth/seelis-login", jsonOptions("POST", payload));
   },
 
   async register(payload: RegisterPayload): Promise<AuthUserResponse> {

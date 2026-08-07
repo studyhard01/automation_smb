@@ -65,6 +65,20 @@ describe("authApi", () => {
     });
   });
 
+  it("SeeLIS 로그인 요청에 정확한 경로, payload, 쿠키 포함 정책을 사용한다", async () => {
+    fetchMock.mockResolvedValueOnce(response({ user }));
+
+    await authApi.seelisLogin({ userId: "seelis-user", pswd: " unmodified-password " });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith("/api/auth/seelis-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: "seelis-user", pswd: " unmodified-password " }),
+      credentials: "include",
+    });
+  });
+
   it("관리자 사용자 목록과 서비스 권한 PATCH 계약을 보존한다", async () => {
     const usersResponse: UsersResponse = {
       users: [user],

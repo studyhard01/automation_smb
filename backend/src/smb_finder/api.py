@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import AuthService, AuthSettings, PostgresAuthStore, create_auth_router
+from .auth import AuthService, AuthSettings, PostgresAuthStore, SeeLisClient, create_auth_router
 from .auth.security import hash_password
 from .auth.store import AuthStoreError
 from .config import load_settings
@@ -31,7 +31,12 @@ _logger = logging.getLogger(__name__)
 _settings = load_settings()
 _auth_settings = AuthSettings()
 _auth_store = PostgresAuthStore(_auth_settings)
-_auth_service = AuthService(_auth_store, session_ttl_seconds=_auth_settings.auth_session_ttl_seconds)
+_seelis_client = SeeLisClient(_auth_settings)
+_auth_service = AuthService(
+    _auth_store,
+    session_ttl_seconds=_auth_settings.auth_session_ttl_seconds,
+    seelis_authenticator=_seelis_client,
+)
 _state: dict[str, object] = {}
 
 
@@ -51,6 +56,7 @@ async def lifespan(_app: FastAPI):
 
     async with AsyncExitStack() as stack:
         stack.callback(_state.clear)
+        stack.callback(_seelis_client.close)
         stack.callback(_auth_store.close)
         if _auth_settings.configured:
             initial_password_hash = None

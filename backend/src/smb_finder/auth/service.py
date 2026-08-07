@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from functools import lru_cache
 from typing import Protocol
 from uuid import UUID
 
 from .models import RegisterRequest, ServiceSummary, UserResponse, UserUpdateRequest
+from .seelis import SeeLisIdentity
 from .security import hash_password, hash_session_token, new_session_token, verify_password
 from .store import AuthStoreError
+
+_logger = logging.getLogger(__name__)
 
 
 class AuthRepository(Protocol):
@@ -16,6 +21,15 @@ class AuthRepository(Protocol):
 
     def create_user(self, *, username: str, email: str, display_name: str, password_hash: str) -> UserResponse: ...
     def get_login_record(self, username: str) -> dict[str, object] | None: ...
+    def upsert_seelis_user(
+        self,
+        *,
+        subject: str,
+        username: str,
+        email: str | None,
+        display_name: str,
+        department: str | None,
+    ) -> UserResponse: ...
     def record_login_failure(self, user_id: UUID) -> None: ...
     def record_login_success(self, user_id: UUID) -> None: ...
     def create_session(self, user_id: UUID, token_hash: str, ttl_seconds: int) -> None: ...
@@ -26,12 +40,25 @@ class AuthRepository(Protocol):
     def update_user(self, actor: UserResponse, target_id: UUID, request: UserUpdateRequest) -> UserResponse: ...
 
 
+class SeeLisAuthenticator(Protocol):
+    """SeeLIS 외부 인증 구현을 service 테스트에서 대체하는 경계."""
+
+    def authenticate(self, user_id: str, password: str) -> SeeLisIdentity: ...
+
+
 class AuthService:
     """Frontend와 DB 사이의 인증·권한 정책 계층."""
 
-    def __init__(self, repository: AuthRepository, *, session_ttl_seconds: int) -> None:
+    def __init__(
+        self,
+        repository: AuthRepository,
+        *,
+        session_ttl_seconds: int,
+        seelis_authenticator: SeeLisAuthenticator | None = None,
+    ) -> None:
         self.repository = repository
         self.session_ttl_seconds = session_ttl_seconds
+        self.seelis_authenticator = seelis_authenticator
 
     def register(self, request: RegisterRequest) -> UserResponse:
         """권한 없는 활성 일반 사용자로 가입한다."""
@@ -69,6 +96,32 @@ class AuthService:
         if user is None:  # pragma: no cover
             raise AuthStoreError("auth_unavailable", "로그인한 사용자를 확인할 수 없습니다.", 503)
         return user, token
+
+    def login_with_seelis(self, user_id: str, password: str) -> tuple[UserResponse, str]:
+        """SeeLIS 검증을 모두 마친 뒤에만 로컬 사용자와 자체 session을 만든다."""
+
+        started = time.perf_counter()
+        outcome = "success"
+        try:
+            if self.seelis_authenticator is None:
+                raise AuthStoreError("seelis_not_configured", "SeeLIS 로그인이 구성되지 않았습니다.", 503)
+            identity = self.seelis_authenticator.authenticate(user_id, password)
+            user = self.repository.upsert_seelis_user(
+                subject=identity.subject,
+                username=identity.username,
+                email=identity.email,
+                display_name=identity.display_name,
+                department=identity.department,
+            )
+            token = new_session_token()
+            self.repository.create_session(user.id, hash_session_token(token), self.session_ttl_seconds)
+            return user, token
+        except AuthStoreError as exc:
+            outcome = exc.code
+            raise
+        finally:
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            _logger.info("SeeLIS 로그인: stage=total elapsed_ms=%.1f outcome=%s", elapsed_ms, outcome)
 
     def current_user(self, token: str | None) -> UserResponse:
         """cookie의 session으로 현재 활성 사용자를 반환한다."""

@@ -19,6 +19,11 @@ export interface LoginPayload {
   password: string;
 }
 
+export interface SeelisLoginPayload {
+  userId: string;
+  pswd: string;
+}
+
 export interface RegisterPayload {
   username: string;
   display_name: string;

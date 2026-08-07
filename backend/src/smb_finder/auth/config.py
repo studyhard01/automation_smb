@@ -49,6 +49,15 @@ class AuthSettings(BaseSettings):
     auth_initial_admin_email: str = ""
     auth_initial_admin_display_name: str = "최고 관리자"
 
+    seelis_login_token_api_url: str = ""
+    seelis_login_token_api_url_key: str = ""
+    seelis_login_token_api_url_value: str = ""
+    seelis_login_keycloak_url: str = ""
+    seelis_login_keycloak_url_key: str = ""
+    seelis_login_keycloak_url_value: str = ""
+    seelis_login_token_api_timeout_ms: int = Field(default=30_000, ge=100, le=60_000)
+    seelis_login_keycloak_timeout_ms: int = Field(default=10_000, ge=100, le=60_000)
+
     @property
     def effective_host(self) -> str:
         """인증 전용 host를 우선하고 기존 server 주소만 fallback한다."""
@@ -103,6 +112,22 @@ class AuthSettings(BaseSettings):
             and self.effective_database
             and self.effective_user
             and self.effective_password
+        )
+
+    @property
+    def seelis_login_configured(self) -> bool:
+        """비밀 값을 노출하지 않고 SeeLIS 2단계 인증 설정 완전성만 확인한다."""
+
+        return all(
+            value.strip()
+            for value in (
+                self.seelis_login_token_api_url,
+                self.seelis_login_token_api_url_key,
+                self.seelis_login_token_api_url_value,
+                self.seelis_login_keycloak_url,
+                self.seelis_login_keycloak_url_key,
+                self.seelis_login_keycloak_url_value,
+            )
         )
 
     def connection_kwargs(self) -> dict[str, object]:

@@ -1,6 +1,6 @@
 # 로그인·회원가입·사용자 권한 관리
 
-- 기준일: 2026-08-06
+- 기준일: 2026-08-07
 - 상태: UI, FastAPI API, PostgreSQL `auth` schema 연동 완료
 - 대상 독자: 서비스 사용자, 관리자, 개발·운영 담당자
 - 대상 환경: 합성 데이터 전용 로컬 개발 환경
@@ -11,7 +11,7 @@
 
 | 화면 | 주소 | 주요 사용자 | 목적 |
 |---|---|---|---|
-| 로그인 | `http://127.0.0.1:5173/login` | 모든 등록 사용자 | 아이디와 비밀번호로 로그인 |
+| 로그인 | `http://127.0.0.1:5173/login` | 로컬·SeeLIS 사용자 | 로컬 또는 SeeLIS 아이디와 비밀번호로 로그인 |
 | 회원가입 | `http://127.0.0.1:5173/register` | 신규 사용자 | 기본 권한이 없는 일반 계정 생성 |
 | 사용자 관리 | `http://127.0.0.1:5173/user` | 관리자 | 역할, 계정 상태, 서비스 접근 권한 관리 |
 
@@ -75,15 +75,19 @@ flowchart TD
 
 ### 4.1 구성
 
-`/login` 화면은 다음 요소로 구성한다.
+`/login` 화면은 로컬 계정을 기본 탭으로 제공하고, 같은 화면의 SeeLIS 계정 탭에서 외부 계정 로그인을 선택할 수 있다.
+탭을 바꾸면 비밀번호와 이전 오류를 지워 다른 인증 방식으로 잘못 제출하지 않도록 한다.
+
+화면은 다음 요소로 구성한다.
 
 | 영역 | 기능 |
 |---|---|
-| 아이디 | 등록된 `username` 입력, 자동 대문자 변환과 맞춤법 검사 비활성화 |
+| 로그인 방식 | `로컬 계정`, `SeeLIS 계정` 탭을 키보드와 마우스로 선택 |
+| 아이디 | 로컬 `username` 또는 SeeLIS `userId` 입력, 자동 대문자 변환과 맞춤법 검사 비활성화 |
 | 비밀번호 | 입력 내용을 가려 표시하고 대소문자 구분 안내 제공 |
 | 로그인 버튼 | 요청 중 중복 제출을 막고 `로그인 중` 상태 표시 |
 | 오류 메시지 | 잘못된 계정 정보, 비활성 계정, 서버 연결 실패를 사용자용 문장으로 표시 |
-| 회원가입 링크 | `/register`로 이동 |
+| 회원가입 링크 | 로컬 계정 탭에서만 `/register`로 이동 |
 | 개발용 바로가기 | 기존 동작 보존을 위해 `/playground/`로 직접 이동 |
 
 ### 4.2 처리 규칙
@@ -375,6 +379,9 @@ erDiagram
         varchar email UK
         varchar display_name
         text password_hash
+        varchar auth_provider
+        varchar external_subject
+        varchar department
         varchar system_role
         boolean is_superuser
         boolean is_active
@@ -429,6 +436,9 @@ erDiagram
 | `email` | `varchar(254)` | 가능 | 값이 있을 때 `lower(email)` 고유 index | 이메일 |
 | `display_name` | `varchar(100)` | 불가 |  | 화면 표시 이름 |
 | `password_hash` | `text` | 불가 |  | 단방향 비밀번호 hash |
+| `auth_provider` | `varchar(32)` | 불가 | `local` | `local` 또는 `seelis` 로그인 출처 |
+| `external_subject` | `varchar(255)` | 가능 | provider와 함께 부분 고유 index | 검증된 userinfo `sub` |
+| `department` | `varchar(100)` | 가능 |  | SeeLIS 응답 `deptNm`, 로컬 사용자는 기본 `NULL` |
 | `system_role` | `varchar(32)` | 불가 | `user`, `admin`만 허용 | 시스템 역할 |
 | `is_superuser` | `boolean` | 불가 | `false` | 최고 관리자 여부 |
 | `is_active` | `boolean` | 불가 | `true` | 로그인 가능한 계정인지 여부 |
@@ -517,12 +527,20 @@ flowchart TD
 |---|---|---|---|---|
 | `POST` | `/api/auth/register` | 불필요 | `201` | 기본 일반 사용자 생성 |
 | `POST` | `/api/auth/login` | 불필요 | `200` | 로그인과 세션 쿠키 발급 |
+| `POST` | `/api/auth/seelis-login` | 불필요 | `200` | SeeLIS 2단계 검증 후 같은 서비스 세션 쿠키 발급 |
 | `GET` | `/api/auth/me` | 필요 | `200` | 현재 로그인 사용자 조회 |
 | `POST` | `/api/auth/logout` | 선택 | `204` | 현재 세션 취소와 쿠키 삭제 |
 | `GET` | `/api/users` | 관리자 | `200` | 사용자와 서비스 목록 조회 |
 | `PATCH` | `/api/users/{user_id}` | 관리자 | `200` | 역할·활성·서비스 권한 변경 |
 
 모든 사용자 응답은 `password_hash`, 세션 token, DB 접속 정보를 제외한다.
+
+SeeLIS 로그인 요청은 `{ "userId": "...", "pswd": "..." }`이며 성공 응답은 기존 `UserEnvelope`와 같다. Backend는
+설정된 API key로 토큰 API의 `201`과 `result.accessToken`을 확인한 뒤 Keycloak userinfo의 `200`과 `sub`를 검증한다.
+두 외부 검증이 모두 끝나기 전에는 사용자·세션을 변경하지 않으며 외부 비밀번호, API key, access/refresh token은 DB,
+Browser 응답, log에 저장하지 않는다. 신규 SeeLIS 사용자는 일반 활성 사용자이되 서비스 권한은 없고, 기존 SeeLIS
+사용자는 표시 이름, 이메일과 부서를 동기화한다. 같은 이름의 로컬 계정은 자동 연결하지 않는다. 부서는 현재 권한 판단에
+사용하지 않으며, 향후 부서별 권한 정책을 추가할 때 별도 승인 규칙과 함께 연결한다.
 
 ### 10.1 합성 로그인 예시
 
@@ -591,6 +609,8 @@ Content-Type: application/json
 | `403` | 비활성 계정, 관리자 권한 없음, 최고 관리자 권한 필요 | 관리자에게 계정·역할 확인 요청 |
 | `404` | 변경할 사용자를 찾지 못함 | 목록을 새로 불러온 뒤 재시도 |
 | `409` | 중복 계정, 자기 잠금, 마지막 최고 관리자 보호 | 입력 또는 관리자 구성을 변경 |
+| `429` | SeeLIS 로그인 반복 실패 제한 | 15분 뒤 재시도 |
+| `502` | SeeLIS 또는 userinfo 응답 JSON·필수 필드 오류 | 외부 인증 계약 확인 |
 | `422` | 입력 형식 위반, 알 수 없거나 비활성 서비스 | 입력값과 서비스 상태 확인 |
 | `423` | 로그인 5회 실패로 15분 잠금 | 잠금 시간이 지난 뒤 재시도 |
 | `503` | 인증 DB 미설정·초기화 실패·연결 장애 | Backend와 인증 DB 설정 확인 |
@@ -651,6 +671,10 @@ PBKDF2 작업을 수행해 아이디 존재 여부를 응답 시간 차이로 �
 | `AUTH_INITIAL_ADMIN_PASSWORD` | 최초 생성에만 사용하고 성공 후 제거 |
 | `AUTH_INITIAL_ADMIN_EMAIL` | 최초 관리자 이메일, 선택 값 |
 | `AUTH_INITIAL_ADMIN_DISPLAY_NAME` | 최초 관리자 표시 이름 |
+| `SEELIS_LOGIN_TOKEN_API_URL`, `SEELIS_LOGIN_TOKEN_API_URL_KEY`, `SEELIS_LOGIN_TOKEN_API_URL_VALUE` | SeeLIS 토큰 발급 URL·API key header·비밀 값 |
+| `SEELIS_LOGIN_KEYCLOAK_URL`, `SEELIS_LOGIN_KEYCLOAK_URL_KEY`, `SEELIS_LOGIN_KEYCLOAK_URL_VALUE` | userinfo URL·header·`{token}` 포함 template |
+| `SEELIS_LOGIN_TOKEN_API_TIMEOUT_MS` | 토큰 발급 제한 시간, 기본 30000ms |
+| `SEELIS_LOGIN_KEYCLOAK_TIMEOUT_MS` | userinfo 제한 시간, 기본 10000ms |
 
 ## 14. 실제 DB 연동 확인 방법
 
@@ -700,15 +724,15 @@ ORDER BY u.username;
 
 ```powershell
 cd C:\VSCodeWorkSpace\automation_smb
-.\backend\.venv\Scripts\python.exe -m pytest backend/tests/test_auth.py
+.\backend\.venv\Scripts\python.exe -m pytest backend/tests/test_auth.py backend/tests/test_seelis_auth.py
 npm.cmd --prefix .\frontend run typecheck
 npm.cmd --prefix .\frontend run test
 npm.cmd --prefix .\frontend run build
 ```
 
-인증 전용 Backend 테스트는 table 초기화 SQL, 설정 opt-in, 가입, 로그인, 세션, 로그아웃, 관리자 제한과 인증 저장소 장애
-격리를 확인한다. Frontend 테스트는 화면 경로 선택, 로그인 요청과 이동, 비밀번호 확인, 회원가입 성공, 사용자 목록,
-권한 payload와 저장을 확인한다.
+인증 전용 Backend 테스트는 table 초기화 SQL, 설정 opt-in, 로컬·SeeLIS 로그인, 외부 응답 정규화, 세션, 로그인 제한,
+사용자 연결 충돌, 관리자 제한과 인증 저장소 장애 격리를 확인한다. Frontend 테스트는 화면 경로와 로그인 방식 선택,
+요청 payload, 탭별 자동완성 격리, 비밀번호 보존·초기화, 회원가입, 사용자 목록과 권한 저장을 확인한다.
 
 ### 15.2 수동 화면 확인
 
@@ -721,8 +745,9 @@ npm.cmd --prefix .\frontend run build
 7. 로그아웃한 뒤 `/api/auth/me`가 `401`을 반환하는지 확인한다.
 8. 개발 요구대로 로그인하지 않은 `/playground/` 직접 접속도 유지되는지 확인한다.
 
-구현 완료 시점 검증에서는 Backend 인증 테스트 13개, Frontend 전체 테스트 34개와 TypeScript 검사가 통과했다. 실제 Browser로
-로그인, 회원가입, 사용자 역할·서비스 권한 저장, 로그아웃 흐름도 확인했다.
+2026-08-07 SeeLIS 연동 완료 검증에서는 Backend 인증 테스트 29개, Frontend 전체 테스트 44개, TypeScript 검사와 build가
+통과했다. 실제 Browser에서는 로컬 기본 탭, SeeLIS 탭, 키보드 전환, 탭 변경 후 입력 초기화와 console 오류 부재를 확인했다.
+실제 SeeLIS QA 계정을 이용한 외부 로그인은 자격증명을 제공받은 뒤 별도로 확인한다.
 
 ## 16. 운영 전 보완 항목
 
@@ -752,6 +777,7 @@ npm.cmd --prefix .\frontend run build
 | API route | `backend/src/smb_finder/auth/api.py` | HTTP endpoint와 세션 쿠키 |
 | 공개 모델 | `backend/src/smb_finder/auth/models.py` | 입력 검증과 응답 계약 |
 | 인증 정책 | `backend/src/smb_finder/auth/service.py` | 로그인·관리자 정책 |
+| SeeLIS client | `backend/src/smb_finder/auth/seelis.py` | TLS 기반 토큰 발급·userinfo 검증과 정규화 오류 |
 | 보안 함수 | `backend/src/smb_finder/auth/security.py` | 비밀번호·세션 token hash |
 | PostgreSQL 저장소 | `backend/src/smb_finder/auth/store.py` | schema, SQL, transaction |
 | runtime 설정 | `backend/src/smb_finder/auth/config.py` | DB·세션 환경변수 |

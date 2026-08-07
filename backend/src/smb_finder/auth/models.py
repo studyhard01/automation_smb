@@ -51,6 +51,22 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class SeeLisLoginRequest(BaseModel):
+    """SeeLIS 계정 로그인 요청. 비밀번호는 정규화하지 않는다."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    user_id: str = Field(alias="userId", min_length=1, max_length=64)
+    password: str = Field(alias="pswd", min_length=1, max_length=256)
+
+    @field_validator("user_id")
+    @classmethod
+    def validate_user_id(cls, value: str) -> str:
+        if value != value.strip() or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("SeeLIS 사용자 ID 형식이 올바르지 않습니다.")
+        return value
+
+
 class ServiceSummary(BaseModel):
     """관리 화면에 공개하는 서비스 항목."""
 

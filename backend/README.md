@@ -23,4 +23,5 @@ cd ..
 
 Frontend 원본은 `frontend/`에서 관리하고 `npm run build` 결과만 `backend/src/smb_finder/web/`에 생성한다.
 
-`src/smb_finder/auth/`는 기존 LLMOps read-only adapter와 분리된 PostgreSQL 인증·사용자·서비스 권한 경계다.
+`src/smb_finder/auth/`는 기존 LLMOps read-only adapter와 분리된 PostgreSQL 인증·사용자·서비스 권한 경계이며,
+`seelis.py`가 SeeLIS 토큰 발급과 Keycloak userinfo 확인을 서버 안에서만 수행한다.
