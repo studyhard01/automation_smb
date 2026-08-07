@@ -8,6 +8,8 @@ const user: AuthUser = {
   username: "synthetic-user",
   email: "synthetic@example.com",
   display_name: "합성 사용자",
+  department: "합성 부서",
+  department_code: "SYN001",
   system_role: "user",
   is_superuser: false,
   is_active: true,

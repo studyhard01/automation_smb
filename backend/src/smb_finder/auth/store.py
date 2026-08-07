@@ -581,6 +581,8 @@ class PostgresAuthStore:
             username=row["username"],
             email=row.get("email"),
             display_name=row["display_name"],
+            department=row.get("department"),
+            department_code=row.get("department_code"),
             system_role=row["system_role"],
             is_superuser=row["is_superuser"],
             is_active=row["is_active"],

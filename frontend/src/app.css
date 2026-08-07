@@ -2664,6 +2664,11 @@ a:focus-visible {
   font-size: 10px;
 }
 
+.user-identity .user-department {
+  color: var(--muted);
+  font-weight: 600;
+}
+
 .user-identity small {
   color: var(--muted);
   font-size: 9px;

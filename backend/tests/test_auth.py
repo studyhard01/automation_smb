@@ -18,13 +18,22 @@ from smb_finder.auth.service import AuthService
 from smb_finder.auth.store import AuthStoreError, PostgresAuthStore
 
 
-def _user(*, role: str = "user", superuser: bool = False, all_access: bool = False) -> UserResponse:
+def _user(
+    *,
+    role: str = "user",
+    superuser: bool = False,
+    all_access: bool = False,
+    department: str | None = None,
+    department_code: str | None = None,
+) -> UserResponse:
     now = datetime.now(timezone.utc)
     return UserResponse(
         id=uuid4(),
         username="admin" if role == "admin" else "member",
         email="synthetic@example.test",
         display_name="합성 사용자",
+        department=department,
+        department_code=department_code,
         system_role=role,
         is_superuser=superuser,
         is_active=True,
@@ -244,12 +253,22 @@ def test_user_management_is_admin_only_and_returns_service_catalog() -> None:
     assert denied.status_code == 403
     assert denied.json()["detail"]["code"] == "admin_required"
 
-    admin_repository = FakeAuthRepository(_user(role="admin", superuser=True, all_access=True))
+    admin_repository = FakeAuthRepository(
+        _user(
+            role="admin",
+            superuser=True,
+            all_access=True,
+            department="합성 부서",
+            department_code="SYN001",
+        )
+    )
     with _client(admin_repository) as client:
         client.post("/api/auth/login", json={"username": "admin", "password": "synthetic-password"})
         response = client.get("/api/users")
 
     assert response.status_code == 200
+    assert response.json()["users"][0]["department"] == "합성 부서"
+    assert response.json()["users"][0]["department_code"] == "SYN001"
     assert response.json()["services"] == [
         {"key": "playground", "name": "Playground", "description": "", "is_active": True}
     ]

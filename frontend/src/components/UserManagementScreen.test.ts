@@ -19,6 +19,8 @@ const admin: AuthUser = {
   username: "admin-user",
   email: "admin@example.com",
   display_name: "관리자",
+  department: null,
+  department_code: null,
   system_role: "admin",
   is_superuser: true,
   is_active: true,
@@ -33,6 +35,8 @@ const user: AuthUser = {
   username: "synthetic-user",
   email: "synthetic@example.com",
   display_name: "합성 사용자",
+  department: "합성 부서",
+  department_code: "SYN001",
   system_role: "user",
   is_superuser: false,
   is_active: true,
@@ -62,6 +66,8 @@ describe("UserManagementScreen", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("합성 사용자");
+    expect(wrapper.text()).toContain("합성 부서(SYN001)");
+    expect(wrapper.text()).toContain("부서: 정보 없음");
     await wrapper.get("#role-user-2").setValue("admin");
     const userCards = wrapper.findAll(".user-card");
     await userCards[1].get(".user-save-area button").trigger("click");
@@ -82,5 +88,15 @@ describe("UserManagementScreen", () => {
     await flushPromises();
     await wrapper.get("#user-search-input").setValue("없는 사용자");
     expect(wrapper.text()).toContain("검색 결과가 없습니다");
+  });
+
+  it("부서명과 부서코드로 사용자를 검색한다", async () => {
+    const wrapper = mount(UserManagementScreen);
+    await flushPromises();
+
+    await wrapper.get("#user-search-input").setValue("SYN001");
+
+    expect(wrapper.findAll(".user-card")).toHaveLength(1);
+    expect(wrapper.text()).toContain("합성 부서(SYN001)");
   });
 });

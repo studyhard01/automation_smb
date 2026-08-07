@@ -85,6 +85,8 @@ class UserResponse(BaseModel):
     username: str
     email: str | None = None
     display_name: str
+    department: str | None = None
+    department_code: str | None = None
     system_role: Literal["admin", "user"]
     is_superuser: bool
     is_active: bool

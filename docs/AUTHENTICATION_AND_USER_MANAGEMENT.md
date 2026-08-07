@@ -224,8 +224,8 @@ Backend는 `system_role=admin` 또는 `is_superuser=true`인 활성 사용자에
 |---|---|
 | 상단 헤더 | 현재 사용자, Playground 이동, 로그아웃 |
 | 요약 카드 | 전체 사용자 수, 활성 계정 수, 관리자 수 |
-| 사용자 검색 | 이름, 아이디, 이메일을 한 번에 검색 |
-| 사용자 정보 | 이름, 아이디, 이메일, 가입 시각, 최근 로그인 시각 |
+| 사용자 검색 | 이름, 아이디, 이메일, 부서명, 부서코드를 한 번에 검색 |
+| 사용자 정보 | 이름, 아이디, 이메일, `부서명(부서코드)`, 가입 시각, 최근 로그인 시각 |
 | 시스템 역할 | `일반 사용자` 또는 `관리자` 선택 |
 | 최고 관리자 | 복구 불가능한 잠금을 방지하는 최상위 관리자 여부 |
 | 계정 활성화 | 로그인과 세션 사용 가능 여부 |
@@ -563,6 +563,8 @@ Content-Type: application/json
     "username": "synthetic.user",
     "email": "synthetic.user@example.test",
     "display_name": "합성 사용자",
+    "department": "합성 부서",
+    "department_code": "SYN001",
     "system_role": "user",
     "is_superuser": false,
     "is_active": true,
@@ -747,8 +749,9 @@ npm.cmd --prefix .\frontend run build
 7. 로그아웃한 뒤 `/api/auth/me`가 `401`을 반환하는지 확인한다.
 8. 개발 요구대로 로그인하지 않은 `/playground/` 직접 접속도 유지되는지 확인한다.
 
-2026-08-07 SeeLIS 연동 완료 검증에서는 Backend 인증 테스트 29개, Frontend 전체 테스트 44개, TypeScript 검사와 build가
-통과했다. 실제 Browser에서는 로컬 기본 탭, SeeLIS 탭, 키보드 전환, 탭 변경 후 입력 초기화와 console 오류 부재를 확인했다.
+2026-08-07 SeeLIS 연동 및 사용자 관리 부서 표시 검증에서는 Backend 인증·API 계약 테스트 31개, Frontend 전체 테스트
+45개, TypeScript 검사와 build가 통과했다. 실제 Browser에서는 인증 화면 로드와 console 오류 부재를 확인했고,
+`부서명(부서코드)` 표시와 부서 검색은 합성 데이터 컴포넌트 테스트로 확인했다.
 실제 SeeLIS QA 계정을 이용한 외부 로그인은 자격증명을 제공받은 뒤 별도로 확인한다.
 
 ## 16. 운영 전 보완 항목

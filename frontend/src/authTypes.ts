@@ -5,6 +5,8 @@ export interface AuthUser {
   username: string;
   email: string;
   display_name: string;
+  department: string | null;
+  department_code: string | null;
   system_role: SystemRole;
   is_superuser: boolean;
   is_active: boolean;

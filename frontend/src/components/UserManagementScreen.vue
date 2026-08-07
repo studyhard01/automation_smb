@@ -26,7 +26,7 @@ const filteredUsers = computed(() => {
   const normalized = query.value.trim().toLocaleLowerCase();
   if (!normalized) return users.value;
   return users.value.filter((user) => (
-    [user.username, user.display_name, user.email]
+    [user.username, user.display_name, user.email, user.department, user.department_code]
       .join(" ")
       .toLocaleLowerCase()
       .includes(normalized)
@@ -124,6 +124,15 @@ function formatDate(value: string | null): string {
   return new Intl.DateTimeFormat("ko-KR", { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
+function formatDepartment(user: AuthUser): string {
+  const name = user.department?.trim() ?? "";
+  const code = user.department_code?.trim() ?? "";
+  if (name && code) return `${name}(${code})`;
+  if (name) return name;
+  if (code) return `부서명 없음(${code})`;
+  return "정보 없음";
+}
+
 onMounted(loadUsers);
 </script>
 
@@ -193,7 +202,7 @@ onMounted(loadUsers);
               id="user-search-input"
               v-model="query"
               type="search"
-              placeholder="이름, 아이디, 이메일 검색"
+              placeholder="이름, 아이디, 이메일, 부서 검색"
             >
           </div>
         </div>
@@ -208,7 +217,7 @@ onMounted(loadUsers);
         <div v-else-if="filteredUsers.length === 0" class="user-page-state compact">
           <span class="state-icon" aria-hidden="true">⌕</span>
           <strong>검색 결과가 없습니다.</strong>
-          <p>다른 이름, 아이디 또는 이메일로 검색해 보세요.</p>
+          <p>다른 이름, 아이디, 이메일 또는 부서로 검색해 보세요.</p>
           <div><button class="secondary-button" type="button" @click="query = ''">검색 지우기</button></div>
         </div>
 
@@ -223,6 +232,7 @@ onMounted(loadUsers);
                   <span v-if="user.is_superuser" class="superuser-badge">최고 관리자</span>
                 </div>
                 <p>@{{ user.username }} · {{ user.email }}</p>
+                <p class="user-department">부서: {{ formatDepartment(user) }}</p>
                 <small>가입 {{ formatDate(user.created_at) }} · 최근 로그인 {{ formatDate(user.last_login_at) }}</small>
               </div>
             </div>
