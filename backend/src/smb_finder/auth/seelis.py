@@ -28,6 +28,7 @@ class SeeLisIdentity:
     display_name: str
     email: str | None
     department: str | None
+    department_code: str | None
 
 
 class SeeLisClient:
@@ -57,7 +58,7 @@ class SeeLisClient:
         outcome = "success"
         try:
             self._validate_configuration()
-            access_token, display_name, email, department = self._request_access_token(user_id, password)
+            access_token, display_name, email, department, department_code = self._request_access_token(user_id, password)
             subject = self._request_userinfo(access_token, user_id)
             return SeeLisIdentity(
                 subject=subject,
@@ -65,6 +66,7 @@ class SeeLisClient:
                 display_name=display_name or user_id,
                 email=email,
                 department=department,
+                department_code=department_code,
             )
         except AuthStoreError as exc:
             outcome = exc.code
@@ -76,7 +78,7 @@ class SeeLisClient:
         self,
         user_id: str,
         password: str,
-    ) -> tuple[str, str | None, str | None, str | None]:
+    ) -> tuple[str, str | None, str | None, str | None, str | None]:
         started = time.perf_counter()
         outcome = "success"
         try:
@@ -97,6 +99,7 @@ class SeeLisClient:
             access_token = self._required_text(result, "accessToken", max_length=16_384)
             display_name = self._optional_text(result, "userNm", max_length=100)
             department = self._optional_text(result, "deptNm", max_length=100)
+            department_code = self._optional_text(result, "deptCd", max_length=32)
             primary_email = self._optional_text(result, "emalAddr", max_length=254)
             alternate_email = self._optional_text(result, "extnEmalAddr", max_length=254)
             email = primary_email or alternate_email
@@ -104,7 +107,7 @@ class SeeLisClient:
                 email = email.casefold()
                 if not EMAIL_PATTERN.fullmatch(email):
                     raise self._invalid_response()
-            return access_token, display_name, email, department
+            return access_token, display_name, email, department, department_code
         except AuthStoreError as exc:
             outcome = exc.code
             raise

@@ -171,6 +171,7 @@ def test_repository_initialization_creates_normalized_auth_tables_and_seed_servi
     assert "auth_provider varchar(32) NOT NULL DEFAULT 'local'" in rendered
     assert "external_subject varchar(255)" in rendered
     assert "department varchar(100)" in rendered
+    assert "department_code varchar(32)" in rendered
     assert "users_provider_subject_uidx" in rendered
     assert "synthetic-password-hash" not in rendered
 

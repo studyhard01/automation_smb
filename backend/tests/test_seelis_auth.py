@@ -119,6 +119,7 @@ class _FakeAuthenticator:
             display_name="합성 SeeLIS 사용자",
             email="member@example.test",
             department="합성 부서",
+            department_code="SYN001",
         )
 
 
@@ -162,6 +163,7 @@ def test_seelis_client_calls_token_then_userinfo_and_returns_only_identity() -> 
                         "refreshToken": "must-not-be-used",
                         "userNm": "합성 SeeLIS 사용자",
                         "deptNm": " 합성 부서 ",
+                        "deptCd": " SYN001 ",
                         "emalAddr": "MEMBER@EXAMPLE.TEST",
                     }
                 },
@@ -179,6 +181,7 @@ def test_seelis_client_calls_token_then_userinfo_and_returns_only_identity() -> 
         display_name="합성 SeeLIS 사용자",
         email="member@example.test",
         department="합성 부서",
+        department_code="SYN001",
     )
     assert "token" not in identity.__dataclass_fields__
 
@@ -325,6 +328,7 @@ def test_store_creates_external_user_with_no_permissions_and_unusable_password()
         email="member@example.test",
         display_name="합성 SeeLIS 사용자",
         department="합성 부서",
+        department_code="SYN001",
     )
 
     rendered = "\n".join(statement for statement, _parameters in cursor.statements)
@@ -336,6 +340,7 @@ def test_store_creates_external_user_with_no_permissions_and_unusable_password()
     assert "user_service_permissions" not in rendered
     assert parameters and EXTERNAL_PASSWORD_SENTINEL in parameters[0]
     assert "합성 부서" in parameters[0]
+    assert "SYN001" in parameters[0]
 
 
 def test_store_updates_existing_external_department_without_changing_permissions() -> None:
@@ -359,6 +364,7 @@ def test_store_updates_existing_external_department_without_changing_permissions
         email="member@example.test",
         display_name="변경된 표시 이름",
         department="변경된 합성 부서",
+        department_code="SYN002",
     )
 
     updates = [
@@ -369,9 +375,16 @@ def test_store_updates_existing_external_department_without_changing_permissions
     assert user == returned
     assert len(updates) == 1
     assert "department = %s" in updates[0][0]
+    assert "department_code = %s" in updates[0][0]
     assert "system_role" not in updates[0][0]
     assert "all_services_access" not in updates[0][0]
-    assert updates[0][1] == ("변경된 표시 이름", "member@example.test", "변경된 합성 부서", returned.id)
+    assert updates[0][1] == (
+        "변경된 표시 이름",
+        "member@example.test",
+        "변경된 합성 부서",
+        "SYN002",
+        returned.id,
+    )
 
 
 @pytest.mark.parametrize(
@@ -403,6 +416,7 @@ def test_store_rejects_inactive_external_user_and_local_username_collision(
             email="member@example.test",
             display_name="합성 SeeLIS 사용자",
             department="합성 부서",
+            department_code="SYN001",
         )
 
     assert raised.value.code == expected_code
@@ -443,6 +457,7 @@ def test_seelis_api_success_returns_existing_envelope_and_httponly_service_cooki
         assert client.get("/api/auth/me").status_code == 200
     assert repository.upsert_calls == 1
     assert repository.upsert_values["department"] == "합성 부서"
+    assert repository.upsert_values["department_code"] == "SYN001"
 
 
 def test_seelis_api_does_not_mutate_store_when_external_auth_fails() -> None:

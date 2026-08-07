@@ -29,6 +29,7 @@ class AuthRepository(Protocol):
         email: str | None,
         display_name: str,
         department: str | None,
+        department_code: str | None,
     ) -> UserResponse: ...
     def record_login_failure(self, user_id: UUID) -> None: ...
     def record_login_success(self, user_id: UUID) -> None: ...
@@ -112,6 +113,7 @@ class AuthService:
                 email=identity.email,
                 display_name=identity.display_name,
                 department=identity.department,
+                department_code=identity.department_code,
             )
             token = new_session_token()
             self.repository.create_session(user.id, hash_session_token(token), self.session_ttl_seconds)

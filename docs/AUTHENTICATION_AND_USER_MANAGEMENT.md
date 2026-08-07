@@ -382,6 +382,7 @@ erDiagram
         varchar auth_provider
         varchar external_subject
         varchar department
+        varchar department_code
         varchar system_role
         boolean is_superuser
         boolean is_active
@@ -439,6 +440,7 @@ erDiagram
 | `auth_provider` | `varchar(32)` | 불가 | `local` | `local` 또는 `seelis` 로그인 출처 |
 | `external_subject` | `varchar(255)` | 가능 | provider와 함께 부분 고유 index | 검증된 userinfo `sub` |
 | `department` | `varchar(100)` | 가능 |  | SeeLIS 응답 `deptNm`, 로컬 사용자는 기본 `NULL` |
+| `department_code` | `varchar(32)` | 가능 |  | SeeLIS 응답 `deptCd`, 로컬 사용자는 기본 `NULL` |
 | `system_role` | `varchar(32)` | 불가 | `user`, `admin`만 허용 | 시스템 역할 |
 | `is_superuser` | `boolean` | 불가 | `false` | 최고 관리자 여부 |
 | `is_active` | `boolean` | 불가 | `true` | 로그인 가능한 계정인지 여부 |
@@ -539,8 +541,8 @@ SeeLIS 로그인 요청은 `{ "userId": "...", "pswd": "..." }`이며 성공 응
 설정된 API key로 토큰 API의 `201`과 `result.accessToken`을 확인한 뒤 Keycloak userinfo의 `200`과 `sub`를 검증한다.
 두 외부 검증이 모두 끝나기 전에는 사용자·세션을 변경하지 않으며 외부 비밀번호, API key, access/refresh token은 DB,
 Browser 응답, log에 저장하지 않는다. 신규 SeeLIS 사용자는 일반 활성 사용자이되 서비스 권한은 없고, 기존 SeeLIS
-사용자는 표시 이름, 이메일과 부서를 동기화한다. 같은 이름의 로컬 계정은 자동 연결하지 않는다. 부서는 현재 권한 판단에
-사용하지 않으며, 향후 부서별 권한 정책을 추가할 때 별도 승인 규칙과 함께 연결한다.
+사용자는 표시 이름, 이메일, 부서명과 부서코드를 동기화한다. 같은 이름의 로컬 계정은 자동 연결하지 않는다. 부서명과
+부서코드는 현재 권한 판단에 사용하지 않으며, 향후 부서별 권한 정책을 추가할 때 별도 승인 규칙과 함께 연결한다.
 
 ### 10.1 합성 로그인 예시
 

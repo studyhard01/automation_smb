@@ -68,6 +68,7 @@ class PostgresAuthStore:
                     auth_provider varchar(32) NOT NULL DEFAULT 'local',
                     external_subject varchar(255),
                     department varchar(100),
+                    department_code varchar(32),
                     system_role varchar(32) NOT NULL DEFAULT 'user'
                         CHECK (system_role IN ('admin', 'user')),
                     is_superuser boolean NOT NULL DEFAULT false,
@@ -89,6 +90,7 @@ class PostgresAuthStore:
             ).format(schema),
             sql.SQL("ALTER TABLE {}.users ADD COLUMN IF NOT EXISTS external_subject varchar(255)").format(schema),
             sql.SQL("ALTER TABLE {}.users ADD COLUMN IF NOT EXISTS department varchar(100)").format(schema),
+            sql.SQL("ALTER TABLE {}.users ADD COLUMN IF NOT EXISTS department_code varchar(32)").format(schema),
             sql.SQL("CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_uidx ON {}.users (lower(username))").format(
                 schema
             ),
@@ -227,6 +229,7 @@ class PostgresAuthStore:
         email: str | None,
         display_name: str,
         department: str | None,
+        department_code: str | None,
     ) -> UserResponse:
         """검증 완료된 SeeLIS 사용자를 안전하게 생성하거나 표시 정보만 동기화한다."""
 
@@ -252,9 +255,10 @@ class PostgresAuthStore:
                         cursor.execute(
                             sql.SQL(
                                 "UPDATE {}.users SET display_name = %s, email = %s, department = %s, "
+                                "department_code = %s, "
                                 "last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = %s"
                             ).format(schema),
-                            (display_name, email, department, user_id),
+                            (display_name, email, department, department_code, user_id),
                         )
                     else:
                         cursor.execute(
@@ -276,10 +280,10 @@ class PostgresAuthStore:
                                 """
                                 INSERT INTO {}.users (
                                     id, username, email, display_name, password_hash, auth_provider,
-                                    external_subject, department, system_role, is_superuser, is_active,
+                                    external_subject, department, department_code, system_role, is_superuser, is_active,
                                     all_services_access, last_login_at
                                 )
-                                VALUES (%s, %s, %s, %s, %s, 'seelis', %s, %s, 'user', false, true,
+                                VALUES (%s, %s, %s, %s, %s, 'seelis', %s, %s, %s, 'user', false, true,
                                     false, CURRENT_TIMESTAMP)
                                 """
                             ).format(schema),
@@ -291,6 +295,7 @@ class PostgresAuthStore:
                                 EXTERNAL_PASSWORD_SENTINEL,
                                 subject,
                                 department,
+                                department_code,
                             ),
                         )
         except AuthStoreError:
