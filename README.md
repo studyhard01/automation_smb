@@ -15,8 +15,10 @@ LLMOps 데이터셋을 읽기 전용으로 조회하고, 명시적으로 허용�
 - 답변: 온프레미스 Ollama만 사용, Citation과 검색 지연 반환
 - 문서 보기: MinIO Preview/Canonical read-only 조회
 - 버전 관계: Neo4j Document/Revision 관계 read-only 조회
+- 기안 초안: 선택 문서 근거와 사용자 설명으로 로컬 LLM의 근거 인용·section·문단·목록·표를 포함한 strict V2 문서를 만들고, 기존 3필드/기안 템플릿과 호환 투영해 SMB 신규 저장한 뒤 대화창 다운로드 제공
+- 기안 평가: 외부 dataset을 읽기 전용으로 받아 근거·LLM 내용·XLSX·도구 흐름을 100점으로 채점하고, runtime/model 컨텍스트 초과를 원문 없이 집계
 - 파일 첨부: `[업로드] 문서명_YYYYMMDD_v1.0.확장자` 저장 규칙으로 SMB share 내부 상대 경로에 비덮어쓰기 저장하고, 업로드 직후 대화 참고 파일에 자동 추가해 원본을 즉시 근거로 사용
-- 환경 설정: 왼쪽 하단 설정에서 업로드 상대 경로와 연결 상태만 관리하며 주소·계정·비밀번호는 노출하지 않음
+- 환경 설정: 왼쪽 하단 설정에서 업로드·기안 상대 경로와 연결 상태만 관리하며 주소·계정·비밀번호는 노출하지 않음
 
 현재 제품 경계에서 제외한 항목은 Langflow, MCP, LangGraph Studio, 로컬 SQLite/SMB 직접 인덱싱, 범용 Tool/Skill
 편집기, QC·유전검사 데모, 외부 LLM provider입니다. DB가 연결되지 않았을 때 규칙 기반 가짜 결과나 fixture로
@@ -36,10 +38,12 @@ automation_smb/
 │  │  ├─ llmops_artifacts.py         # MinIO 문서 보기
 │  │  ├─ llmops_graph.py             # Neo4j 버전 관계
 │  │  ├─ playground/document_*.py    # 선택 문서 채팅 API·서비스·계약
-│  │  └─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
+│  │  ├─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
+│  │  ├─ playground/proposal_*.py    # 선택 문서 기반 구조화 기안·XLSX 생성·다운로드 API
+│  │  └─ evaluation/proposal_*.py    # 기안 dataset preflight·100점 평가·비식별 통계
 │  └─ tests/                         # Backend 단위·계약 테스트
 ├─ docs/                             # 목표·현황·설계·운영 문서
-├─ scripts/                          # 실행·품질 검사 스크립트
+├─ scripts/                          # 실행·품질 검사·기안 평가 CLI
 ├─ Dockerfile                        # Vue build + FastAPI non-root image
 ├─ compose.yaml                      # runtime env·LAN port·healthcheck
 ├─ docker.env.example                # container endpoint override 예시
@@ -62,6 +66,10 @@ automation_smb/
 | 저장소 연결 상태 | `GET /api/playground/stores/status` |
 | 공개 설정 조회 | `GET /api/playground/settings` |
 | 업로드 상대 경로 변경 | `PATCH /api/playground/settings/upload` |
+| 기안 상대 경로 변경 | `PATCH /api/playground/settings/proposal-draft` |
+| LLM 기안 XLSX 생성·SMB 저장 | `POST /api/playground/drafts/proposal` |
+| 생성 기안 XLSX 다운로드 | `GET /api/playground/drafts/proposal/{draft_id}` |
+| 빈 기안 템플릿 다운로드 | `GET /api/playground/drafts/proposal` |
 | 공유폴더 파일 첨부 | `POST /api/playground/files/upload` |
 | 서비스 상태 | `GET /health` |
 | Vue 화면 | `GET /playground` |
@@ -83,8 +91,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_local_st
 ```
 
 화면은 `http://127.0.0.1:8011/playground`, OpenAPI는 `http://127.0.0.1:8011/docs`에서 확인합니다. `.env`에는
-PostgreSQL·MinIO·Neo4j의 read-only 계정, 온프레미스 Ollama 주소와 필요할 때 SMB 접속 정보를 넣습니다. SMB 첨부는
-`SMB_UPLOAD_ENABLED=true`로 명시적으로 켜야 하며, 실제 값·내부 주소·파일 목록은 코드·문서·로그에 기록하지 않습니다.
+PostgreSQL·MinIO·Neo4j의 read-only 계정, 온프레미스 Ollama 주소와 필요할 때 SMB 접속 정보를 넣습니다. SMB 첨부와
+기안 자동 저장은 `SMB_UPLOAD_ENABLED=true`로 명시적으로 켜야 하며, 실제 값·내부 주소·파일 목록은 코드·문서·로그에
+기록하지 않습니다.
 
 ### Docker와 LAN 실행
 
@@ -102,7 +111,7 @@ docker compose up -d
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\evaluate_quality.py
-.\.venv\Scripts\python.exe -m pytest backend/tests/test_llmops_search.py backend/tests/test_llmops_retrieval.py backend/tests/test_llmops_stores.py backend/tests/test_llmops_api_contracts.py backend/tests/test_upload_api.py
+.\.venv\Scripts\python.exe -m pytest backend/tests/test_llmops_search.py backend/tests/test_llmops_retrieval.py backend/tests/test_llmops_stores.py backend/tests/test_llmops_api_contracts.py backend/tests/test_proposal_draft.py backend/tests/test_proposal_evaluation.py backend/tests/test_upload_api.py
 npm.cmd --prefix .\frontend run typecheck
 npm.cmd --prefix .\frontend run test
 npm.cmd --prefix .\frontend run build
@@ -131,6 +140,8 @@ Invoke-RestMethod -Uri http://127.0.0.1:8011/api/playground/stores/status
 - [개발 환경](docs/DEVELOPMENT_SETUP.md)
 - [Docker 배포와 LAN 접속](docs/DOCKER_DEPLOYMENT.md)
 - [파일 첨부와 설정](docs/FILE_UPLOAD_AND_SETTINGS.md)
+- [기안 초안 작성](docs/PROPOSAL_DRAFT.md)
+- [기안 생성 도구 평가](docs/PROPOSAL_EVALUATION.md)
 - [운영 아키텍처](docs/PRODUCTION_ARCHITECTURE.md)
 - [품질 기준](docs/PROJECT_QUALITY_RUBRIC.md)
 - [개발 교훈](docs/DEVELOPMENT_LESSONS.md)

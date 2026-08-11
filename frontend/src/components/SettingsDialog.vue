@@ -19,11 +19,13 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   saveUploadDirectory: [relativeDirectory: string];
+  saveProposalDraftDirectory: [relativeDirectory: string];
   reload: [];
 }>();
 
 const dialog = ref<HTMLDialogElement | null>(null);
 const relativeDirectory = ref("");
+const proposalDraftRelativeDirectory = ref("");
 
 watch(
   () => props.settings?.upload.relative_directory,
@@ -31,24 +33,41 @@ watch(
   { immediate: true },
 );
 
-const relativeDirectoryError = computed(() => {
-  const value = relativeDirectory.value.trim();
+watch(
+  () => props.settings?.proposal_draft.relative_directory,
+  (value) => { proposalDraftRelativeDirectory.value = value || ""; },
+  { immediate: true },
+);
+
+function relativePathError(rawValue: string): string {
+  const value = rawValue.trim();
   if (!value) return "공유폴더 안의 상대 경로를 입력해 주세요.";
   if (/^(?:[a-zA-Z]:[\\/]|[\\/])/.test(value) || value.split(/[\\/]+/).includes("..")) {
     return "드라이브·루트·상위 폴더가 아닌 상대 경로만 사용할 수 있습니다.";
   }
   return "";
-});
+}
 
-const canSave = computed(() => Boolean(
+const relativeDirectoryError = computed(() => relativePathError(relativeDirectory.value));
+const proposalDraftRelativeDirectoryError = computed(() => relativePathError(proposalDraftRelativeDirectory.value));
+
+const canSaveUpload = computed(() => Boolean(
   props.settings
   && !props.savePending
   && !relativeDirectoryError.value
   && relativeDirectory.value.trim() !== props.settings.upload.relative_directory,
 ));
 
+const canSaveProposalDraft = computed(() => Boolean(
+  props.settings
+  && !props.savePending
+  && !proposalDraftRelativeDirectoryError.value
+  && proposalDraftRelativeDirectory.value.trim() !== props.settings.proposal_draft.relative_directory,
+));
+
 function open(): void {
   relativeDirectory.value = props.settings?.upload.relative_directory || "";
+  proposalDraftRelativeDirectory.value = props.settings?.proposal_draft.relative_directory || "";
   dialog.value?.showModal();
 }
 
@@ -56,8 +75,12 @@ function close(): void {
   dialog.value?.close();
 }
 
-function save(): void {
-  if (canSave.value) emit("saveUploadDirectory", relativeDirectory.value.trim());
+function saveUpload(): void {
+  if (canSaveUpload.value) emit("saveUploadDirectory", relativeDirectory.value.trim());
+}
+
+function saveProposalDraft(): void {
+  if (canSaveProposalDraft.value) emit("saveProposalDraftDirectory", proposalDraftRelativeDirectory.value.trim());
 }
 
 function formatBytes(value: number): string {
@@ -115,7 +138,7 @@ defineExpose({ open, close });
               </span>
             </header>
 
-            <form class="upload-settings-form" @submit.prevent="save">
+            <form class="upload-settings-form" @submit.prevent="saveUpload">
               <label for="uploadRelativeDirectory">업로드 상대 경로</label>
               <div class="settings-input-row">
                 <input
@@ -129,7 +152,7 @@ defineExpose({ open, close });
                   :aria-invalid="Boolean(relativeDirectoryError)"
                   aria-describedby="uploadRelativeDirectoryHelp"
                 />
-                <button type="submit" :disabled="!canSave">{{ savePending ? "저장 중" : "저장" }}</button>
+                <button type="submit" :disabled="!canSaveUpload">{{ savePending ? "저장 중" : "저장" }}</button>
               </div>
               <p id="uploadRelativeDirectoryHelp" :class="{ error: relativeDirectoryError }">
                 {{ relativeDirectoryError || `저장 위치: ${settings.upload.destination_label}` }}
@@ -149,10 +172,42 @@ defineExpose({ open, close });
               </div>
             </dl>
 
-            <p v-if="feedback" class="settings-feedback" :class="feedbackStatus" :role="feedbackStatus === 'error' ? 'alert' : 'status'">
-              {{ feedback }}
-            </p>
           </section>
+
+          <section class="settings-section" aria-labelledby="proposalDraftSettingsTitle">
+            <header>
+              <div>
+                <h3 id="proposalDraftSettingsTitle">기안 초안</h3>
+                <p>향후 공유폴더에 새 기안 파일을 추가할 상대 경로입니다.</p>
+              </div>
+              <span class="settings-status-pill success">다운로드 가능</span>
+            </header>
+
+            <form class="upload-settings-form proposal-draft-settings-form" @submit.prevent="saveProposalDraft">
+              <label for="proposalDraftRelativeDirectory">기안 저장 상대 경로</label>
+              <div class="settings-input-row">
+                <input
+                  id="proposalDraftRelativeDirectory"
+                  v-model="proposalDraftRelativeDirectory"
+                  type="text"
+                  maxlength="240"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="예: drafts/proposals"
+                  :aria-invalid="Boolean(proposalDraftRelativeDirectoryError)"
+                  aria-describedby="proposalDraftRelativeDirectoryHelp"
+                />
+                <button type="submit" :disabled="!canSaveProposalDraft">{{ savePending ? "저장 중" : "저장" }}</button>
+              </div>
+              <p id="proposalDraftRelativeDirectoryHelp" :class="{ error: proposalDraftRelativeDirectoryError }">
+                {{ proposalDraftRelativeDirectoryError || "생성된 기안 엑셀을 이 공유 루트 상대 경로에 새 파일로 저장합니다." }}
+              </p>
+            </form>
+          </section>
+
+          <p v-if="feedback" class="settings-feedback" :class="feedbackStatus" :role="feedbackStatus === 'error' ? 'alert' : 'status'">
+            {{ feedback }}
+          </p>
 
           <section class="settings-section" aria-labelledby="connectionSettingsTitle">
             <header>
@@ -188,7 +243,7 @@ defineExpose({ open, close });
         </div>
 
         <footer class="settings-footer">
-          <span>변경한 상대 경로는 다음 파일 첨부부터 적용됩니다.</span>
+          <span>설정 화면에는 서버 주소와 자격증명을 표시하지 않습니다.</span>
           <button type="button" @click="close">닫기</button>
         </footer>
       </template>

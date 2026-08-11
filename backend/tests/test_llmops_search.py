@@ -90,6 +90,129 @@ def test_llmops_file_search_returns_active_document_metadata_without_content():
     assert captured["application_name"] == "automation_smb_file_search"
 
 
+def test_file_search_collapses_same_physical_file_but_preserves_same_name_in_other_paths():
+    now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    duplicate_uri = "smb://synthetic/share/team/report.xlsx"
+    rows = [
+        {
+            "doc_id": uuid4(),
+            "revision_id": uuid4(),
+            "file_name": "report.xlsx",
+            "title": "낮은 점수 중복",
+            "extension": ".xlsx",
+            "file_size": 10,
+            "source_modified_at": now,
+            "source_uri": duplicate_uri,
+            "source_path": "team/report.xlsx",
+            "source_item_id": "source-a",
+            "score": 0.8,
+            "match_source": "metadata",
+        },
+        {
+            "doc_id": uuid4(),
+            "revision_id": uuid4(),
+            "file_name": "report.xlsx",
+            "title": "높은 점수 대표",
+            "extension": ".xlsx",
+            "file_size": 10,
+            "source_modified_at": now,
+            "source_uri": duplicate_uri,
+            "source_path": "team/report.xlsx",
+            "source_item_id": "source-b",
+            "score": 1.2,
+            "match_source": "metadata",
+        },
+        {
+            "doc_id": uuid4(),
+            "revision_id": uuid4(),
+            "file_name": "report.xlsx",
+            "title": "다른 경로 1",
+            "extension": ".xlsx",
+            "file_size": 10,
+            "source_modified_at": now,
+            "source_uri": "",
+            "source_path": "other-a",
+            "source_item_id": "item-a",
+            "score": 1.0,
+            "match_source": "metadata",
+        },
+        {
+            "doc_id": uuid4(),
+            "revision_id": uuid4(),
+            "file_name": "report.xlsx",
+            "title": "다른 경로 2",
+            "extension": ".xlsx",
+            "file_size": 10,
+            "source_modified_at": now,
+            "source_uri": "",
+            "source_path": "other-b",
+            "source_item_id": "item-b",
+            "score": 0.9,
+            "match_source": "metadata",
+        },
+    ]
+    connection = FakeConnection(rows)
+    settings = Settings(_env_file=None, llmops_file_search_max_limit=20)
+
+    response = LlmopsFileSearcher(settings, connect=lambda **_kwargs: connection).search(
+        DocumentSearchRequest(query="report", limit=3)
+    )
+
+    assert response.result_count == 3
+    assert [hit.title for hit in response.hits] == ["높은 점수 대표", "다른 경로 1", "다른 경로 2"]
+    assert connection.cursor_instance.executions[0][1][-1] == 20
+    serialized = response.model_dump_json()
+    assert "source_uri" not in serialized
+    assert "source_path" not in serialized
+    assert "source_item_id" not in serialized
+
+
+def test_external_hydration_collapses_same_physical_file_and_merges_store_matches():
+    first_doc, first_revision = uuid4(), uuid4()
+    second_doc, second_revision = uuid4(), uuid4()
+    rows = [
+        {
+            "doc_id": first_doc,
+            "revision_id": first_revision,
+            "file_name": "same.pdf",
+            "title": "첫 적재",
+            "extension": ".pdf",
+            "file_size": 10,
+            "source_modified_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "source_uri": "smb://synthetic/share/same.pdf",
+            "source_path": "share/same.pdf",
+            "source_item_id": "item-1",
+            "score": 0.75,
+            "match_source": "metadata",
+        },
+        {
+            "doc_id": second_doc,
+            "revision_id": second_revision,
+            "file_name": "same.pdf",
+            "title": "두 번째 적재",
+            "extension": ".pdf",
+            "file_size": 10,
+            "source_modified_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
+            "source_uri": "smb://synthetic/share/same.pdf",
+            "source_path": "share/same.pdf",
+            "source_item_id": "item-2",
+            "score": 0.75,
+            "match_source": "metadata",
+        },
+    ]
+    refs = {
+        (str(first_doc), str(first_revision)): {"minio"},
+        (str(second_doc), str(second_revision)): {"neo4j"},
+    }
+    searcher = LlmopsFileSearcher(Settings(_env_file=None), connect=lambda **_kwargs: FakeConnection(rows))
+
+    hits = searcher.hydrate_document_refs(refs, limit=5)
+
+    assert len(hits) == 1
+    assert hits[0].title == "두 번째 적재"
+    assert hits[0].matched_stores == ["postgresql", "minio", "neo4j"]
+
+
 def test_explicit_llmops_host_wins_over_environment_specific_fallback():
     settings = Settings(
         _env_file=None,
@@ -226,3 +349,46 @@ def test_multistore_search_uses_postgresql_minio_neo4j_and_llm_expansion():
     assert {"llm_query_expansion", "postgresql", "minio", "neo4j", "postgresql_hydrate"} <= set(
         response.timings_ms
     )
+
+
+def test_multistore_collapses_same_physical_file_across_different_document_ids():
+    first = DocumentSearchHit(
+        doc_id=uuid4(),
+        revision_id=uuid4(),
+        file_name="same.xlsx",
+        title="대표",
+        score=1.2,
+    )
+    second = DocumentSearchHit(
+        doc_id=uuid4(),
+        revision_id=uuid4(),
+        file_name="same.xlsx",
+        title="중복",
+        score=0.9,
+    )
+    first.set_physical_identity(source_uri="smb://synthetic/share/same.xlsx")
+    second.set_physical_identity(source_uri="smb://synthetic/share/same.xlsx")
+
+    class DuplicatePrimary(FakePrimarySearcher):
+        def search(self, request: DocumentSearchRequest, *, search_terms):  # noqa: ANN001
+            return DocumentSearchResponse(
+                query=request.query,
+                normalized_query=request.query,
+                hits=[first, second],
+                result_count=2,
+                elapsed_ms=1,
+                queried_stores=["postgresql"],
+            )
+
+    searcher = LlmopsMultiStoreFileSearcher(
+        Settings(_env_file=None),
+        postgres_searcher=DuplicatePrimary(first),
+        artifact_reader=None,
+        graph_reader=None,
+        query_expander=StaticExpander(),
+    )
+
+    response = searcher.search(DocumentSearchRequest(query="same", limit=5))
+
+    assert response.result_count == 1
+    assert response.hits[0].title == "대표"

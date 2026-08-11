@@ -74,9 +74,9 @@ npm run build
 | `App.vue` | 공통 상태, API 호출 orchestration, 선택 파일·대화 계약 연결 |
 | `AppHeader.vue` | 서비스와 저장소 준비 상태 |
 | `FileSidebar.vue` | 멀티스토어 자연어 검색, 저장소별 매칭 출처, 후보 선택·해제, 결과별 버전 확인 |
-| `SettingsDialog.vue` | 비밀 없는 SMB 업로드 상대 경로와 저장소 연결 상태 관리 |
+| `SettingsDialog.vue` | 비밀 없는 SMB 업로드·기안 상대 경로와 저장소 연결 상태 관리 |
 | `ChatWorkspace.vue` | 중앙 선택 문서 Q&A, 검색 후보 카드, 메시지 전송, Citation 표시 |
-| `FeatureSidebar.vue` | 문서 요약·보고서 초안과 저장소 연결 상태 |
+| `FeatureSidebar.vue` | 선택 문서 요약·기안 설명 입력 흐름 시작과 저장소 연결 상태 |
 | `FileInspectorDialog.vue` | MinIO Preview/Canonical과 Neo4j 버전 관계 조회 |
 
 검색 결과는 안정적인 `doc_id`·`revision_id`와 함께 `selectedFiles` 상태에 들어가며, 중앙 채팅 요청의
@@ -92,7 +92,7 @@ npm run build
 
 - 왼쪽: 자연어 파일 검색, 파일 첨부, 후보별 매칭 출처·버전 확인, 대화 참고 파일, 하단 설정
 - 중앙: 선택 범위, 근거 기반 대화, 기본 닫힘 Citation, Enter 전송·Shift+Enter 줄바꿈 Composer
-- 오른쪽: 문서 요약·보고서 초안, 실행 안내와 실제 결과 상태, 접을 수 있는 저장소 상태
+- 오른쪽: 선택 문서 요약·파일 선택 후 기안 설명 입력 모드 시작, 실행 안내와 실제 결과 상태, 접을 수 있는 저장소 상태
 - 1180px 이하: 오른쪽 패널을 다음 행으로 이동
 - 1024px 이하: 왼쪽 248px·중앙 가변 폭으로 축소
 - 760px 이하: 단일 열로 전환하고 각 패널을 문서 흐름에 배치
@@ -105,8 +105,9 @@ npm run build
 
 - Browser에는 DB 자격증명, 내부 Object URI, 실제 파일 경로를 전달하지 않는다.
 - 외부 LLM provider와 Browser API key 입력은 제공하지 않는다.
-- 설정 화면은 고정된 SMB share 내부의 상대 업로드 경로만 변경하며 host·share·계정·비밀번호는 반환하지 않는다.
+- 설정 화면은 고정된 SMB share 내부의 상대 업로드·기안 경로만 변경하며 host·share·계정·비밀번호는 반환하지 않는다.
 - 파일 첨부는 명시적 활성화, 허용 확장자·크기 제한, 기존 파일 비덮어쓰기를 적용한다.
+- 기안 생성은 선택 문서 범위와 사용자 설명을 로컬 LLM의 strict JSON으로 합성하고 `C8`·`A10`·`A15+`에 넣은 뒤, SMB 최종 파일을 exclusive 신규 생성하고 대화 메시지에 다운로드 링크를 표시한다.
 - Tool·Skill 편집 상태는 현재 제품 경계에서 제외한다.
 - 실제 공유폴더·의료자료의 외부 LLM 전송은 이 Frontend 전환에 포함되지 않는다.
 - Vite production build에는 `.env`나 DB 설정을 포함하지 않는다.

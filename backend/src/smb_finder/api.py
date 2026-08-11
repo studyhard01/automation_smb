@@ -24,6 +24,8 @@ from .playground.upload_service import UploadManager
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("smbprotocol").setLevel(logging.WARNING)
+logging.getLogger("smbclient").setLevel(logging.WARNING)
 _logger = logging.getLogger(__name__)
 _settings = load_settings()
 _upload_manager = UploadManager(_settings)
@@ -99,7 +101,7 @@ app = FastAPI(
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 app.mount("/playground/assets", StaticFiles(directory=str(_WEB_DIR / "assets")), name="playground-assets")
 app.include_router(create_document_router(_runtime))
-app.include_router(create_upload_router(_settings, _upload_manager))
+app.include_router(create_upload_router(_settings, _upload_manager, runtime_getter=_runtime))
 
 
 @app.get("/playground", include_in_schema=False)

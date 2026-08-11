@@ -33,15 +33,19 @@ const functions: FunctionDefinition[] = [
     placeholder: "선택한 문서의 핵심 내용을 항목별로 요약해 줘",
     description: "선택 문서의 핵심을 정리해요",
     icon: "Σ",
+    requiresFiles: true,
+    resultDescription: "요약 답변과 근거 문서는 중앙 대화 영역에서 확인할 수 있습니다.",
   },
   {
-    id: "report",
-    label: "보고서 초안",
-    title: "보고서 초안",
-    subtitle: "선택한 문서만 근거로 검토용 보고서 초안을 작성합니다.",
-    placeholder: "선택 문서만 근거로 검토용 보고서 초안을 작성해 줘",
-    description: "근거가 표시된 검토용 초안을 만들어요",
+    id: "proposal_draft",
+    label: "기안 초안 작성",
+    title: "기안 초안 작성",
+    subtitle: "선택 문서를 참고해 제목·결재 부탁 멘트·본문이 담긴 기안 엑셀을 생성합니다.",
+    placeholder: "기안 목적, 요청 내용, 꼭 포함할 사항을 입력하세요",
+    description: "설명을 받아 세 부분이 채워진 기안 엑셀을 만들어요",
     icon: "▤",
+    requiresFiles: true,
+    resultDescription: "공유폴더 저장 후 대화창의 버튼으로 엑셀을 내려받을 수 있습니다.",
   },
 ];
 
@@ -50,6 +54,13 @@ const chatDefinition: ConversationDefinition = {
   title: "선택 문서 대화",
   subtitle: "선택한 문서 안에서 근거를 찾아 답합니다.",
   placeholder: "선택한 문서에 대해 궁금한 내용을 입력하세요",
+};
+
+const proposalDescriptionDefinition: ConversationDefinition = {
+  label: "기안 설명 입력",
+  title: "기안 초안 작성",
+  subtitle: "선택한 문서를 참고할 수 있도록 기안 목적과 요청 내용을 설명해 주세요.",
+  placeholder: "예: 교육 참석 목적, 필요한 비용, 기대 효과를 포함해 기안해 줘",
 };
 
 const stores = ref<StoresStatusResponse | null>(null);
@@ -70,6 +81,9 @@ const settingsFeedback = ref("");
 const settingsFeedbackStatus = ref<UploadStatus>("idle");
 
 const selectedFunction = ref<FunctionId>("summary");
+const proposalDraftPending = ref(false);
+const proposalDescriptionMode = ref(false);
+const functionFeedback = ref("");
 const messages = ref<ChatUiMessage[]>([]);
 const history = ref<Array<{ role: "user" | "assistant"; content: string }>>([]);
 const sessionId = ref("");
@@ -86,13 +100,19 @@ const settingsDialog = ref<{ open: () => void; close: () => void } | null>(null)
 
 const uploadEnabled = computed(() => Boolean(settings.value?.upload.enabled && settings.value.upload.configured));
 const allowedExtensions = computed(() => settings.value?.upload.allowed_extensions || []);
+const workspaceDefinition = computed(() => (
+  proposalDescriptionMode.value ? proposalDescriptionDefinition : chatDefinition
+));
 
 function errorMessage(error: unknown): string {
   if (error instanceof ApiError || error instanceof Error) return error.message;
   return "알 수 없는 오류가 발생했습니다.";
 }
 
-function userFacingApiError(error: unknown, context: "search" | "chat" | "preview" | "graph" | "upload" | "settings"): string {
+function userFacingApiError(
+  error: unknown,
+  context: "search" | "chat" | "preview" | "graph" | "upload" | "settings" | "proposal_draft",
+): string {
   if (error instanceof ApiError && error.status === 409) {
     return "선택한 문서 버전이 변경됐습니다. 파일을 다시 검색해 주세요.";
   }
@@ -101,6 +121,8 @@ function userFacingApiError(error: unknown, context: "search" | "chat" | "previe
       ? "버전 저장소"
       : context === "preview" || context === "upload"
         ? "문서 저장소"
+        : context === "proposal_draft"
+          ? "기안 초안 서비스"
         : context === "settings"
           ? "설정 서비스"
           : "문서 DB";
@@ -165,6 +187,23 @@ async function saveUploadDirectory(relativeDirectory: string): Promise<void> {
   try {
     settings.value = await playgroundApi.updateUploadDirectory(relativeDirectory);
     settingsFeedback.value = "업로드 상대 경로를 저장했습니다.";
+    settingsFeedbackStatus.value = "success";
+  } catch (error) {
+    settingsFeedback.value = `설정 저장 실패: ${userFacingApiError(error, "settings")}`;
+    settingsFeedbackStatus.value = "error";
+  } finally {
+    settingsSavePending.value = false;
+  }
+}
+
+async function saveProposalDraftDirectory(relativeDirectory: string): Promise<void> {
+  if (settingsSavePending.value) return;
+  settingsSavePending.value = true;
+  settingsFeedback.value = "기안 저장 경로를 저장하고 있습니다.";
+  settingsFeedbackStatus.value = "pending";
+  try {
+    settings.value = await playgroundApi.updateProposalDraftDirectory(relativeDirectory);
+    settingsFeedback.value = "기안 저장 상대 경로를 저장했습니다.";
     settingsFeedbackStatus.value = "success";
   } catch (error) {
     settingsFeedback.value = `설정 저장 실패: ${userFacingApiError(error, "settings")}`;
@@ -320,7 +359,7 @@ async function inspectFileVersions(file: DocumentSearchHit): Promise<void> {
 }
 
 function startNewConversation(): void {
-  if (chatPending.value) return;
+  if (chatPending.value || proposalDraftPending.value) return;
   sessionId.value = "";
   history.value = [];
   messages.value = [];
@@ -328,6 +367,8 @@ function startNewConversation(): void {
   selectedFiles.value = [];
   fileSearchFeedback.value = "자연어로 찾을 파일을 설명해 주세요.";
   selectedFunction.value = "summary";
+  proposalDescriptionMode.value = false;
+  functionFeedback.value = "";
   conversationStatus.value = "ready";
   inspectedFile.value = null;
   filePreview.value = null;
@@ -337,6 +378,10 @@ function startNewConversation(): void {
 }
 
 async function sendChat(message: string): Promise<void> {
+  if (proposalDescriptionMode.value) {
+    await generateProposalDraft(message);
+    return;
+  }
   if (chatPending.value || !selectedFiles.value.length) return;
   chatPending.value = true;
   conversationStatus.value = "loading";
@@ -383,18 +428,95 @@ async function sendChat(message: string): Promise<void> {
   }
 }
 
+async function generateProposalDraft(description: string): Promise<void> {
+  if (proposalDraftPending.value || !selectedFiles.value.length || !description.trim()) return;
+  proposalDraftPending.value = true;
+  conversationStatus.value = "loading";
+  functionFeedback.value = "로컬 LLM이 기안 내용을 작성하고 엑셀에 반영하고 있습니다.";
+  const pendingId = createUiId();
+  const selectedFileNames = selectedFiles.value.map((file) => file.file_name);
+  messages.value.push(
+    {
+      id: createUiId(),
+      role: "user",
+      content: description.trim(),
+      selectedFiles: selectedFileNames,
+    },
+    { id: pendingId, role: "assistant", content: "제목·결재 부탁 멘트·본문을 작성하고 있습니다.", pending: true },
+  );
+  try {
+    const proposalDraft = await playgroundApi.generateProposalDraft({
+      instruction: description.trim(),
+      selected_files: selectedFiles.value.map(selectedFilePayload),
+    });
+    const index = messages.value.findIndex((item) => item.id === pendingId);
+    messages.value.splice(index, 1, {
+      id: pendingId,
+      role: "assistant",
+      content: [
+        "기안 초안을 만들었습니다.",
+        `제목: ${proposalDraft.fields.title}`,
+        `결재 부탁 멘트: ${proposalDraft.fields.approval_request}`,
+      ].join("\n"),
+      selectedFiles: selectedFileNames,
+      proposalDraft,
+    });
+    proposalDescriptionMode.value = false;
+    conversationStatus.value = "success";
+    functionFeedback.value = `${proposalDraft.file_name} 생성 및 공유폴더 저장을 완료했습니다.`;
+  } catch (error) {
+    conversationStatus.value = "error";
+    const failureMessage = `기안 초안 생성 실패: ${userFacingApiError(error, "proposal_draft")}`;
+    const index = messages.value.findIndex((item) => item.id === pendingId);
+    messages.value.splice(index, 1, {
+      id: pendingId,
+      role: "assistant",
+      content: `${failureMessage}\n설명을 보완해 다시 전송해 주세요.`,
+      error: true,
+    });
+    functionFeedback.value = `${failureMessage} 설명을 수정해 다시 시도할 수 있습니다.`;
+  } finally {
+    proposalDraftPending.value = false;
+  }
+}
+
 async function runFunction(functionId: FunctionId): Promise<void> {
   selectedFunction.value = functionId;
+  functionFeedback.value = "";
+
+  if (functionId === "proposal_draft") {
+    if (proposalDraftPending.value || proposalDescriptionMode.value) return;
+    if (!selectedFiles.value.length) {
+      conversationStatus.value = "error";
+      functionFeedback.value = "왼쪽 검색 결과에서 기안에 참고할 파일을 먼저 선택해 주세요.";
+      fileSearchFeedback.value = "먼저 검색 결과에서 기안에 참고할 파일을 선택해 주세요.";
+      return;
+    }
+    proposalDescriptionMode.value = true;
+    conversationStatus.value = "ready";
+    functionFeedback.value = "기안 목적과 요청 내용 입력을 기다리고 있습니다.";
+    messages.value.push({
+      id: createUiId(),
+      role: "assistant",
+      content: "기안 목적과 요청 내용을 입력해 주세요.",
+      selectedFiles: selectedFiles.value.map((file) => file.file_name),
+    });
+    return;
+  }
+
+  proposalDescriptionMode.value = false;
+
   if (!selectedFiles.value.length) {
     conversationStatus.value = "error";
+    functionFeedback.value = "요약할 파일을 먼저 선택해 주세요.";
     fileSearchFeedback.value = "먼저 검색 결과에서 파일을 선택해 주세요.";
     return;
   }
-  const prompts: Record<FunctionId, string> = {
-    summary: "선택한 문서의 핵심 내용을 근거와 함께 항목별로 요약해 줘",
-    report: "선택한 문서만 근거로 검토용 보고서 초안을 작성해 줘",
-  };
-  await sendChat(prompts[functionId]);
+  functionFeedback.value = "선택 문서의 핵심 내용을 요약하고 있습니다.";
+  await sendChat("선택한 문서의 핵심 내용을 근거와 함께 항목별로 요약해 줘");
+  functionFeedback.value = conversationStatus.value === "success"
+    ? "문서 요약을 완료했습니다."
+    : "문서 요약 실행 상태를 확인해 주세요.";
 }
 
 onMounted(() => Promise.all([loadStoreStatus(), loadSettings()]));
@@ -423,11 +545,12 @@ onMounted(() => Promise.all([loadStoreStatus(), loadSettings()]));
       @open-settings="openSettings"
     />
     <ChatWorkspace
-      :definition="chatDefinition"
+      :definition="workspaceDefinition"
       :messages="messages"
       :selected-files="selectedFiles"
-      :pending="chatPending"
+      :pending="chatPending || proposalDraftPending"
       :conversation-status="conversationStatus"
+      :input-mode="proposalDescriptionMode ? 'proposal_description' : 'chat'"
       @send="sendChat"
       @toggle-file="toggleFile"
       @preview-file="previewFile"
@@ -437,8 +560,9 @@ onMounted(() => Promise.all([loadStoreStatus(), loadSettings()]));
       :functions="functions"
       :selected-function="selectedFunction"
       :selected-file-count="selectedFiles.length"
-      :function-pending="chatPending || graphPending"
+      :function-pending="chatPending || graphPending || proposalDraftPending"
       :conversation-status="conversationStatus"
+      :function-feedback="functionFeedback"
       :stores="stores"
       @run-function="runFunction"
     />
@@ -462,6 +586,7 @@ onMounted(() => Promise.all([loadStoreStatus(), loadSettings()]));
     :feedback="settingsFeedback"
     :feedback-status="settingsFeedbackStatus"
     @save-upload-directory="saveUploadDirectory"
+    @save-proposal-draft-directory="saveProposalDraftDirectory"
     @reload="reloadSettings"
   />
 </template>

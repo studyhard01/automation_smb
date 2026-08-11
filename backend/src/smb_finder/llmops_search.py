@@ -19,6 +19,31 @@ from .models import DocumentSearchHit, DocumentSearchRequest, DocumentSearchResp
 _logger = logging.getLogger(__name__)
 
 
+def collapse_physical_hits(hits: Iterable[DocumentSearchHit]) -> list[DocumentSearchHit]:
+    """서로 다른 source/doc ID로 중복 적재된 동일 물리 파일을 한 건으로 통합한다.
+
+    파일명만으로 합치지 않으므로 같은 이름의 서로 다른 경로는 그대로 유지한다.
+    """
+
+    collapsed: dict[tuple[str, ...], DocumentSearchHit] = {}
+    stores_by_key: dict[tuple[str, ...], list[str]] = {}
+    for hit in hits:
+        key = hit.physical_identity or ("revision", str(hit.doc_id), str(hit.revision_id))
+        stores_by_key[key] = list(dict.fromkeys([*stores_by_key.get(key, []), *hit.matched_stores]))
+        current = collapsed.get(key)
+        if current is None or _hit_rank(hit) > _hit_rank(current):
+            collapsed[key] = hit
+
+    for key, hit in collapsed.items():
+        hit.matched_stores = stores_by_key[key]
+    return sorted(collapsed.values(), key=_hit_rank, reverse=True)
+
+
+def _hit_rank(hit: DocumentSearchHit) -> tuple[float, float, str, str]:
+    modified_timestamp = hit.modified_at.timestamp() if hit.modified_at is not None else float("-inf")
+    return (hit.score, modified_timestamp, str(hit.doc_id), str(hit.revision_id))
+
+
 class LlmopsSearchError(RuntimeError):
     """LLMOps 파일 검색의 안전한 공개 오류."""
 
@@ -59,6 +84,10 @@ class LlmopsFileSearcher:
             request.limit or self._settings.llmops_file_search_limit,
             self._settings.llmops_file_search_max_limit,
         )
+        candidate_limit = min(
+            max(self._settings.llmops_file_search_source_limit, limit),
+            max(limit * 3, self._settings.llmops_file_search_max_limit),
+        )
         if not terms:
             return DocumentSearchResponse(
                 query=request.query,
@@ -84,6 +113,9 @@ class LlmopsFileSearcher:
                     COALESCE(d.extension, '') AS extension,
                     d.file_size,
                     d.source_modified_at,
+                    d.source_uri,
+                    d.source_path,
+                    d.source_item_id,
                     concat_ws(' ', d.file_name, d.title, d.logical_name, d.document_key) AS metadata_text,
                     COALESCE(
                         (
@@ -115,6 +147,9 @@ class LlmopsFileSearcher:
                 extension,
                 file_size,
                 source_modified_at,
+                source_uri,
+                source_path,
+                source_item_id,
                 GREATEST(
                     similarity(metadata_text, %s),
                     content_score
@@ -132,7 +167,7 @@ class LlmopsFileSearcher:
                 with connection.cursor(row_factory=dict_row) as cursor:
                     cursor.execute(
                         query,
-                        (normalized, patterns, normalized, patterns, patterns, patterns, limit),
+                        (normalized, patterns, normalized, patterns, patterns, patterns, candidate_limit),
                     )
                     rows = cursor.fetchall()
         except Exception as exc:
@@ -144,7 +179,7 @@ class LlmopsFileSearcher:
                 elapsed_ms,
             ) from exc
 
-        hits = [self._row_to_hit(row) for row in rows]
+        hits = collapse_physical_hits(self._row_to_hit(row) for row in rows)[:limit]
         elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
         over_budget = elapsed_ms > self._settings.llmops_db_query_timeout_ms
         if over_budget:
@@ -190,6 +225,9 @@ class LlmopsFileSearcher:
                 COALESCE(d.extension, '') AS extension,
                 d.file_size,
                 d.source_modified_at,
+                d.source_uri,
+                d.source_path,
+                d.source_item_id,
                 0.75 AS score,
                 'metadata' AS match_source
             FROM {}.documents AS d
@@ -217,7 +255,7 @@ class LlmopsFileSearcher:
             key = (str(row["doc_id"]), str(row["revision_id"]))
             stores = ["postgresql", *sorted(refs.get(key, set()))]
             hits.append(self._row_to_hit(row, matched_stores=list(dict.fromkeys(stores))))
-        return hits
+        return collapse_physical_hits(hits)[:limit]
 
     def validate_active_selections(self, selections: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
         """선택한 doc/revision 쌍이 현재 활성 문서인지 한 번의 읽기 쿼리로 확인한다."""
@@ -308,7 +346,7 @@ class LlmopsFileSearcher:
         matched_stores: list[str] | None = None,
     ) -> DocumentSearchHit:
         score = float(row.get("score") or 0.0)
-        return DocumentSearchHit(
+        hit = DocumentSearchHit(
             source="llmops",
             doc_id=row["doc_id"],
             revision_id=row["revision_id"],
@@ -321,3 +359,9 @@ class LlmopsFileSearcher:
             match_source="content" if row.get("match_source") == "content" else "metadata",
             matched_stores=matched_stores or ["postgresql"],
         )
+        hit.set_physical_identity(
+            source_uri=str(row.get("source_uri") or ""),
+            source_path=str(row.get("source_path") or ""),
+            source_item_id=str(row.get("source_item_id") or ""),
+        )
+        return hit

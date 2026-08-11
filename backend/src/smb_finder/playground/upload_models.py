@@ -22,17 +22,35 @@ class UploadSettingsView(BaseModel):
     allowed_extensions: list[str]
 
 
+class ProposalDraftSettingsView(BaseModel):
+    """기안 초안의 향후 공유폴더 저장 위치에 대한 공개 설정."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relative_directory: str
+    destination_label: str
+
+
 class PlaygroundSettingsResponse(BaseModel):
     """설정 화면에서 안전하게 표시할 수 있는 전체 설정."""
 
     model_config = ConfigDict(extra="forbid")
 
     upload: UploadSettingsView
+    proposal_draft: ProposalDraftSettingsView
     local_llm_configured: bool
 
 
 class UploadSettingsPatch(BaseModel):
     """사용자가 변경할 수 있는 비밀이 아닌 업로드 경로 설정."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    relative_directory: str = Field(min_length=1, max_length=240)
+
+
+class ProposalDraftSettingsPatch(BaseModel):
+    """사용자가 변경할 수 있는 기안 초안 저장 상대 경로 설정."""
 
     model_config = ConfigDict(extra="forbid")
 

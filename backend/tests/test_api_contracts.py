@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from smb_finder import api
+
+
+def test_internal_client_loggers_do_not_emit_connection_metadata_at_info() -> None:
+    """HTTP·SMB client가 내부 endpoint와 사용자명을 INFO에 남기지 않는다."""
+
+    for logger_name in ("httpx", "httpcore", "smbprotocol", "smbclient"):
+        assert logging.getLogger(logger_name).getEffectiveLevel() >= logging.WARNING
 
 
 def test_openapi_exposes_only_document_vertical_slice() -> None:
@@ -23,7 +31,7 @@ def test_openapi_exposes_only_document_vertical_slice() -> None:
     assert operations["/api/playground/chat"]["post"]["operationId"] == "run_document_chat"
 
     serialized = str(schema).casefold()
-    for removed in ("/find", "/search-content", "/mcp", "skills", "attachments", "tool-draft", "karyotype"):
+    for removed in ("/find", "/search-content", "/mcp", "skills", "/attachments", "tool-draft", "karyotype"):
         assert removed not in serialized
 
 

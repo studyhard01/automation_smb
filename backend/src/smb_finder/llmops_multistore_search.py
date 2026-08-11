@@ -16,7 +16,7 @@ import httpx
 
 from . import intent
 from .config import Settings
-from .llmops_search import LlmopsSearchError
+from .llmops_search import LlmopsSearchError, collapse_physical_hits
 from .models import DocumentSearchHit, DocumentSearchRequest, DocumentSearchResponse, StoreConnectionState
 
 _logger = logging.getLogger(__name__)
@@ -256,15 +256,7 @@ class LlmopsMultiStoreFileSearcher:
             request.limit or self._settings.llmops_file_search_limit,
             self._settings.llmops_file_search_max_limit,
         )
-        hits = sorted(
-            merged.values(),
-            key=lambda hit: (
-                hit.score,
-                hit.modified_at.isoformat() if hit.modified_at else "",
-                hit.file_name,
-            ),
-            reverse=True,
-        )[:limit]
+        hits = collapse_physical_hits(merged.values())[:limit]
         elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
         over_budget = elapsed_ms > self._settings.llmops_file_search_budget_ms
         log = _logger.warning if over_budget else _logger.info

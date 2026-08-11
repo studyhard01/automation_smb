@@ -13,6 +13,7 @@ import type {
   DocumentSearchResponse,
   FileUploadResponse,
   PlaygroundSettingsResponse,
+  ProposalDraftGenerated,
   StoresStatusResponse,
 } from "@/types";
 
@@ -29,6 +30,8 @@ vi.mock("@/api/client", () => ({
     getFileGraph: vi.fn(),
     getSettings: vi.fn(),
     updateUploadDirectory: vi.fn(),
+    updateProposalDraftDirectory: vi.fn(),
+    generateProposalDraft: vi.fn(),
     uploadFile: vi.fn(),
   },
 }));
@@ -71,6 +74,10 @@ const settingsResponse: PlaygroundSettingsResponse = {
     max_size_bytes: 1024,
     allowed_extensions: [".md"],
   },
+  proposal_draft: {
+    relative_directory: "drafts/proposals",
+    destination_label: "기안 초안 저장 영역",
+  },
   local_llm_configured: true,
 };
 
@@ -110,6 +117,22 @@ const chatResponse: ChatResponse = {
   artifacts: [],
 };
 
+const proposalDraftResponse: ProposalDraftGenerated = {
+  draft_id: "77777777-7777-7777-7777-777777777777",
+  fields: {
+    title: "합성 자동화 구매 계획",
+    approval_request: "검토 후 재가하여 주시기 바랍니다.",
+    body: "합성 자동화 교육 참석을 요청합니다.",
+  },
+  file_name: "[기안] 합성 자동화 구매 계획_20260807_v1.0.xlsx",
+  download_url: "/api/playground/drafts/proposal/77777777-7777-7777-7777-777777777777",
+  destination_label: "기안 문서 폴더",
+  saved_to_smb: true,
+  model_used: "synthetic-model",
+  elapsed_ms: 321,
+  timings_ms: { llm: 300, workbook: 10, smb: 11 },
+};
+
 const graphResponse = {
   doc_id: selectedFile.doc_id,
   nodes: [
@@ -132,6 +155,8 @@ describe("App DB document flow", () => {
     vi.mocked(playgroundApi.getFileGraph).mockResolvedValue(graphResponse);
     vi.mocked(playgroundApi.getSettings).mockResolvedValue(settingsResponse);
     vi.mocked(playgroundApi.updateUploadDirectory).mockResolvedValue(settingsResponse);
+    vi.mocked(playgroundApi.updateProposalDraftDirectory).mockResolvedValue(settingsResponse);
+    vi.mocked(playgroundApi.generateProposalDraft).mockResolvedValue(proposalDraftResponse);
     vi.mocked(playgroundApi.uploadFile).mockResolvedValue(uploadResponse);
   });
 
@@ -156,12 +181,22 @@ describe("App DB document flow", () => {
     }));
   });
 
-  it("오른쪽 기능은 요약과 보고서만 제공하고 검색 결과에서 버전을 바로 조회한다", async () => {
+  it("오른쪽 기능은 요약과 기안 초안만 제공하고 보고서 초안은 제거한다", async () => {
     const wrapper = mount(App);
     await flushPromises();
 
     expect(wrapper.findComponent(FeatureSidebar).props("functions").map((item: { id: string }) => item.id))
-      .toEqual(["summary", "report"]);
+      .toEqual(["summary", "proposal_draft"]);
+    const functionButtons = wrapper.findComponent(FeatureSidebar).findAll("button.function-card");
+    expect(functionButtons[0].attributes("disabled")).toBeDefined();
+    expect(functionButtons[1].attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("기안 초안 작성");
+    expect(wrapper.text()).not.toContain("보고서 초안");
+  });
+
+  it("검색 결과에서 문서 버전을 바로 조회한다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
 
     await wrapper.findComponent(FileSidebar).vm.$emit("search", "합성 프로젝트 계획 찾아줘");
     await flushPromises();
@@ -173,6 +208,100 @@ describe("App DB document flow", () => {
       revision_id: selectedFile.revision_id,
     }));
     expect(wrapper.text()).toContain("Revision 2");
+  });
+
+  it("파일 선택 후 설명을 요청하고 다음 사용자 메시지로 기안 엑셀을 생성한다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await wrapper.vm.$nextTick();
+
+    expect(playgroundApi.generateProposalDraft).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("기안 목적과 요청 내용을 입력해 주세요.");
+    expect(wrapper.findComponent(ChatWorkspace).props("inputMode")).toBe("proposal_description");
+
+    await wrapper.findComponent(ChatWorkspace).vm.$emit("send", "교육 참석 목적과 비용을 포함해 기안해 줘");
+    await flushPromises();
+
+    expect(playgroundApi.generateProposalDraft).toHaveBeenCalledWith({
+      instruction: "교육 참석 목적과 비용을 포함해 기안해 줘",
+      selected_files: [expect.objectContaining({
+        doc_id: selectedFile.doc_id,
+        revision_id: selectedFile.revision_id,
+      })],
+    });
+    const download = wrapper.findComponent(ChatWorkspace).get(`a[href="${proposalDraftResponse.download_url}"]`);
+    expect(download.attributes("download")).toBe(proposalDraftResponse.file_name);
+    expect(wrapper.text()).toContain(`제목: ${proposalDraftResponse.fields.title}`);
+    expect(wrapper.text()).toContain(`결재 부탁 멘트: ${proposalDraftResponse.fields.approval_request}`);
+    expect(wrapper.text()).toContain(`선택 문서: ${selectedFile.file_name}`);
+    expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback"))
+      .toContain(`${proposalDraftResponse.file_name} 생성 및 공유폴더 저장을 완료했습니다`);
+  });
+
+  it("기안 생성이 진행 중이면 연속 실행 요청을 한 번만 처리한다", async () => {
+    let resolveGeneration!: (value: ProposalDraftGenerated) => void;
+    vi.mocked(playgroundApi.generateProposalDraft).mockReturnValue(new Promise((resolve) => {
+      resolveGeneration = resolve;
+    }));
+    const wrapper = mount(App);
+    await flushPromises();
+    const sidebar = wrapper.findComponent(FeatureSidebar);
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await sidebar.vm.$emit("runFunction", "proposal_draft");
+    const workspace = wrapper.findComponent(ChatWorkspace);
+    void workspace.vm.$emit("send", "첫 번째 기안 설명");
+    await wrapper.vm.$nextTick();
+    void workspace.vm.$emit("send", "두 번째 기안 설명");
+    expect(playgroundApi.generateProposalDraft).toHaveBeenCalledTimes(1);
+
+    resolveGeneration(proposalDraftResponse);
+    await flushPromises();
+  });
+
+  it("기안 기능은 파일이 없으면 API를 호출하지 않고 왼쪽 파일 선택을 안내한다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await flushPromises();
+
+    expect(playgroundApi.generateProposalDraft).not.toHaveBeenCalled();
+    expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback"))
+      .toContain("왼쪽 검색 결과에서 기안에 참고할 파일을 먼저 선택해 주세요");
+  });
+
+  it("기안 생성 실패 후에도 설명 입력 모드를 유지해 재시도한다", async () => {
+    vi.mocked(playgroundApi.generateProposalDraft).mockRejectedValueOnce(new Error("합성 생성 실패"));
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await wrapper.findComponent(ChatWorkspace).vm.$emit("send", "첫 기안 설명");
+    await flushPromises();
+
+    expect(wrapper.findComponent(ChatWorkspace).props("inputMode")).toBe("proposal_description");
+    expect(wrapper.text()).toContain("설명을 보완해 다시 전송해 주세요");
+
+    await wrapper.findComponent(ChatWorkspace).vm.$emit("send", "보완한 기안 설명");
+    await flushPromises();
+    expect(playgroundApi.generateProposalDraft).toHaveBeenCalledTimes(2);
+    expect(wrapper.findComponent(ChatWorkspace).props("inputMode")).toBe("chat");
+  });
+
+  it("문서 요약은 파일이 없으면 실행하지 않는다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "summary");
+    await flushPromises();
+
+    expect(playgroundApi.sendChat).not.toHaveBeenCalled();
+    expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback")).toBe("요약할 파일을 먼저 선택해 주세요.");
   });
 
   it("파일 선택과 해제는 검색 피드백을 회색 상태 문구로 덮어쓰지 않는다", async () => {
@@ -221,6 +350,11 @@ describe("App DB document flow", () => {
     await flushPromises();
 
     expect(playgroundApi.updateUploadDirectory).toHaveBeenCalledWith("playground/reviewed");
+    expect(wrapper.findComponent(SettingsDialog).props("feedbackStatus")).toBe("success");
+
+    await wrapper.findComponent(SettingsDialog).vm.$emit("saveProposalDraftDirectory", "drafts/reviewed");
+    await flushPromises();
+    expect(playgroundApi.updateProposalDraftDirectory).toHaveBeenCalledWith("drafts/reviewed");
     expect(wrapper.findComponent(SettingsDialog).props("feedbackStatus")).toBe("success");
   });
 });

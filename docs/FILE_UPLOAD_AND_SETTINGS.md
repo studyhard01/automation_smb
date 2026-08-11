@@ -48,7 +48,8 @@ SMB_UPLOAD_MAX_CONCURRENCY
 - root filesystem은 read-only이고 runtime user는 UID/GID 10001이다.
 - 파일명, 제어문자, Windows 예약명, 확장자, 실제 스트림 byte 크기를 검증한다.
 - 원본명에 기존 `[업로드] ` 접두사나 `_YYYYMMDD_vX.Y` 꼬리가 있으면 제거한 뒤 현재 날짜와 초기 버전 `v1.0`을 한 번만 붙인다.
-- 고유 partial을 `xb`로 만든 뒤 비덮어쓰기 rename으로 확정한다. 실패하면 서비스가 만든 partial만 정리한다.
+- 완성된 업로드 내용을 로컬 메모리에서 크기 검증한 뒤 최종 파일명을 `xb`로 직접 신규 생성한다. SMB 내부에 partial을
+  만들거나 rename/remove로 확정·정리하지 않으며, 동명 경합은 실패한다.
 - PostgreSQL·MinIO·Neo4지는 계속 read-only다.
 
 ## 검색 반영 경계

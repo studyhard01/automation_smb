@@ -6,6 +6,8 @@ import type {
   DocumentVersionGraphResponse,
   FileUploadResponse,
   PlaygroundSettingsResponse,
+  ProposalDraftGenerated,
+  ProposalDraftRequest,
   SelectedFilePayload,
   StoresStatusResponse,
 } from "@/types";
@@ -84,6 +86,26 @@ export const playgroundApi = {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ relative_directory: relativeDirectory }),
+      }),
+    );
+  },
+
+  async updateProposalDraftDirectory(relativeDirectory: string): Promise<PlaygroundSettingsResponse> {
+    return parseResponse<PlaygroundSettingsResponse>(
+      await fetch("/api/playground/settings/proposal-draft", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ relative_directory: relativeDirectory }),
+      }),
+    );
+  },
+
+  async generateProposalDraft(payload: ProposalDraftRequest): Promise<ProposalDraftGenerated> {
+    return parseResponse<ProposalDraftGenerated>(
+      await fetch("/api/playground/drafts/proposal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       }),
     );
   },

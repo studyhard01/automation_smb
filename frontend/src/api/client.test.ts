@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { playgroundApi } from "./client";
-import type { FileUploadResponse, PlaygroundSettingsResponse } from "@/types";
+import type { FileUploadResponse, PlaygroundSettingsResponse, ProposalDraftGenerated } from "@/types";
 
 const settingsResponse: PlaygroundSettingsResponse = {
   upload: {
@@ -11,6 +11,10 @@ const settingsResponse: PlaygroundSettingsResponse = {
     destination_label: "공유폴더 업로드 영역",
     max_size_bytes: 1024,
     allowed_extensions: [".md"],
+  },
+  proposal_draft: {
+    relative_directory: "drafts/proposals",
+    destination_label: "기안 초안 저장 영역",
   },
   local_llm_configured: true,
 };
@@ -33,6 +37,22 @@ const uploadResponse: FileUploadResponse = {
     score: 1,
     match_source: "content",
   },
+};
+
+const proposalDraftResponse: ProposalDraftGenerated = {
+  draft_id: "77777777-7777-7777-7777-777777777777",
+  fields: {
+    title: "합성 자동화 구매 계획",
+    approval_request: "검토 후 재가하여 주시기 바랍니다.",
+    body: "합성 자동화 교육 참석을 요청합니다.",
+  },
+  file_name: "[기안] 합성 자동화 구매 계획_20260807_v1.0.xlsx",
+  download_url: "/api/playground/drafts/proposal/77777777-7777-7777-7777-777777777777",
+  destination_label: "기안 문서 폴더",
+  saved_to_smb: true,
+  model_used: "synthetic-model",
+  elapsed_ms: 321,
+  timings_ms: { llm: 300, workbook: 10, smb: 11 },
 };
 
 function response(body: unknown): Response {
@@ -64,6 +84,36 @@ describe("playgroundApi settings and upload", () => {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ relative_directory: "playground/reviewed" }),
+    });
+
+    fetchMock.mockResolvedValueOnce(response(settingsResponse));
+    await playgroundApi.updateProposalDraftDirectory("drafts/reviewed");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/playground/settings/proposal-draft", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ relative_directory: "drafts/reviewed" }),
+    });
+  });
+
+  it("기안 생성 지시를 POST하고 LLM·SMB·다운로드 메타데이터를 보존한다", async () => {
+    fetchMock.mockResolvedValueOnce(response(proposalDraftResponse));
+
+    const payload = {
+      instruction: "합성 구매 계획 제목을 작성해 줘",
+      selected_files: [uploadResponse.selected_file!].map((file) => ({
+        source: file.source,
+        file_name: file.file_name,
+        title: file.title,
+        doc_id: file.doc_id,
+        revision_id: file.revision_id,
+      })),
+    };
+    await expect(playgroundApi.generateProposalDraft(payload))
+      .resolves.toEqual(proposalDraftResponse);
+    expect(fetchMock).toHaveBeenCalledWith("/api/playground/drafts/proposal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
   });
 

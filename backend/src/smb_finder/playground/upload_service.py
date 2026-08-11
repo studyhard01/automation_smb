@@ -22,10 +22,17 @@ from smb_finder.extract import SUPPORTED_EXTENSIONS, extract_text
 from smb_finder.llmops_retrieval import ScopedRetrievalResult
 from smb_finder.models import DocumentCitation, RetrievalMetadata, RetrievalScope, RetrievalScores
 
-from .upload_models import FileUploadResponse, PlaygroundSettingsResponse, UploadedFileSelection, UploadSettingsView
+from .upload_models import (
+    FileUploadResponse,
+    PlaygroundSettingsResponse,
+    ProposalDraftSettingsView,
+    UploadedFileSelection,
+    UploadSettingsView,
+)
 
 _logger = logging.getLogger(__name__)
 _DESTINATION_LABEL = "관리 공유폴더"
+_PROPOSAL_DESTINATION_LABEL = "기안 문서 폴더"
 _CHUNK_SIZE = 64 * 1024
 _UPLOAD_PREFIX = "[업로드] "
 _INITIAL_UPLOAD_VERSION = "v1.0"
@@ -103,25 +110,31 @@ def sanitize_filename(value: str) -> str:
     return value
 
 
-def build_upload_filename(original_name: str, uploaded_at: datetime) -> str:
-    """원본 확장자를 보존해 `[업로드] 문서명_YYYYMMDD_v1.0` 규칙의 저장명을 만든다."""
+def build_versioned_filename(original_name: str, created_at: datetime, *, prefix: str) -> str:
+    """원본 확장자를 보존해 `접두사 문서명_YYYYMMDD_v1.0` 저장명을 만든다."""
 
     safe_name = sanitize_filename(original_name)
     suffix = Path(safe_name).suffix
     document_name = safe_name[: -len(suffix)] if suffix else safe_name
-    if document_name.startswith(_UPLOAD_PREFIX):
-        document_name = document_name[len(_UPLOAD_PREFIX) :]
+    if document_name.startswith(prefix):
+        document_name = document_name[len(prefix) :]
     document_name = _VERSIONED_UPLOAD_SUFFIX.sub("", document_name).strip()
     if not document_name:
         raise UploadError("invalid_file_name", "저장할 문서 이름이 필요합니다.", 400)
 
-    normalized_time = uploaded_at if uploaded_at.tzinfo is not None else uploaded_at.replace(tzinfo=UTC)
-    upload_date = normalized_time.astimezone(_KST).strftime("%Y%m%d")
-    return sanitize_filename(f"{_UPLOAD_PREFIX}{document_name}_{upload_date}_{_INITIAL_UPLOAD_VERSION}{suffix}")
+    normalized_time = created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=UTC)
+    created_date = normalized_time.astimezone(_KST).strftime("%Y%m%d")
+    return sanitize_filename(f"{prefix}{document_name}_{created_date}_{_INITIAL_UPLOAD_VERSION}{suffix}")
+
+
+def build_upload_filename(original_name: str, uploaded_at: datetime) -> str:
+    """원본 확장자를 보존해 `[업로드] 문서명_YYYYMMDD_v1.0` 규칙의 저장명을 만든다."""
+
+    return build_versioned_filename(original_name, uploaded_at, prefix=_UPLOAD_PREFIX)
 
 
 class RuntimeUploadSettingsStore:
-    """비밀이 아닌 상대 폴더 설정 하나만 runtime JSON에 저장한다."""
+    """비밀이 아닌 Playground 상대 폴더 설정을 runtime JSON에 병합 저장한다."""
 
     def __init__(
         self,
@@ -129,11 +142,13 @@ class RuntimeUploadSettingsStore:
         default_relative_directory: str = "",
         *,
         legacy_relative_directory: str = "",
+        proposal_draft_default_relative_directory: str = "",
     ) -> None:
         self._path = path
         self._lock = threading.RLock()
         self._default = self._safe_default(default_relative_directory)
         self._legacy = self._safe_default(legacy_relative_directory)
+        self._proposal_draft_default = self._safe_default(proposal_draft_default_relative_directory)
 
     @staticmethod
     def _safe_default(value: str) -> str:
@@ -157,20 +172,52 @@ class RuntimeUploadSettingsStore:
                 return self._default
 
     def set_relative_directory(self, value: str) -> str:
-        """검증한 상대 폴더만 원자적으로 저장한다."""
+        """검증한 업로드 상대 폴더를 다른 runtime 설정을 보존해 저장한다."""
 
-        normalized = normalize_relative_directory(value)
-        payload = {"upload": {"relative_directory": normalized}}
+        return self._set_section_relative_directory("upload", value)
+
+    def get_proposal_draft_relative_directory(self) -> str:
+        """기안 초안 저장 상대 폴더를 읽고 손상되었으면 빈 기본값으로 복구한다."""
+
         with self._lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self._path.with_name(f".{self._path.name}.{uuid.uuid4().hex}.tmp")
             try:
-                temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                temporary.replace(self._path)
-            finally:
-                if temporary.exists():
-                    temporary.unlink()
+                payload = json.loads(self._path.read_text(encoding="utf-8"))
+                value = payload.get("proposal_draft", {}).get("relative_directory", "")
+                return normalize_relative_directory(value)
+            except (FileNotFoundError, OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                return self._proposal_draft_default
+
+    def set_proposal_draft_relative_directory(self, value: str) -> str:
+        """검증한 기안 초안 상대 폴더를 다른 runtime 설정을 보존해 저장한다."""
+
+        return self._set_section_relative_directory("proposal_draft", value)
+
+    def _set_section_relative_directory(self, section_name: str, value: str) -> str:
+        normalized = normalize_relative_directory(value)
+        with self._lock:
+            try:
+                payload = json.loads(self._path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    payload = {}
+            except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+                payload = {}
+            section = payload.get(section_name)
+            if not isinstance(section, dict):
+                section = {}
+            section["relative_directory"] = normalized
+            payload[section_name] = section
+            self._write_payload(payload)
         return normalized
+
+    def _write_payload(self, payload: dict[str, Any]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._path.with_name(f".{self._path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(self._path)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
 
 class UploadRegistry:
@@ -306,7 +353,7 @@ class SmbUploadWriter:
                 raise UploadError("smb_upload_unavailable", "공유폴더에 연결할 수 없습니다.", 503) from exc
 
     def upload(self, source: BinaryIO, original_name: str, relative_directory: str) -> FileUploadResponse:
-        """파일을 임시 이름으로 기록한 뒤 동일 폴더에서 최종 이름으로 이동한다."""
+        """검증을 마친 파일을 최종 이름으로 한 번만 exclusive 생성한다."""
 
         if not self._settings.smb_upload_enabled:
             raise UploadError("upload_disabled", "파일 첨부 기능이 비활성화되어 있습니다.", 403)
@@ -323,47 +370,29 @@ class SmbUploadWriter:
         if not self._slots.acquire(blocking=False):
             raise UploadError("upload_busy", "다른 파일을 업로드하고 있습니다. 잠시 후 다시 시도해 주세요.", 429)
 
-        partial_path = ""
-        partial_created = False
         try:
-            self._connect()
             deadline = time.monotonic() + self._settings.smb_upload_timeout_ms / 1000
+            content = self._read_upload_content(source, deadline)
+            self._connect()
             root = rf"\\{self._settings.effective_smb_upload_host}\{self._settings.effective_smb_upload_share_name}"
             destination = str(PureWindowsPath(root, *normalized_directory.split("/")))
             if not self._smb.path.isdir(destination):
                 raise UploadError("upload_directory_unavailable", "설정한 업로드 폴더를 사용할 수 없습니다.", 503)
 
             final_path = str(PureWindowsPath(destination, file_name))
-            if self._smb.path.exists(final_path):
-                raise UploadError("file_already_exists", "같은 이름의 파일이 이미 있습니다.", 409)
-
-            partial_path = str(PureWindowsPath(destination, f".upload-{uuid.uuid4().hex}.part"))
-            size_bytes = 0
-            with self._smb.open_file(partial_path, mode="xb") as target:
-                partial_created = True
-                while True:
-                    if time.monotonic() > deadline:
-                        raise UploadError("upload_timeout", "파일 업로드 시간이 초과되었습니다.", 504)
-                    chunk = source.read(_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    size_bytes += len(chunk)
-                    if size_bytes > self._settings.smb_upload_max_size_bytes:
-                        raise UploadError("file_too_large", "파일 크기가 허용 한도를 초과했습니다.", 413)
-                    target.write(chunk)
-
-            if size_bytes == 0:
-                raise UploadError("empty_file", "빈 파일은 첨부할 수 없습니다.", 400)
+            try:
+                with self._smb.open_file(final_path, mode="xb") as target:
+                    for offset in range(0, len(content), _CHUNK_SIZE):
+                        if time.monotonic() > deadline:
+                            raise UploadError("upload_timeout", "파일 업로드 시간이 초과되었습니다.", 504)
+                        target.write(content[offset : offset + _CHUNK_SIZE])
+            except FileExistsError as exc:
+                raise UploadError("file_already_exists", "같은 이름의 파일이 이미 있습니다.", 409) from exc
             if time.monotonic() > deadline:
                 raise UploadError("upload_timeout", "파일 업로드 시간이 초과되었습니다.", 504)
-            if self._smb.path.exists(final_path):
-                raise UploadError("file_already_exists", "같은 이름의 파일이 이미 있습니다.", 409)
-            # smbclient.rename은 replace_if_exists=False로 동작한다. 직전 exists 검사 이후 경합이 나도 덮어쓰지 않는다.
-            self._smb.rename(partial_path, final_path)
-            partial_created = False
             return FileUploadResponse(
                 file_name=file_name,
-                size_bytes=size_bytes,
+                size_bytes=len(content),
                 uploaded_at=uploaded_at,
                 destination_label=_DESTINATION_LABEL,
                 indexed=False,
@@ -374,12 +403,78 @@ class SmbUploadWriter:
             _logger.warning("SMB 파일 업로드 실패: error_type=%s", type(exc).__name__)
             raise UploadError("smb_upload_failed", "공유폴더에 파일을 저장하지 못했습니다.", 503) from exc
         finally:
-            if partial_created and partial_path:
-                try:
-                    self._smb.remove(partial_path)
-                except Exception:  # noqa: BLE001 - 생성한 임시 파일 정리 실패만 기록한다.
-                    _logger.warning("SMB 업로드 임시 파일 정리 실패")
             self._slots.release()
+
+    def create_xlsx(self, content: bytes, file_name: str, relative_directory: str) -> FileUploadResponse:
+        """완성된 XLSX를 기존 파일 변경 없이 최종 이름으로 한 번만 생성한다."""
+
+        if not self._settings.smb_upload_enabled:
+            raise UploadError("upload_disabled", "기안 초안 저장 기능이 비활성화되어 있습니다.", 403)
+        if not self._settings.smb_upload_credentials_configured:
+            raise UploadError("upload_not_configured", "공유폴더 연결 설정이 필요합니다.", 503)
+
+        normalized_directory = normalize_relative_directory(relative_directory)
+        safe_name = sanitize_filename(file_name)
+        if Path(safe_name).suffix.lower() != ".xlsx":
+            raise UploadError("file_type_not_allowed", "기안 초안은 XLSX 형식으로만 저장할 수 있습니다.", 415)
+        if not content:
+            raise UploadError("empty_file", "빈 기안 초안은 저장할 수 없습니다.", 400)
+        if len(content) > self._settings.smb_upload_max_size_bytes:
+            raise UploadError("file_too_large", "기안 초안 크기가 허용 한도를 초과했습니다.", 413)
+        if not self._slots.acquire(blocking=False):
+            raise UploadError("upload_busy", "다른 파일을 저장하고 있습니다. 잠시 후 다시 시도해 주세요.", 429)
+
+        uploaded_at = self._clock()
+        try:
+            deadline = time.monotonic() + self._settings.smb_upload_timeout_ms / 1000
+            self._connect()
+            root = rf"\\{self._settings.effective_smb_upload_host}\{self._settings.effective_smb_upload_share_name}"
+            destination = str(PureWindowsPath(root, *normalized_directory.split("/")))
+            if not self._smb.path.isdir(destination):
+                raise UploadError("upload_directory_unavailable", "설정한 기안 저장 폴더를 사용할 수 없습니다.", 503)
+
+            final_path = str(PureWindowsPath(destination, safe_name))
+            try:
+                with self._smb.open_file(final_path, mode="xb") as target:
+                    for offset in range(0, len(content), _CHUNK_SIZE):
+                        if time.monotonic() > deadline:
+                            raise UploadError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
+                        target.write(content[offset : offset + _CHUNK_SIZE])
+            except FileExistsError as exc:
+                raise UploadError("file_already_exists", "같은 이름의 기안 파일이 이미 있습니다.", 409) from exc
+            if time.monotonic() > deadline:
+                raise UploadError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
+            return FileUploadResponse(
+                file_name=safe_name,
+                size_bytes=len(content),
+                uploaded_at=uploaded_at,
+                destination_label=_PROPOSAL_DESTINATION_LABEL,
+                indexed=False,
+            )
+        except UploadError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 내부 SMB 경로와 예외 메시지를 숨긴다.
+            _logger.warning("SMB 기안 초안 저장 실패: error_type=%s", type(exc).__name__)
+            raise UploadError("smb_upload_failed", "공유폴더에 기안 초안을 저장하지 못했습니다.", 503) from exc
+        finally:
+            self._slots.release()
+
+    def _read_upload_content(self, source: BinaryIO, deadline: float) -> bytes:
+        """SMB 파일을 만들기 전에 크기·빈 파일·시간 예산을 로컬에서 검증한다."""
+
+        content = bytearray()
+        while True:
+            if time.monotonic() > deadline:
+                raise UploadError("upload_timeout", "파일 업로드 시간이 초과되었습니다.", 504)
+            chunk = source.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > self._settings.smb_upload_max_size_bytes:
+                raise UploadError("file_too_large", "파일 크기가 허용 한도를 초과했습니다.", 413)
+        if not content:
+            raise UploadError("empty_file", "빈 파일은 첨부할 수 없습니다.", 400)
+        return bytes(content)
 
     def read(self, file_name: str, relative_directory: str, *, expected_size: int) -> bytes:
         """등록된 업로드 원본을 제한된 크기와 시간 안에서 다시 읽는다."""
@@ -454,6 +549,7 @@ class UploadManager:
             Path(settings.smb_upload_runtime_settings_path),
             default_relative_directory=default_directory,
             legacy_relative_directory=settings.nas_fold_path,
+            proposal_draft_default_relative_directory=settings.proposal_draft_default_relative_directory,
         )
         self.writer = writer or SmbUploadWriter(settings)
         self.registry = registry or UploadRegistry(Path(settings.smb_upload_registry_path))
@@ -467,6 +563,7 @@ class UploadManager:
         """비밀·주소 없이 설정 화면 계약을 생성한다."""
 
         relative_directory = self.store.get_relative_directory()
+        proposal_draft_relative_directory = self.store.get_proposal_draft_relative_directory()
         return PlaygroundSettingsResponse(
             upload=UploadSettingsView(
                 enabled=self.settings.smb_upload_enabled,
@@ -476,6 +573,10 @@ class UploadManager:
                 max_size_bytes=self.settings.smb_upload_max_size_bytes,
                 allowed_extensions=list(self.writer.allowed_extensions),
             ),
+            proposal_draft=ProposalDraftSettingsView(
+                relative_directory=proposal_draft_relative_directory,
+                destination_label=_PROPOSAL_DESTINATION_LABEL,
+            ),
             local_llm_configured=self.settings.local_llm_configured,
         )
 
@@ -483,6 +584,12 @@ class UploadManager:
         """상대 폴더를 저장하고 갱신된 전체 공개 설정을 반환한다."""
 
         self.store.set_relative_directory(value)
+        return self.get_settings()
+
+    def update_proposal_draft_relative_directory(self, value: str) -> PlaygroundSettingsResponse:
+        """기안 초안 상대 폴더를 저장하고 갱신된 전체 공개 설정을 반환한다."""
+
+        self.store.set_proposal_draft_relative_directory(value)
         return self.get_settings()
 
     def upload(self, source: BinaryIO, original_name: str) -> FileUploadResponse:
@@ -512,6 +619,16 @@ class UploadManager:
                 ),
             }
         )
+
+    def save_proposal_draft(self, content: bytes, file_name: str) -> FileUploadResponse:
+        """설정된 기안 폴더에 확정된 이름으로 신규 XLSX를 한 번만 추가한다."""
+
+        relative_directory = self.store.get_proposal_draft_relative_directory()
+        if not relative_directory:
+            raise UploadError("proposal_directory_not_configured", "기안 초안 저장 폴더를 먼저 설정해 주세요.", 503)
+
+        safe_name = sanitize_filename(file_name)
+        return self.writer.create_xlsx(content, safe_name, relative_directory)
 
     def validate_selections(self, selections: list[tuple[UUID, UUID]]) -> bool:
         """업로드 문서 UUID가 모두 서버 레지스트리에 등록돼 있는지 확인한다."""

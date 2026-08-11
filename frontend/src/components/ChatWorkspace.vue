@@ -14,6 +14,7 @@ const props = defineProps<{
   selectedFiles: DocumentSearchHit[];
   pending: boolean;
   conversationStatus: ConversationStatus;
+  inputMode?: "chat" | "proposal_description";
 }>();
 
 const emit = defineEmits<{
@@ -35,7 +36,7 @@ function isSelected(file: DocumentSearchHit): boolean {
 }
 
 function submit(): void {
-  const value = message.value.trim() || props.definition.placeholder;
+  const value = message.value.trim() || (props.inputMode === "proposal_description" ? "" : props.definition.placeholder);
   if (!props.pending && value) {
     emit("send", value);
     message.value = "";
@@ -65,7 +66,7 @@ onUpdated(async () => {
         <p>{{ definition.subtitle }}</p>
       </div>
       <span class="conversation-state" :class="conversationStatus">
-        {{ pending ? "답변 생성 중" : selectedFiles.length ? `선택 파일 ${selectedFiles.length}개` : "파일 선택 필요" }}
+        {{ pending ? "답변 생성 중" : inputMode === "proposal_description" ? "기안 설명 입력 대기" : selectedFiles.length ? `선택 파일 ${selectedFiles.length}개` : "파일 선택 필요" }}
       </span>
     </header>
 
@@ -95,6 +96,21 @@ onUpdated(async () => {
           <p>{{ item.content }}</p>
           <small v-if="item.selectedFiles?.length">선택 문서: {{ item.selectedFiles.join(", ") }}</small>
         </div>
+
+        <section v-if="item.proposalDraft" class="proposal-draft-result" aria-label="생성된 기안 초안">
+          <span class="proposal-draft-icon" aria-hidden="true">XLSX</span>
+          <span class="proposal-draft-file">
+            <strong>{{ item.proposalDraft.file_name }}</strong>
+            <small>
+              {{ item.proposalDraft.destination_label }} 저장 완료 · {{ item.proposalDraft.elapsed_ms.toFixed(1) }}ms
+            </small>
+          </span>
+          <a
+            :href="item.proposalDraft.download_url"
+            :download="item.proposalDraft.file_name"
+            :aria-label="`${item.proposalDraft.file_name} 다운로드`"
+          >엑셀 다운로드</a>
+        </section>
 
         <section v-if="item.searchResponse" class="conversation-search-results">
           <header class="conversation-result-header">
@@ -171,9 +187,13 @@ onUpdated(async () => {
           :disabled="pending"
           @keydown="handleComposerKeydown"
         ></textarea>
-        <button type="submit" :disabled="pending || !selectedFiles.length">{{ pending ? "생성 중" : "전송" }}</button>
+        <button type="submit" :disabled="pending || !selectedFiles.length">{{ pending ? "생성 중" : inputMode === "proposal_description" ? "기안 생성" : "전송" }}</button>
       </div>
-      <p class="composer-note">Enter로 전송 · Shift + Enter로 줄바꿈 · 선택한 문서만 답변 근거로 사용합니다.</p>
+      <p class="composer-note">
+        {{ inputMode === "proposal_description"
+          ? "기안 목적과 요청 내용을 입력하면 선택 문서를 참고해 엑셀 초안을 생성합니다."
+          : "Enter로 전송 · Shift + Enter로 줄바꿈 · 선택한 문서만 답변 근거로 사용합니다." }}
+      </p>
     </form>
   </section>
 </template>

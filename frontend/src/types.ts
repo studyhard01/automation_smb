@@ -1,6 +1,6 @@
 export type FileSource = "llmops" | "upload";
 export type SearchStore = "postgresql" | "minio" | "neo4j";
-export type FunctionId = "summary" | "report";
+export type FunctionId = "summary" | "proposal_draft";
 export type ConversationStatus = "ready" | "loading" | "success" | "error";
 
 export interface DocumentSearchHit {
@@ -99,7 +99,34 @@ export interface UploadSettings {
 
 export interface PlaygroundSettingsResponse {
   upload: UploadSettings;
+  proposal_draft: {
+    relative_directory: string;
+    destination_label: string;
+  };
   local_llm_configured: boolean;
+}
+
+export interface ProposalDraftFields {
+  title: string;
+  approval_request: string;
+  body: string;
+}
+
+export interface ProposalDraftRequest {
+  instruction: string;
+  selected_files: SelectedFilePayload[];
+}
+
+export interface ProposalDraftGenerated {
+  draft_id: string;
+  fields: ProposalDraftFields;
+  file_name: string;
+  download_url: string;
+  destination_label: string;
+  saved_to_smb: boolean;
+  model_used: string;
+  elapsed_ms: number;
+  timings_ms: Record<string, number>;
 }
 
 export interface FileUploadResponse {
@@ -188,6 +215,7 @@ export interface ChatUiMessage {
   error?: boolean;
   pending?: boolean;
   searchResponse?: DocumentSearchResponse;
+  proposalDraft?: ProposalDraftGenerated;
 }
 
 export interface ConversationDefinition {
@@ -201,6 +229,8 @@ export interface FunctionDefinition extends ConversationDefinition {
   id: FunctionId;
   description: string;
   icon: string;
+  requiresFiles: boolean;
+  resultDescription: string;
 }
 
 export interface ApiErrorBody {

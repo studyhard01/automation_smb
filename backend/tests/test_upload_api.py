@@ -5,14 +5,29 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import quote
+from uuid import uuid4
+from xml.etree import ElementTree
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
 from smb_finder.config import Settings
+from smb_finder.models import DocumentCitation, RetrievalScores
+from smb_finder.playground.document_api import DocumentRuntime
+from smb_finder.playground.proposal_draft import (
+    LocalProposalDraftGenerator,
+    ProposalDraftError,
+    ProposalDraftFields,
+    ProposalDraftResult,
+    ProposalDraftService,
+    insert_proposal_fields,
+)
 from smb_finder.playground.upload_api import create_upload_router
 from smb_finder.playground.upload_models import FileUploadResponse
 from smb_finder.playground.upload_service import (
@@ -53,6 +68,8 @@ class StubWriter:
     def __init__(self) -> None:
         self.closed = False
         self.received = b""
+        self.proposal_content = b""
+        self.proposal_file_name = ""
 
     def close(self) -> None:
         self.closed = True
@@ -74,6 +91,85 @@ class StubWriter:
         assert relative_directory == "team/inbox"
         assert expected_size == len(self.received)
         return self.received
+
+    def create_xlsx(self, content: bytes, file_name: str, relative_directory: str) -> FileUploadResponse:
+        assert relative_directory == "team/proposal"
+        self.proposal_content = content
+        self.proposal_file_name = file_name
+        return FileUploadResponse(
+            file_name=file_name,
+            size_bytes=len(content),
+            uploaded_at=datetime(2026, 7, 29, 15, 30, tzinfo=UTC),
+            destination_label="기안 문서 폴더",
+            indexed=False,
+        )
+
+
+class StubDraftGenerator:
+    def __init__(self, fields: ProposalDraftFields) -> None:
+        self.fields = fields
+        self.instructions: list[str] = []
+        self.evidence: list[list[DocumentCitation]] = []
+        self.closed = False
+
+    def generate(self, instruction: str, evidence: list[DocumentCitation]) -> ProposalDraftResult:
+        self.instructions.append(instruction)
+        self.evidence.append(evidence)
+        return ProposalDraftResult(fields=self.fields, model="synthetic-draft-model")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _citation() -> DocumentCitation:
+    return DocumentCitation(
+        index=1,
+        doc_id=uuid4(),
+        revision_id=uuid4(),
+        chunk_id=uuid4(),
+        title="합성 구매 근거",
+        excerpt="합성 장비 구매가 필요합니다.",
+        scores=RetrievalScores(rrf=0.9),
+    )
+
+
+class StubFileSearcher:
+    def validate_active_selections(self, selections):  # noqa: ANN001
+        return set(selections)
+
+
+class StubRetriever:
+    def __init__(self, citations: list[DocumentCitation] | None = None) -> None:
+        self.citations = citations if citations is not None else [_citation()]
+        self.calls: list[tuple[str, list[tuple[str, str]]]] = []
+
+    def retrieve(self, instruction: str, selections: list[tuple[str, str]]):
+        self.calls.append((instruction, selections))
+        return SimpleNamespace(citations=self.citations)
+
+
+class StubLlmResponse:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self.payload
+
+
+class StubLlmClient:
+    def __init__(self, response_payload: dict) -> None:
+        self.response_payload = response_payload
+        self.calls: list[tuple[str, dict]] = []
+
+    def post(self, url: str, *, json: dict) -> StubLlmResponse:
+        self.calls.append((url, json))
+        return StubLlmResponse(self.response_payload)
+
+    def close(self) -> None:
+        return None
 
 
 def _request(
@@ -110,6 +206,10 @@ def test_settings_api_returns_only_public_contract_and_persists_relative_directo
             "max_size_bytes": 32,
             "allowed_extensions": [".pdf", ".txt"],
         },
+        "proposal_draft": {
+            "relative_directory": "",
+            "destination_label": "기안 문서 폴더",
+        },
         "local_llm_configured": True,
     }
     serialized = response.text
@@ -128,6 +228,315 @@ def test_settings_api_returns_only_public_contract_and_persists_relative_directo
     assert json.loads(Path(settings.smb_upload_runtime_settings_path).read_text(encoding="utf-8")) == {
         "upload": {"relative_directory": "team/review"}
     }
+
+
+def test_proposal_draft_settings_patch_preserves_upload_and_unknown_runtime_settings(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    runtime_path = Path(settings.smb_upload_runtime_settings_path)
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "upload": {"relative_directory": "team/inbox", "future_upload_key": True},
+                "future_section": {"enabled": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = UploadManager(settings, writer=StubWriter())
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, manager))
+
+    response = _request(
+        app,
+        "PATCH",
+        "/api/playground/settings/proposal-draft",
+        json_body={"relative_directory": r"team\proposal"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["proposal_draft"]["relative_directory"] == "team/proposal"
+    payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+    assert payload == {
+        "upload": {"relative_directory": "team/inbox", "future_upload_key": True},
+        "future_section": {"enabled": True},
+        "proposal_draft": {"relative_directory": "team/proposal"},
+    }
+
+    upload_response = _request(
+        app,
+        "PATCH",
+        "/api/playground/settings/upload",
+        json_body={"relative_directory": "team/review"},
+    )
+    assert upload_response.status_code == 200
+    payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+    assert payload["upload"] == {"relative_directory": "team/review", "future_upload_key": True}
+    assert payload["proposal_draft"] == {"relative_directory": "team/proposal"}
+    assert payload["future_section"] == {"enabled": True}
+
+
+def test_proposal_draft_settings_rejects_absolute_or_parent_paths(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, UploadManager(settings, writer=StubWriter())))
+
+    for value in (r"\\synthetic-server\synthetic-share", r"C:\synthetic", "../synthetic"):
+        response = _request(
+            app,
+            "PATCH",
+            "/api/playground/settings/proposal-draft",
+            json_body={"relative_directory": value},
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_relative_directory"
+
+
+def test_proposal_draft_download_preserves_template_bytes_and_workbook_structure(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    template_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "smb_finder"
+        / "playground"
+        / "templates"
+        / "proposal_draft.xlsx"
+    )
+    created_at = datetime(2026, 7, 29, 15, 30, tzinfo=UTC)
+    service = ProposalDraftService(template_path=template_path, clock=lambda: created_at)
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, UploadManager(settings, writer=StubWriter()), service))
+
+    response = _request(app, "GET", "/api/playground/drafts/proposal")
+
+    expected_name = "[기안] 기안지_초안_20260730_v1.0.xlsx"
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert f"filename*=UTF-8''{quote(expected_name, safe='')}" in response.headers["content-disposition"]
+    assert response.content == template_path.read_bytes()
+
+    with zipfile.ZipFile(io.BytesIO(response.content)) as workbook:
+        assert workbook.testzip() is None
+        root = ElementTree.fromstring(workbook.read("xl/workbook.xml"))
+    namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    assert [node.attrib["name"] for node in root.findall("main:sheets/main:sheet", namespace)] == ["기안지"]
+
+
+def test_proposal_draft_download_hides_missing_template_path(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    service = ProposalDraftService(template_path=tmp_path / "internal" / "missing.xlsx")
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, UploadManager(settings, writer=StubWriter()), service))
+
+    response = _request(app, "GET", "/api/playground/drafts/proposal")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "proposal_template_unavailable"
+    assert str(tmp_path) not in response.text
+
+
+def test_local_proposal_generator_accepts_legacy_three_field_json_and_includes_evidence(tmp_path: Path) -> None:
+    client = StubLlmClient(
+        {
+            "message": {
+                "content": json.dumps(
+                    {
+                        "title": "합성 구매 기안",
+                        "approval_request": "검토 후 재가하여 주시기 바랍니다.",
+                        "body": "1. 합성 목적\n2. 합성 범위",
+                    },
+                    ensure_ascii=False,
+                )
+            }
+        }
+    )
+    generator = LocalProposalDraftGenerator(
+        _settings(tmp_path, ollama_base_url="http://127.0.0.1:11434"),
+        client=client,
+    )
+    citation = _citation()
+
+    result = generator.generate("합성 구매 기안을 작성해 줘", [citation])
+
+    assert result.fields.title == "합성 구매 기안"
+    call_url, payload = client.calls[0]
+    assert call_url == "http://127.0.0.1:11434/api/chat"
+    assert payload["format"] == "json"
+    assert "proposal-document-v2" in payload["messages"][0]["content"]
+    assert "빈 배열 []" in payload["messages"][0]["content"]
+    assert citation.title in payload["messages"][1]["content"]
+    assert citation.excerpt in payload["messages"][1]["content"]
+
+
+def test_local_proposal_generator_maps_missing_json_field_to_502(tmp_path: Path) -> None:
+    client = StubLlmClient({"message": {"content": '{"title":"합성","approval_request":"검토 바랍니다."}'}})
+    generator = LocalProposalDraftGenerator(
+        _settings(tmp_path, ollama_base_url="http://127.0.0.1:11434"),
+        client=client,
+    )
+
+    with pytest.raises(ProposalDraftError) as raised:
+        generator.generate("합성 기안을 작성해 줘", [_citation()])
+
+    assert raised.value.code == "proposal_llm_response_invalid"
+    assert raised.value.status_code == 502
+
+
+def test_local_proposal_generator_rejects_extra_json_field(tmp_path: Path) -> None:
+    client = StubLlmClient(
+        {
+            "message": {
+                "content": (
+                    '{"title":"합성","approval_request":"검토 바랍니다.",'
+                    '"body":"합성 본문","unexpected":"거부 대상"}'
+                )
+            }
+        }
+    )
+    generator = LocalProposalDraftGenerator(
+        _settings(tmp_path, ollama_base_url="http://127.0.0.1:11434"),
+        client=client,
+    )
+
+    with pytest.raises(ProposalDraftError) as raised:
+        generator.generate("합성 기안을 작성해 줘", [_citation()])
+
+    assert raised.value.code == "proposal_llm_response_invalid"
+    assert raised.value.status_code == 502
+
+
+def test_insert_proposal_fields_preserves_ooxml_and_writes_literal_cells() -> None:
+    template_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "smb_finder"
+        / "playground"
+        / "templates"
+        / "proposal_draft.xlsx"
+    )
+
+    generated = insert_proposal_fields(
+        template_path.read_bytes(),
+        ProposalDraftFields(
+            title="=합성 & 자동화 <검토>",
+            approval_request="=검토 후 재가하여 주시기 바랍니다.",
+            body="=1. 합성 목적\n2. 합성 범위\n3. 합성 일정",
+        ),
+    )
+
+    with zipfile.ZipFile(template_path) as original, zipfile.ZipFile(io.BytesIO(generated)) as workbook:
+        assert workbook.testzip() is None
+        assert original.namelist() == workbook.namelist()
+        assert [
+            name for name in original.namelist() if original.read(name) != workbook.read(name)
+        ] == ["xl/worksheets/sheet1.xml"]
+        sheet = ElementTree.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
+        namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        cell = sheet.find(".//main:c[@r='C8']", namespace)
+        assert cell is not None
+        assert cell.attrib["s"] == "3"
+        assert cell.attrib["t"] == "inlineStr"
+        assert cell.findtext("main:is/main:t", namespaces=namespace) == "=합성 & 자동화 <검토>"
+        assert cell.find("main:f", namespace) is None
+        assert (
+            sheet.findtext(".//main:c[@r='A10']/main:is/main:t", namespaces=namespace)
+            == "=검토 후 재가하여 주시기 바랍니다."
+        )
+        assert sheet.findtext(".//main:c[@r='A15']/main:is/main:t", namespaces=namespace) == "=1. 합성 목적"
+        assert sheet.findtext(".//main:c[@r='A16']/main:is/main:t", namespaces=namespace) == "2. 합성 범위"
+        assert sheet.findtext(".//main:c[@r='A17']/main:is/main:t", namespaces=namespace) == "3. 합성 일정"
+        assert sheet.find(".//main:c[@r='A15']/main:f", namespace) is None
+        assert [node.attrib["ref"] for node in sheet.findall("main:mergeCells/main:mergeCell", namespace)].count(
+            "I13:S13"
+        ) == 1
+
+
+def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, proposal_draft_default_relative_directory="team/proposal")
+    writer = StubWriter()
+    manager = UploadManager(settings, writer=writer)
+    fields = ProposalDraftFields(
+        title="합성 자동화 구매 계획",
+        approval_request="관련 내용을 검토 후 재가하여 주시기 바랍니다.",
+        body="1. 목적\n합성 자동화 장비를 구매합니다.",
+    )
+    draft_generator = StubDraftGenerator(fields)
+    template_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "smb_finder"
+        / "playground"
+        / "templates"
+        / "proposal_draft.xlsx"
+    )
+    service = ProposalDraftService(
+        settings,
+        manager,
+        template_path=template_path,
+        clock=lambda: datetime(2026, 7, 29, 15, 30, tzinfo=UTC),
+        draft_generator=draft_generator,
+    )
+    retriever = StubRetriever()
+    runtime = DocumentRuntime(
+        settings=settings,
+        file_searcher=StubFileSearcher(),
+        scoped_retriever=retriever,
+        upload_manager=manager,
+    )
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, manager, service, runtime_getter=lambda: runtime))
+
+    selected = retriever.citations[0]
+
+    generated = _request(
+        app,
+        "POST",
+        "/api/playground/drafts/proposal",
+        json_body={
+            "instruction": "합성 구매 계획 기안을 작성해 줘",
+            "selected_files": [
+                {
+                    "source": "llmops",
+                    "doc_id": str(selected.doc_id),
+                    "revision_id": str(selected.revision_id),
+                    "file_name": "synthetic.xlsx",
+                    "title": "합성 구매 근거",
+                }
+            ],
+        },
+    )
+
+    assert generated.status_code == 201
+    payload = generated.json()
+    assert draft_generator.instructions == ["합성 구매 계획 기안을 작성해 줘"]
+    assert draft_generator.evidence == [retriever.citations]
+    assert payload["title"] == "합성 자동화 구매 계획"
+    assert payload["fields"] == fields.model_dump()
+    assert payload["document"]["schema_version"] == "proposal-document-v2"
+    assert payload["document"]["sections"][0]["semantic_role"] == "details"
+    assert payload["context_usage"]["schema_version"] == "proposal-context-usage-v1"
+    assert payload["model_used"] == "synthetic-draft-model"
+    assert payload["saved_to_smb"] is True
+    assert payload["destination_label"] == "기안 문서 폴더"
+    assert payload["file_name"] == "[기안] 합성 자동화 구매 계획_20260730_v1.0.xlsx"
+    assert payload["download_url"].endswith(payload["draft_id"])
+    assert writer.proposal_file_name == payload["file_name"]
+
+    download = _request(app, "GET", payload["download_url"])
+    assert download.status_code == 200
+    assert download.content == writer.proposal_content
+    with zipfile.ZipFile(io.BytesIO(download.content)) as workbook:
+        sheet = ElementTree.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
+    namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    assert sheet.findtext(".//main:c[@r='C8']/main:is/main:t", namespaces=namespace) == "합성 자동화 구매 계획"
+    assert (
+        sheet.findtext(".//main:c[@r='A10']/main:is/main:t", namespaces=namespace)
+        == "관련 내용을 검토 후 재가하여 주시기 바랍니다."
+    )
+    assert sheet.findtext(".//main:c[@r='A15']/main:is/main:t", namespaces=namespace) == "1. 목적"
+    assert sheet.findtext(".//main:c[@r='A16']/main:is/main:t", namespaces=namespace) == "합성 자동화 장비를 구매합니다."
+    assert set(payload["timings_ms"]) == {"validation", "retrieval", "llm", "workbook", "smb"}
 
 
 def test_legacy_nas_fallback_is_usable_only_with_safe_relative_directory(tmp_path: Path) -> None:
@@ -297,7 +706,8 @@ class FakeSmb:
         self.path = _FakePath(self)
         self.files: dict[str, bytes] = {}
         self.removed: list[str] = []
-        self.rename_race = False
+        self.renamed: list[tuple[str, str]] = []
+        self.opened: list[tuple[str, str]] = []
 
     def register_session(self, _host: str, **_kwargs) -> None:
         return None
@@ -307,7 +717,9 @@ class FakeSmb:
 
     def open_file(self, path: str, *, mode: str) -> _RemoteBuffer:
         assert mode == "xb"
-        assert path not in self.files
+        self.opened.append((path, mode))
+        if path in self.files:
+            raise FileExistsError(path)
         return _RemoteBuffer(self, path)
 
     def remove(self, path: str) -> None:
@@ -315,14 +727,11 @@ class FakeSmb:
         self.files.pop(path, None)
 
     def rename(self, source: str, destination: str) -> None:
-        if self.rename_race:
-            self.files[destination] = b"other writer"
-        if destination in self.files:
-            raise FileExistsError
-        self.files[destination] = self.files.pop(source)
+        self.renamed.append((source, destination))
+        raise AssertionError("공유폴더 쓰기 경로는 rename을 호출하면 안 됩니다.")
 
 
-def test_smb_writer_enforces_actual_size_and_cleans_only_its_partial(tmp_path: Path) -> None:
+def test_smb_writer_rejects_oversize_before_creating_remote_file(tmp_path: Path) -> None:
     fake = FakeSmb()
     writer = SmbUploadWriter(_settings(tmp_path, smb_upload_max_size_bytes=4), smb_module=fake)
 
@@ -330,9 +739,10 @@ def test_smb_writer_enforces_actual_size_and_cleans_only_its_partial(tmp_path: P
         writer.upload(io.BytesIO(b"12345"), "synthetic.txt", "team/inbox")
 
     assert raised.value.code == "file_too_large"
-    assert len(fake.removed) == 1
-    assert ".upload-" in fake.removed[0]
     assert fake.files == {}
+    assert fake.opened == []
+    assert fake.removed == []
+    assert fake.renamed == []
 
 
 def test_smb_writer_explicit_gate_blocks_before_any_smb_write(tmp_path: Path) -> None:
@@ -347,16 +757,71 @@ def test_smb_writer_explicit_gate_blocks_before_any_smb_write(tmp_path: Path) ->
     assert fake.removed == []
 
 
-def test_smb_writer_never_overwrites_when_destination_appears_during_rename(tmp_path: Path) -> None:
+def test_smb_writer_creates_final_name_exclusively_without_rename_or_remove(tmp_path: Path) -> None:
     fake = FakeSmb()
-    fake.rename_race = True
     uploaded_at = datetime(2026, 7, 29, 15, 30, tzinfo=UTC)
     writer = SmbUploadWriter(_settings(tmp_path), smb_module=fake, clock=lambda: uploaded_at)
 
-    with pytest.raises(UploadError) as raised:
-        writer.upload(io.BytesIO(b"safe"), "synthetic.txt", "team/inbox")
+    response = writer.upload(io.BytesIO(b"safe"), "synthetic.txt", "team/inbox")
 
-    assert raised.value.code == "smb_upload_failed"
-    assert b"other writer" in fake.files.values()
     expected_name = build_upload_filename("synthetic.txt", uploaded_at)
-    assert all(not path.endswith(expected_name) or body == b"other writer" for path, body in fake.files.items())
+    assert response.file_name == expected_name
+    assert fake.opened == [(next(iter(fake.files)), "xb")]
+    assert next(iter(fake.files)).endswith(expected_name)
+    assert fake.files[next(iter(fake.files))] == b"safe"
+    assert fake.removed == []
+    assert fake.renamed == []
+
+
+def test_smb_writer_returns_conflict_and_preserves_existing_final_file(tmp_path: Path) -> None:
+    fake = FakeSmb()
+    uploaded_at = datetime(2026, 7, 29, 15, 30, tzinfo=UTC)
+    expected_name = build_upload_filename("synthetic.txt", uploaded_at)
+    expected_path = rf"\\synthetic-server\synthetic-share\team\inbox\{expected_name}"
+    fake.files[expected_path] = b"existing"
+    writer = SmbUploadWriter(_settings(tmp_path), smb_module=fake, clock=lambda: uploaded_at)
+
+    with pytest.raises(UploadError) as raised:
+        writer.upload(io.BytesIO(b"new"), "synthetic.txt", "team/inbox")
+
+    assert raised.value.code == "file_already_exists"
+    assert raised.value.status_code == 409
+    assert fake.files == {expected_path: b"existing"}
+    assert fake.removed == []
+    assert fake.renamed == []
+
+
+def test_proposal_xlsx_writer_uses_final_name_without_rename_remove_or_overwrite(tmp_path: Path) -> None:
+    fake = FakeSmb()
+    writer = SmbUploadWriter(_settings(tmp_path), smb_module=fake)
+    file_name = "[기안] 합성 자동화 계획_20260807_v1.0.xlsx"
+
+    response = writer.create_xlsx(b"PK\x03\x04synthetic", file_name, "team/proposal")
+
+    assert response.file_name == file_name
+    assert response.destination_label == "기안 문서 폴더"
+    assert fake.opened == [(next(iter(fake.files)), "xb")]
+    assert fake.files[next(iter(fake.files))] == b"PK\x03\x04synthetic"
+    assert fake.removed == []
+    assert fake.renamed == []
+
+
+def test_proposal_save_conflict_does_not_retry_or_change_the_final_name(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, proposal_draft_default_relative_directory="team/proposal")
+    fake = FakeSmb()
+    writer = SmbUploadWriter(settings, smb_module=fake)
+    manager = UploadManager(settings, writer=writer)
+    existing_name = "[기안] 합성 자동화 계획_20260807_v1.0.xlsx"
+    existing_path = rf"\\synthetic-server\synthetic-share\team\proposal\{existing_name}"
+    fake.files[existing_path] = b"existing"
+
+    with pytest.raises(UploadError) as raised:
+        manager.save_proposal_draft(b"PK\x03\x04new", existing_name)
+
+    assert raised.value.code == "file_already_exists"
+    assert raised.value.status_code == 409
+    assert fake.files[existing_path] == b"existing"
+    assert len(fake.files) == 1
+    assert fake.opened == [(existing_path, "xb")]
+    assert fake.removed == []
+    assert fake.renamed == []

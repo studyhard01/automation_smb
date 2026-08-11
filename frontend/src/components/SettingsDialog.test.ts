@@ -13,6 +13,10 @@ const settings: PlaygroundSettingsResponse = {
     max_size_bytes: 10 * 1024 * 1024,
     allowed_extensions: [".pdf", ".md"],
   },
+  proposal_draft: {
+    relative_directory: "drafts/proposals",
+    destination_label: "기안 초안 저장 영역",
+  },
   local_llm_configured: true,
 };
 
@@ -46,6 +50,8 @@ describe("SettingsDialog", () => {
     const wrapper = mountDialog();
 
     expect(wrapper.get<HTMLInputElement>("#uploadRelativeDirectory").element.value).toBe("playground/uploads");
+    expect(wrapper.get<HTMLInputElement>("#proposalDraftRelativeDirectory").element.value).toBe("drafts/proposals");
+    expect(wrapper.text()).toContain("생성된 기안 엑셀을 이 공유 루트 상대 경로에 새 파일로 저장합니다");
     expect(wrapper.text()).toContain(".pdf");
     expect(wrapper.text()).toContain("10 MB");
     expect(wrapper.text()).toContain("PostgreSQL");
@@ -68,5 +74,18 @@ describe("SettingsDialog", () => {
     await input.setValue("playground/reviewed");
     await wrapper.get("form.upload-settings-form").trigger("submit");
     expect(wrapper.emitted("saveUploadDirectory")?.[0]).toEqual(["playground/reviewed"]);
+  });
+
+  it("기안 저장 경로도 상대 경로만 별도 저장 요청한다", async () => {
+    const wrapper = mountDialog();
+    const input = wrapper.get<HTMLInputElement>("#proposalDraftRelativeDirectory");
+
+    await input.setValue(["", "", "synthetic-server", "synthetic-share"].join("\\"));
+    await wrapper.get("form.proposal-draft-settings-form").trigger("submit");
+    expect(wrapper.emitted("saveProposalDraftDirectory")).toBeUndefined();
+
+    await input.setValue("drafts/reviewed");
+    await wrapper.get("form.proposal-draft-settings-form").trigger("submit");
+    expect(wrapper.emitted("saveProposalDraftDirectory")?.[0]).toEqual(["drafts/reviewed"]);
   });
 });

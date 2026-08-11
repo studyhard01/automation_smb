@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     embedding_query_prefix: str = "search_query: "
     llmops_chat_model: str = "qwen3:30b-a3b"
     llm_timeout_ms: int = Field(default=10_000, ge=100)
+    proposal_llm_timeout_ms: int = Field(default=120_000, ge=1000, le=600_000)
+    proposal_llm_num_ctx: int = Field(default=24_576, ge=4096, le=262_144)
+    proposal_llm_max_tokens: int = Field(default=4096, ge=512, le=16_384)
+    proposal_context_max_chars: int = Field(default=30_000, ge=2000, le=200_000)
+    proposal_context_per_document_chars: int = Field(default=10_000, ge=500, le=100_000)
+    proposal_context_max_citations: int = Field(default=30, ge=1, le=100)
     rag_synthesis_evidence_chars: int = Field(default=1800, ge=500, le=10_000)
     rag_synthesis_max_tokens: int = Field(default=500, ge=64, le=500)
     playground_agent_budget_ms: int = Field(default=10_000, ge=100)
@@ -104,6 +110,7 @@ class Settings(BaseSettings):
     nas_user: str = ""
     nas_pw: str = ""
     smb_upload_default_relative_directory: str = ""
+    proposal_draft_default_relative_directory: str = ""
     smb_upload_runtime_settings_path: str = ".runtime/playground_settings.json"
     smb_upload_registry_path: str = ".runtime/upload_registry.json"
     smb_upload_max_size_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
