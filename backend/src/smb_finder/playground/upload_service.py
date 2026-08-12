@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import re
@@ -47,6 +48,14 @@ _WINDOWS_RESERVED_NAMES = {
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 }
+
+
+def _is_file_exists_error(exc: BaseException) -> bool:
+    """smbclient의 일반 SMBOSError까지 동명 파일 충돌로 분류한다."""
+
+    return isinstance(exc, FileExistsError) or (
+        isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EEXIST
+    )
 
 
 @dataclass(frozen=True)
@@ -386,8 +395,10 @@ class SmbUploadWriter:
                         if time.monotonic() > deadline:
                             raise UploadError("upload_timeout", "파일 업로드 시간이 초과되었습니다.", 504)
                         target.write(content[offset : offset + _CHUNK_SIZE])
-            except FileExistsError as exc:
-                raise UploadError("file_already_exists", "같은 이름의 파일이 이미 있습니다.", 409) from exc
+            except Exception as exc:  # noqa: BLE001 - smbclient는 충돌도 SMBOSError로 반환할 수 있다.
+                if _is_file_exists_error(exc):
+                    raise UploadError("file_already_exists", "같은 이름의 파일이 이미 있습니다.", 409) from exc
+                raise
             if time.monotonic() > deadline:
                 raise UploadError("upload_timeout", "파일 업로드 시간이 초과되었습니다.", 504)
             return FileUploadResponse(
@@ -440,8 +451,10 @@ class SmbUploadWriter:
                         if time.monotonic() > deadline:
                             raise UploadError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
                         target.write(content[offset : offset + _CHUNK_SIZE])
-            except FileExistsError as exc:
-                raise UploadError("file_already_exists", "같은 이름의 기안 파일이 이미 있습니다.", 409) from exc
+            except Exception as exc:  # noqa: BLE001 - smbclient는 충돌도 SMBOSError로 반환할 수 있다.
+                if _is_file_exists_error(exc):
+                    raise UploadError("file_already_exists", "같은 이름의 기안 파일이 이미 있습니다.", 409) from exc
+                raise
             if time.monotonic() > deadline:
                 raise UploadError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
             return FileUploadResponse(

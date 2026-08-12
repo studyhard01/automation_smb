@@ -11,8 +11,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
-import uuid
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
@@ -551,9 +551,11 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
             "backend/src/smb_finder/playground/document_models.py",
             "backend/src/smb_finder/playground/proposal_context.py",
             "backend/src/smb_finder/playground/proposal_draft.py",
+            "backend/src/smb_finder/playground/proposal_evidence.py",
             "backend/src/smb_finder/playground/upload_api.py",
             "backend/src/smb_finder/playground/upload_models.py",
             "backend/src/smb_finder/playground/upload_service.py",
+            "backend/src/smb_finder/evaluation/proposal_live_runner.py",
             "backend/src/smb_finder/evaluation/proposal_models.py",
             "backend/src/smb_finder/evaluation/proposal_runner.py",
             "backend/src/smb_finder/evaluation/proposal_scoring.py",
@@ -568,6 +570,7 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
             "backend/tests/test_project_quality.py",
             "backend/tests/test_proposal_draft.py",
             "backend/tests/test_proposal_evaluation.py",
+            "backend/tests/test_proposal_live_runner.py",
             "backend/tests/test_upload_api.py",
             "scripts/check_development_lessons.py",
             "scripts/evaluate_quality.py",
@@ -588,6 +591,7 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
             "backend/tests/test_project_quality.py",
             "backend/tests/test_proposal_draft.py",
             "backend/tests/test_proposal_evaluation.py",
+            "backend/tests/test_proposal_live_runner.py",
             "backend/tests/test_upload_api.py",
             "-m",
             "not integration",
@@ -596,6 +600,26 @@ def build_quality_commands(repo_root: Path, basetemp: Path, python_executable: s
             f"--basetemp={basetemp}",
         ],
     }
+
+
+def _create_quality_run_root(repo_root: Path) -> Path:
+    """live 평가 원시 산출물 보호 규칙과 충돌하지 않는 저장소 밖 임시 루트를 만든다."""
+
+    run_root = Path(tempfile.mkdtemp(prefix="automation-smb-quality-")).resolve()
+    resolved_repo = repo_root.resolve()
+    if run_root == resolved_repo or run_root.is_relative_to(resolved_repo):
+        shutil.rmtree(run_root, ignore_errors=True)
+        raise RuntimeError("quality_temp_root_inside_repository")
+    return run_root
+
+
+def _remove_quality_run_root(run_root: Path) -> None:
+    """평가 중 생성한 pytest·live runner 임시 산출물을 실행 결과와 관계없이 제거한다."""
+
+    try:
+        shutil.rmtree(run_root)
+    except OSError as exc:
+        raise RuntimeError("quality_temp_cleanup_failed") from exc
 
 
 def _run_quality_command(
@@ -751,10 +775,8 @@ def evaluate_project(
     """rubric의 모든 criterion을 평가한다."""
 
     policy = rubric["policy"]
-    run_root = repo_root / ".tmp" / "quality" / f"{date.today().isoformat()}-{uuid.uuid4().hex[:10]}"
-    basetemp = run_root / "pytest"
-    if not static_only:
-        basetemp.parent.mkdir(parents=True, exist_ok=True)
+    run_root = None if static_only else _create_quality_run_root(repo_root)
+    basetemp = None if run_root is None else run_root / "pytest"
     static_checks: dict[str, Callable[[], CheckOutcome]] = {
         "tracked_artifacts": lambda: check_tracked_artifacts(repo_root, policy, tracked_files),
         "sensitive_values": lambda: check_sensitive_values(repo_root, policy, tracked_files),
@@ -797,13 +819,15 @@ def evaluate_project(
                             skipped=True,
                         )
                     else:
+                        if basetemp is None:
+                            raise RuntimeError("quality_temp_root_unavailable")
                         outcome = _run_quality_command(check_name, repo_root, basetemp, command_runner)
                 else:
                     outcome = static_checks[check_name]()
                 results.append(_result_from_outcome(category, criterion, outcome))
     finally:
-        if not static_only:
-            shutil.rmtree(run_root, ignore_errors=True)
+        if run_root is not None:
+            _remove_quality_run_root(run_root)
     return results
 
 

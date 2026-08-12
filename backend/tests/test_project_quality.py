@@ -72,7 +72,19 @@ def test_command_orchestration_targets_active_backend(quality_module: ModuleType
     calls_by_tool = {command[2]: command for command, _cwd, _env in calls if len(command) > 2}
     assert set(calls_by_tool) == {"ruff", "pytest"}
     assert "backend/src/smb_finder/api.py" in calls_by_tool["ruff"]
+    assert "backend/src/smb_finder/playground/proposal_evidence.py" in calls_by_tool["ruff"]
+    assert "backend/src/smb_finder/evaluation/proposal_live_runner.py" in calls_by_tool["ruff"]
+    assert "backend/tests/test_proposal_live_runner.py" in calls_by_tool["ruff"]
     assert "backend/tests/test_llmops_search.py" in calls_by_tool["pytest"]
+    assert "backend/tests/test_proposal_live_runner.py" in calls_by_tool["pytest"]
+    pytest_call = next((command, env) for command, _cwd, env in calls if len(command) > 2 and command[2] == "pytest")
+    basetemp_argument = next(item for item in pytest_call[0] if item.startswith("--basetemp="))
+    basetemp = Path(basetemp_argument.split("=", maxsplit=1)[1]).resolve()
+    assert not basetemp.is_relative_to(REPO_ROOT.resolve())
+    assert Path(pytest_call[1]["TEMP"]).resolve() == basetemp.parent
+    assert Path(pytest_call[1]["TMP"]).resolve() == basetemp.parent
+    assert Path(pytest_call[1]["TMPDIR"]).resolve() == basetemp.parent
+    assert not basetemp.parent.exists()
     assert all(result.status != "failed" for result in results)
 
 

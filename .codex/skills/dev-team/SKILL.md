@@ -37,6 +37,13 @@ Explicit use of `dev-team` is permission to spawn these subagents when the multi
    - Run relevant tests/builds/smoke checks.
    - Do not commit or push unless the user separately asks.
 
+5. Complete the feedback delivery loop for product changes.
+   - Treat each user feedback round as: plan → implement → targeted tests and artifact/UI QA → project quality gate → Docker build → healthy container replacement → health/OpenAPI/UI/synthetic read-only smoke → report the result and URL → wait for the next feedback round.
+   - For spreadsheet output, include structural checks and a rendered or real-application visual check when a renderer is available; never treat a valid ZIP alone as visual success.
+   - Run tests and build the replacement image before replacing a healthy container. If either fails, keep the existing healthy container running and report the failure.
+   - Docker registry push, remote deployment, real SMB writes, commit, and git push still require separate explicit user authorization.
+   - Skip Docker only for documentation-only changes or when the user explicitly excludes Docker reflection, and state the reason in the final report.
+
 ## Subagent Prompt Shapes
 
 Planner:
@@ -65,6 +72,7 @@ Use $backend-developer at .codex/skills/backend-developer to implement the assig
 - Keep security constraints from `automation_smb` active across all work.
 - Prefer conservative, repo-native implementation patterns.
 - Start a local dev server after frontend/app changes when needed and provide the URL.
+- Record the exact Docker image/service, exposed local URL, health result, and safe smoke scope after each product feedback cycle.
 
 ## Final Report Format
 

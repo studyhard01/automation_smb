@@ -20,6 +20,8 @@ __pycache__/
 .pytest_cache/
 .tmp/
 .runtime/
+# 로컬 XLSX·PNG 화면 QA 산출물
+outputs/
 *.egg-info/
 dist/
 build/

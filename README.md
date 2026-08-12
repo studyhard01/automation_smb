@@ -40,7 +40,7 @@ automation_smb/
 │  │  ├─ playground/document_*.py    # 선택 문서 채팅 API·서비스·계약
 │  │  ├─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
 │  │  ├─ playground/proposal_*.py    # 선택 문서 기반 구조화 기안·XLSX 생성·다운로드 API
-│  │  └─ evaluation/proposal_*.py    # 기안 dataset preflight·100점 평가·비식별 통계
+│  │  └─ evaluation/proposal_*.py    # 기안 dataset preflight·gold 비노출 live 생성·100점 평가·비식별 통계
 │  └─ tests/                         # Backend 단위·계약 테스트
 ├─ docs/                             # 목표·현황·설계·운영 문서
 ├─ scripts/                          # 실행·품질 검사·기안 평가 CLI
@@ -68,6 +68,8 @@ automation_smb/
 | 업로드 상대 경로 변경 | `PATCH /api/playground/settings/upload` |
 | 기안 상대 경로 변경 | `PATCH /api/playground/settings/proposal-draft` |
 | LLM 기안 XLSX 생성·SMB 저장 | `POST /api/playground/drafts/proposal` |
+| 기안 필수정보 답변·완성 | `POST /api/playground/drafts/proposal/{draft_id}/clarifications` |
+| 기안 피드백 수정본 XLSX 생성·SMB 저장 | `POST /api/playground/drafts/proposal/{draft_id}/revisions` |
 | 생성 기안 XLSX 다운로드 | `GET /api/playground/drafts/proposal/{draft_id}` |
 | 빈 기안 템플릿 다운로드 | `GET /api/playground/drafts/proposal` |
 | 공유폴더 파일 첨부 | `POST /api/playground/files/upload` |
@@ -105,13 +107,14 @@ docker compose up -d
 
 로컬 주소는 `http://127.0.0.1:8011/playground`, 같은 LAN의 다른 PC에서는
 `http://<Docker-host-LAN-IPv4>:8011/playground`를 사용합니다. 포트 충돌, 사내 SSL 검사, Windows 방화벽과
-컨테이너 endpoint 설정은 [Docker 배포 문서](docs/DOCKER_DEPLOYMENT.md)를 따릅니다.
+컨테이너 endpoint 설정은 [Docker 배포 문서](docs/DOCKER_DEPLOYMENT.md)를 따릅니다. `8013`은 기본값이 아니라
+필요할 때 현재 셸에서 `$env:AUTOMATION_SMB_PORT = "8013"`으로 지정하는 host port override입니다.
 
 ## 테스트
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\evaluate_quality.py
-.\.venv\Scripts\python.exe -m pytest backend/tests/test_llmops_search.py backend/tests/test_llmops_retrieval.py backend/tests/test_llmops_stores.py backend/tests/test_llmops_api_contracts.py backend/tests/test_proposal_draft.py backend/tests/test_proposal_evaluation.py backend/tests/test_upload_api.py
+.\.venv\Scripts\python.exe -m pytest backend/tests/test_llmops_search.py backend/tests/test_llmops_retrieval.py backend/tests/test_llmops_stores.py backend/tests/test_llmops_api_contracts.py backend/tests/test_proposal_draft.py backend/tests/test_proposal_evaluation.py backend/tests/test_proposal_live_runner.py backend/tests/test_upload_api.py
 npm.cmd --prefix .\frontend run typecheck
 npm.cmd --prefix .\frontend run test
 npm.cmd --prefix .\frontend run build

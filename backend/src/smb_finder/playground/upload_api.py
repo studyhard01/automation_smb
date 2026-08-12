@@ -16,10 +16,15 @@ from smb_finder.config import Settings
 from smb_finder.llmops_search import LlmopsSearchError
 from smb_finder.models import DocumentCitation
 
+from .document_models import SelectedFileContext
 from .proposal_draft import (
+    ProposalDraftClarificationRequest,
+    ProposalDraftClarificationResponse,
     ProposalDraftError,
     ProposalDraftGenerateRequest,
     ProposalDraftGenerateResponse,
+    ProposalDraftRevisionRequest,
+    ProposalDraftRevisionResponse,
     ProposalDraftService,
 )
 from .upload_models import (
@@ -54,6 +59,93 @@ def create_upload_router(
             upload_manager.close()
 
     router = APIRouter(tags=["playground-settings"], lifespan=lifespan)
+
+    def proposal_error_detail(exc: ProposalDraftError) -> dict[str, object]:
+        detail: dict[str, object] = {"code": exc.code, "message": exc.message}
+        if exc.context_usage is not None:
+            detail["context_usage"] = exc.context_usage.model_dump(mode="json")
+        if exc.evidence_filter is not None:
+            detail["evidence_filter"] = exc.evidence_filter.model_dump(mode="json")
+        return detail
+
+    async def collect_proposal_evidence(
+        selected_files: list[SelectedFileContext],
+        query: str,
+    ) -> tuple[list[DocumentCitation], float, float]:
+        """선택 snapshot을 재검증하고 같은 범위 안에서만 근거를 다시 검색한다."""
+
+        if runtime_getter is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "proposal_context_unavailable", "message": "선택 문서 검색기가 구성되지 않았습니다."},
+            )
+        runtime = runtime_getter()
+        database_selections = [
+            (str(item.doc_id), str(item.revision_id)) for item in selected_files if item.source == "llmops"
+        ]
+        upload_selections = [
+            (item.doc_id, item.revision_id) for item in selected_files if item.source == "upload"
+        ]
+
+        validation_started = time.perf_counter()
+        if database_selections:
+            file_searcher = getattr(runtime, "file_searcher", None)
+            if file_searcher is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "selected_file_validation_unavailable", "message": "선택 문서를 확인할 수 없습니다."},
+                )
+            valid = await run_in_threadpool(file_searcher.validate_active_selections, database_selections)
+            if set(database_selections) != valid:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "selected_file_stale",
+                        "message": "선택한 파일의 활성 버전이 변경되었습니다. 다시 검색해 주세요.",
+                    },
+                )
+        context_upload_manager = getattr(runtime, "upload_manager", None)
+        if upload_selections:
+            if context_upload_manager is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "upload_context_unavailable", "message": "첨부 파일을 확인할 수 없습니다."},
+                )
+            valid_uploads = await run_in_threadpool(context_upload_manager.validate_selections, upload_selections)
+            if not valid_uploads:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "uploaded_file_stale",
+                        "message": "첨부 파일 참조가 만료됐습니다. 다시 첨부해 주세요.",
+                    },
+                )
+        validation_ms = round((time.perf_counter() - validation_started) * 1000, 1)
+
+        retrieval_started = time.perf_counter()
+        evidence: list[DocumentCitation] = []
+        if database_selections:
+            scoped_retriever = getattr(runtime, "scoped_retriever", None)
+            if scoped_retriever is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "proposal_retrieval_unavailable", "message": "선택 문서 근거를 검색할 수 없습니다."},
+                )
+            database_result = await run_in_threadpool(scoped_retriever.retrieve, query, database_selections)
+            evidence.extend(database_result.citations)
+        if upload_selections:
+            upload_result = await run_in_threadpool(context_upload_manager.retrieve, query, upload_selections)
+            evidence.extend(upload_result.citations)
+        retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000, 1)
+        if not evidence:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "proposal_evidence_unavailable",
+                    "message": "선택한 문서에서 기안 작성에 사용할 근거를 찾지 못했습니다.",
+                },
+            )
+        return evidence, validation_ms, retrieval_ms
 
     @router.get(
         "/api/playground/settings",
@@ -121,101 +213,60 @@ def create_upload_router(
         response_model=ProposalDraftGenerateResponse,
         status_code=201,
         operation_id="generate_playground_proposal_draft",
-        summary="선택 문서 기반 구조화 기안 초안 생성·저장",
+        summary="선택 문서 기반 구조화 기안 생성 또는 필수 정보 확인",
     )
     async def generate_proposal_draft(request: ProposalDraftGenerateRequest) -> ProposalDraftGenerateResponse:
-        if runtime_getter is None:
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "proposal_context_unavailable", "message": "선택 문서 검색기가 구성되지 않았습니다."},
-            )
-        runtime = runtime_getter()
-        validation_started = time.perf_counter()
-        database_selections = [
-            (str(item.doc_id), str(item.revision_id))
-            for item in request.selected_files
-            if item.source == "llmops"
-        ]
-        upload_selections = [
-            (item.doc_id, item.revision_id)
-            for item in request.selected_files
-            if item.source == "upload"
-        ]
         try:
-            if database_selections:
-                file_searcher = getattr(runtime, "file_searcher", None)
-                if file_searcher is None:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={
-                            "code": "selected_file_validation_unavailable",
-                            "message": "선택 문서를 확인할 수 없습니다.",
-                        },
-                    )
-                valid = await run_in_threadpool(file_searcher.validate_active_selections, database_selections)
-                if set(database_selections) != valid:
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "code": "selected_file_stale",
-                            "message": "선택한 파일의 활성 버전이 변경되었습니다. 다시 검색해 주세요.",
-                        },
-                    )
-            if upload_selections:
-                context_upload_manager = getattr(runtime, "upload_manager", None)
-                if context_upload_manager is None:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={"code": "upload_context_unavailable", "message": "첨부 파일을 확인할 수 없습니다."},
-                    )
-                valid_uploads = await run_in_threadpool(
-                    context_upload_manager.validate_selections,
-                    upload_selections,
-                )
-                if not valid_uploads:
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "code": "uploaded_file_stale",
-                            "message": "첨부 파일 참조가 만료됐습니다. 다시 첨부해 주세요.",
-                        },
-                    )
-            validation_ms = round((time.perf_counter() - validation_started) * 1000, 1)
-
-            retrieval_started = time.perf_counter()
-            evidence: list[DocumentCitation] = []
-            if database_selections:
-                scoped_retriever = getattr(runtime, "scoped_retriever", None)
-                if scoped_retriever is None:
-                    raise HTTPException(
-                        status_code=503,
-                        detail={"code": "proposal_retrieval_unavailable", "message": "선택 문서 근거를 검색할 수 없습니다."},
-                    )
-                database_result = await run_in_threadpool(
-                    scoped_retriever.retrieve,
-                    request.instruction,
-                    database_selections,
-                )
-                evidence.extend(database_result.citations)
-            if upload_selections:
-                upload_result = await run_in_threadpool(
-                    getattr(runtime, "upload_manager").retrieve,
-                    request.instruction,
-                    upload_selections,
-                )
-                evidence.extend(upload_result.citations)
-            retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000, 1)
-            if not evidence:
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "code": "proposal_evidence_unavailable",
-                        "message": "선택한 문서에서 기안 작성에 사용할 근거를 찾지 못했습니다.",
-                    },
-                )
+            evidence, validation_ms, retrieval_ms = await collect_proposal_evidence(
+                request.selected_files,
+                request.instruction,
+            )
             return await run_in_threadpool(
                 draft_service.generate,
                 request.instruction,
+                evidence,
+                selected_files=request.selected_files,
+                proposal_type=request.proposal_type,
+                validation_ms=validation_ms,
+                retrieval_ms=retrieval_ms,
+            )
+        except LlmopsSearchError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": exc.code, "message": exc.message, "elapsed_ms": exc.elapsed_ms},
+            ) from exc
+        except UploadError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}) from exc
+        except ProposalDraftError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=proposal_error_detail(exc)) from exc
+
+    @router.post(
+        "/api/playground/drafts/proposal/{draft_id}/clarifications",
+        response_model=ProposalDraftClarificationResponse,
+        status_code=201,
+        operation_id="clarify_playground_proposal_draft",
+        summary="확인 답변 반영 후 기안 완성·저장",
+    )
+    async def clarify_proposal_draft(
+        draft_id: UUID,
+        request: ProposalDraftClarificationRequest,
+    ) -> ProposalDraftClarificationResponse:
+        try:
+            base = await run_in_threadpool(
+                draft_service.get_clarification_record,
+                draft_id,
+                request.selected_files,
+            )
+            question_map = {question.question_id: question.prompt for question in base.completion.questions}
+            query = f"{base.instruction}\n" + "\n".join(
+                f"{question_map.get(answer.question_id, answer.question_id)}: {answer.answer}" for answer in request.answers
+            )
+            evidence, validation_ms, retrieval_ms = await collect_proposal_evidence(request.selected_files, query)
+            return await run_in_threadpool(
+                draft_service.clarify,
+                draft_id,
+                request.answers,
+                request.selected_files,
                 evidence,
                 validation_ms=validation_ms,
                 retrieval_ms=retrieval_ms,
@@ -228,10 +279,45 @@ def create_upload_router(
         except UploadError as exc:
             raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}) from exc
         except ProposalDraftError as exc:
-            detail: dict[str, object] = {"code": exc.code, "message": exc.message}
-            if exc.context_usage is not None:
-                detail["context_usage"] = exc.context_usage.model_dump(mode="json")
-            raise HTTPException(status_code=exc.status_code, detail=detail) from exc
+            raise HTTPException(status_code=exc.status_code, detail=proposal_error_detail(exc)) from exc
+
+    @router.post(
+        "/api/playground/drafts/proposal/{draft_id}/revisions",
+        response_model=ProposalDraftRevisionResponse,
+        status_code=201,
+        operation_id="revise_playground_proposal_draft",
+        summary="피드백 기반 기안 수정본 생성·저장",
+    )
+    async def revise_proposal_draft(
+        draft_id: UUID,
+        request: ProposalDraftRevisionRequest,
+    ) -> ProposalDraftRevisionResponse:
+        try:
+            base = await run_in_threadpool(
+                draft_service.get_revision_record,
+                draft_id,
+                request.selected_files,
+            )
+            query = f"{base.instruction}\n수정 피드백: {request.feedback}"
+            evidence, validation_ms, retrieval_ms = await collect_proposal_evidence(request.selected_files, query)
+            return await run_in_threadpool(
+                draft_service.revise,
+                draft_id,
+                request.feedback,
+                request.selected_files,
+                evidence,
+                validation_ms=validation_ms,
+                retrieval_ms=retrieval_ms,
+            )
+        except LlmopsSearchError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": exc.code, "message": exc.message, "elapsed_ms": exc.elapsed_ms},
+            ) from exc
+        except UploadError as exc:
+            raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}) from exc
+        except ProposalDraftError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=proposal_error_detail(exc)) from exc
 
     @router.get(
         "/api/playground/drafts/proposal/{draft_id}",

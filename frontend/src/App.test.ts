@@ -2,7 +2,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "@/App.vue";
-import { playgroundApi } from "@/api/client";
+import { ApiError, playgroundApi } from "@/api/client";
 import ChatWorkspace from "@/components/ChatWorkspace.vue";
 import FeatureSidebar from "@/components/FeatureSidebar.vue";
 import FileSidebar from "@/components/FileSidebar.vue";
@@ -20,7 +20,12 @@ import type {
 vi.mock("@/api/client", () => ({
   ApiError: class ApiError extends Error {
     status: number;
-    constructor(message: string, status = 500) { super(message); this.status = status; }
+    errorCode: string;
+    constructor(message: string, status = 500, _requestId = "", errorCode = "") {
+      super(message);
+      this.status = status;
+      this.errorCode = errorCode;
+    }
   },
   playgroundApi: {
     getStoresStatus: vi.fn(),
@@ -32,6 +37,8 @@ vi.mock("@/api/client", () => ({
     updateUploadDirectory: vi.fn(),
     updateProposalDraftDirectory: vi.fn(),
     generateProposalDraft: vi.fn(),
+    reviseProposalDraft: vi.fn(),
+    clarifyProposalDraft: vi.fn(),
     uploadFile: vi.fn(),
   },
 }));
@@ -119,10 +126,25 @@ const chatResponse: ChatResponse = {
 
 const proposalDraftResponse: ProposalDraftGenerated = {
   draft_id: "77777777-7777-7777-7777-777777777777",
+  title: "합성 자동화 구매 계획",
   fields: {
     title: "합성 자동화 구매 계획",
     approval_request: "검토 후 재가하여 주시기 바랍니다.",
     body: "합성 자동화 교육 참석을 요청합니다.",
+  },
+  document: {
+    schema_version: "proposal-document-v2",
+    proposal_type: "purchase",
+    title: "합성 자동화 구매 계획",
+    approval_request: "검토 후 재가하여 주시기 바랍니다.",
+    sections: [{
+      heading: "주요 내용",
+      semantic_role: "details",
+      citations: ["E001"],
+      blocks: [{ type: "paragraph", text: "합성 자동화 교육 참석을 요청합니다." }],
+      missing_information: [],
+    }],
+    missing_information: [],
   },
   file_name: "[기안] 합성 자동화 구매 계획_20260807_v1.0.xlsx",
   download_url: "/api/playground/drafts/proposal/77777777-7777-7777-7777-777777777777",
@@ -131,6 +153,91 @@ const proposalDraftResponse: ProposalDraftGenerated = {
   model_used: "synthetic-model",
   elapsed_ms: 321,
   timings_ms: { llm: 300, workbook: 10, smb: 11 },
+  proposal_type: "purchase",
+  proposal_type_source: "user",
+  evidence_filter: {
+    schema_version: "proposal-evidence-filter-v1",
+    input_document_count: 2,
+    included_document_count: 1,
+    excluded_document_count: 1,
+    input_citation_count: 6,
+    included_citation_count: 4,
+    excluded_citation_count: 2,
+    excluded_reason_counts: { irrelevant_document: 1 },
+    fallback_used: false,
+  },
+  context_usage: {
+    schema_version: "proposal-context-usage-v1",
+    source_citation_count: 6,
+    packed_citation_count: 4,
+    deduplicated_citation_count: 0,
+    source_document_count: 2,
+    packed_document_count: 1,
+    context_budget_chars: 4000,
+    context_chars: 1200,
+    estimated_input_tokens: 750,
+    truncated: false,
+    retry_count: 0,
+    first_attempt_context_chars: null,
+    prompt_eval_count: null,
+  },
+  completion: {
+    schema_version: "proposal-completion-v1",
+    status: "completed",
+    questions: [],
+    supported_claim_count: 1,
+    derived_claim_count: 0,
+    omitted_claim_count: 0,
+    conflicting_claim_count: 0,
+    clarification_round: 0,
+  },
+};
+
+const pendingProposalDraftResponse: ProposalDraftGenerated = {
+  ...proposalDraftResponse,
+  draft_id: "99999999-9999-9999-9999-999999999999",
+  file_name: null,
+  download_url: null,
+  destination_label: null,
+  saved_to_smb: false,
+  completion: {
+    ...proposalDraftResponse.completion,
+    status: "needs_clarification",
+    questions: [{
+      question_id: "Q001",
+      field_key: "total_amount",
+      prompt: "승인 금액은 얼마인가요?",
+      reason: "missing",
+    }],
+    clarification_round: 0,
+  },
+};
+
+const clarifiedProposalDraftResponse: ProposalDraftGenerated = {
+  ...proposalDraftResponse,
+  draft_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  file_name: "[기안] 합성 자동화 구매 계획_20260807_v1.0_완성.xlsx",
+  download_url: "/api/playground/drafts/proposal/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  clarification_of_draft_id: pendingProposalDraftResponse.draft_id,
+  answered_question_count: 1,
+  completion: {
+    ...proposalDraftResponse.completion,
+    clarification_round: 1,
+  },
+};
+
+const revisedProposalDraftResponse: ProposalDraftGenerated = {
+  ...proposalDraftResponse,
+  draft_id: "88888888-8888-8888-8888-888888888888",
+  fields: {
+    ...proposalDraftResponse.fields,
+    body: "상세 일정은 제외하고 참가 목적과 참가 내용을 중심으로 작성합니다.",
+  },
+  file_name: "[기안] 합성 자동화 구매 계획_20260807_v1.1.xlsx",
+  download_url: "/api/playground/drafts/proposal/88888888-8888-8888-8888-888888888888",
+  revision_of_draft_id: proposalDraftResponse.draft_id,
+  revision_number: "1.1",
+  revision_summary: "상세 일정을 제외하고 참가 목적과 참가 내용을 보강했습니다.",
 };
 
 const graphResponse = {
@@ -157,6 +264,8 @@ describe("App DB document flow", () => {
     vi.mocked(playgroundApi.updateUploadDirectory).mockResolvedValue(settingsResponse);
     vi.mocked(playgroundApi.updateProposalDraftDirectory).mockResolvedValue(settingsResponse);
     vi.mocked(playgroundApi.generateProposalDraft).mockResolvedValue(proposalDraftResponse);
+    vi.mocked(playgroundApi.reviseProposalDraft).mockResolvedValue(revisedProposalDraftResponse);
+    vi.mocked(playgroundApi.clarifyProposalDraft).mockResolvedValue(clarifiedProposalDraftResponse);
     vi.mocked(playgroundApi.uploadFile).mockResolvedValue(uploadResponse);
   });
 
@@ -222,6 +331,9 @@ describe("App DB document flow", () => {
     expect(wrapper.text()).toContain("기안 목적과 요청 내용을 입력해 주세요.");
     expect(wrapper.findComponent(ChatWorkspace).props("inputMode")).toBe("proposal_description");
 
+    await wrapper.findComponent(ChatWorkspace).vm.$emit("updateProposalType", "purchase");
+    await wrapper.vm.$nextTick();
+
     await wrapper.findComponent(ChatWorkspace).vm.$emit("send", "교육 참석 목적과 비용을 포함해 기안해 줘");
     await flushPromises();
 
@@ -231,11 +343,13 @@ describe("App DB document flow", () => {
         doc_id: selectedFile.doc_id,
         revision_id: selectedFile.revision_id,
       })],
+      proposal_type: "purchase",
     });
     const download = wrapper.findComponent(ChatWorkspace).get(`a[href="${proposalDraftResponse.download_url}"]`);
     expect(download.attributes("download")).toBe(proposalDraftResponse.file_name);
     expect(wrapper.text()).toContain(`제목: ${proposalDraftResponse.fields.title}`);
     expect(wrapper.text()).toContain(`결재 부탁 멘트: ${proposalDraftResponse.fields.approval_request}`);
+    expect(wrapper.text()).toContain("기안 유형: 구매 · 사용자 선택");
     expect(wrapper.text()).toContain(`선택 문서: ${selectedFile.file_name}`);
     expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback"))
       .toContain(`${proposalDraftResponse.file_name} 생성 및 공유폴더 저장을 완료했습니다`);
@@ -260,6 +374,207 @@ describe("App DB document flow", () => {
 
     resolveGeneration(proposalDraftResponse);
     await flushPromises();
+  });
+
+  it("필수 질문 답변으로 기안을 완성하고 원 질문 카드의 중복 제출을 막는다", async () => {
+    vi.mocked(playgroundApi.generateProposalDraft).mockResolvedValueOnce(pendingProposalDraftResponse);
+    const wrapper = mount(App);
+    await flushPromises();
+    const workspace = wrapper.findComponent(ChatWorkspace);
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await workspace.vm.$emit("send", "합성 구매 기안을 작성해 줘");
+    await flushPromises();
+
+    const sourceMessage = workspace.props("messages").find(
+      (item) => item.proposalDraft?.draft_id === pendingProposalDraftResponse.draft_id,
+    )!;
+    expect(workspace.find(".proposal-clarification-questions").exists()).toBe(true);
+    expect(workspace.find("a").exists()).toBe(false);
+
+    await workspace.vm.$emit(
+      "submitProposalClarification",
+      sourceMessage.id,
+      [{ question_id: "Q001", answer: "가".repeat(501) }],
+    );
+    await flushPromises();
+    expect(playgroundApi.clarifyProposalDraft).not.toHaveBeenCalled();
+    expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback"))
+      .toBe("확인 답변은 질문마다 1~500자로 입력해 주세요.");
+
+    await workspace.get(".proposal-clarification-questions textarea").setValue("120만원입니다.");
+    await workspace.get(".proposal-clarification-questions button").trigger("click");
+    await flushPromises();
+
+    expect(playgroundApi.clarifyProposalDraft).toHaveBeenCalledWith(
+      pendingProposalDraftResponse.draft_id,
+      {
+        answers: [{ question_id: "Q001", answer: "120만원입니다." }],
+        selected_files: [expect.objectContaining({
+          doc_id: selectedFile.doc_id,
+          revision_id: selectedFile.revision_id,
+        })],
+      },
+    );
+    expect(workspace.props("messages").find((item) => item.id === sourceMessage.id)?.proposalClarificationCompleted)
+      .toBe(true);
+    expect(workspace.get(".proposal-clarification-questions textarea").attributes("disabled")).toBeDefined();
+    expect(workspace.get(".proposal-clarification-questions button").text()).toBe("답변 반영 완료");
+    expect(workspace.get(`a[href="${clarifiedProposalDraftResponse.download_url}"]`).attributes("download"))
+      .toBe(clarifiedProposalDraftResponse.file_name);
+
+    await workspace.vm.$emit(
+      "submitProposalClarification",
+      sourceMessage.id,
+      [{ question_id: "Q001", answer: "다시 제출" }],
+    );
+    await flushPromises();
+    expect(playgroundApi.clarifyProposalDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it("확인 답변 실패 시 입력을 보존하고 오류 코드별 안내 후 재시도한다", async () => {
+    vi.mocked(playgroundApi.generateProposalDraft).mockResolvedValueOnce(pendingProposalDraftResponse);
+    vi.mocked(playgroundApi.clarifyProposalDraft).mockRejectedValueOnce(
+      new ApiError("답변이 누락되었습니다.", 422, "request-clarify", "proposal_clarification_answers_incomplete"),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+    const workspace = wrapper.findComponent(ChatWorkspace);
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await workspace.vm.$emit("send", "합성 구매 기안을 작성해 줘");
+    await flushPromises();
+    const answer = workspace.get<HTMLTextAreaElement>(".proposal-clarification-questions textarea");
+    await answer.setValue("120만원입니다.");
+    await workspace.get(".proposal-clarification-questions button").trigger("click");
+    await flushPromises();
+
+    expect(answer.element.value).toBe("120만원입니다.");
+    expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback"))
+      .toContain("표시된 모든 확인 질문에 답한 뒤 다시 시도해 주세요.");
+
+    vi.mocked(playgroundApi.clarifyProposalDraft).mockResolvedValueOnce(clarifiedProposalDraftResponse);
+    await workspace.get(".proposal-clarification-questions button").trigger("click");
+    await flushPromises();
+    expect(playgroundApi.clarifyProposalDraft).toHaveBeenCalledTimes(2);
+    expect(workspace.get(`a[href="${clarifiedProposalDraftResponse.download_url}"]`).attributes("href"))
+      .toBe(clarifiedProposalDraftResponse.download_url);
+  });
+
+  it("생성 당시 문서 스냅샷으로 별도 수정본을 만들고 원본 다운로드를 유지한다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const workspace = wrapper.findComponent(ChatWorkspace);
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await workspace.vm.$emit("send", "행사 참석 기안을 작성해 줘");
+    await flushPromises();
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findComponent(FileSidebar).props("selectedFiles")).toEqual([]);
+
+    const originalMessage = workspace.props("messages").find((item) => item.proposalDraft?.draft_id === proposalDraftResponse.draft_id);
+    await workspace.vm.$emit("startProposalRevision", originalMessage!.id);
+    await wrapper.vm.$nextTick();
+    expect(workspace.props("inputMode")).toBe("proposal_revision");
+    expect(workspace.props("revisionSourceFileCount")).toBe(1);
+
+    await workspace.vm.$emit("send", "행사 개요와 상세 일정은 제외해 줘");
+    await flushPromises();
+
+    expect(playgroundApi.reviseProposalDraft).toHaveBeenCalledWith(proposalDraftResponse.draft_id, {
+      feedback: "행사 개요와 상세 일정은 제외해 줘",
+      selected_files: [{
+        source: selectedFile.source,
+        file_name: selectedFile.file_name,
+        title: selectedFile.title,
+        doc_id: selectedFile.doc_id,
+        revision_id: selectedFile.revision_id,
+      }],
+    });
+    expect(workspace.props("messages").filter((item) => item.proposalDraft)).toHaveLength(2);
+    expect(workspace.find(`a[href="${proposalDraftResponse.download_url}"]`).exists()).toBe(true);
+    expect(workspace.find(`a[href="${revisedProposalDraftResponse.download_url}"]`).exists()).toBe(true);
+    expect(wrapper.text()).toContain("수정본 1.1");
+    expect(wrapper.text()).toContain(`수정 요약: ${revisedProposalDraftResponse.revision_summary}`);
+    expect(workspace.props("inputMode")).toBe("chat");
+  });
+
+  it("기안 설명과 수정 피드백의 2,000자 제한을 API 호출 전에 적용한다", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+    const workspace = wrapper.findComponent(ChatWorkspace);
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await workspace.vm.$emit("send", "가".repeat(2001));
+    await flushPromises();
+    expect(playgroundApi.generateProposalDraft).not.toHaveBeenCalled();
+    expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback"))
+      .toBe("기안 설명은 최대 2,000자까지 입력할 수 있습니다.");
+
+    await workspace.vm.$emit("send", "유효한 기안 설명");
+    await flushPromises();
+    const originalMessage = workspace.props("messages").find(
+      (item) => item.proposalDraft?.draft_id === proposalDraftResponse.draft_id,
+    )!;
+    await workspace.vm.$emit("startProposalRevision", originalMessage.id);
+    await workspace.vm.$emit("send", "나".repeat(2001));
+    await flushPromises();
+    expect(playgroundApi.reviseProposalDraft).not.toHaveBeenCalled();
+    expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback"))
+      .toBe("수정 피드백은 최대 2,000자까지 입력할 수 있습니다.");
+  });
+
+  it("기안 생성과 수정 오류를 HTTP 상태보다 backend error_code에 맞춰 안내한다", async () => {
+    vi.mocked(playgroundApi.generateProposalDraft).mockRejectedValueOnce(
+      new ApiError("context", 422, "request-draft", "proposal_context_limit_exceeded"),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+    const workspace = wrapper.findComponent(ChatWorkspace);
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await workspace.vm.$emit("send", "합성 구매 기안");
+    await flushPromises();
+    expect(wrapper.text()).toContain("선택 문서가 기안 처리 범위를 넘었습니다.");
+
+    vi.mocked(playgroundApi.generateProposalDraft).mockResolvedValueOnce(proposalDraftResponse);
+    await workspace.vm.$emit("send", "다시 생성");
+    await flushPromises();
+    const originalMessage = workspace.props("messages").find(
+      (item) => item.proposalDraft?.draft_id === proposalDraftResponse.draft_id,
+    )!;
+    await workspace.vm.$emit("startProposalRevision", originalMessage.id);
+    vi.mocked(playgroundApi.reviseProposalDraft).mockRejectedValueOnce(
+      new ApiError("clarify first", 409, "request-revision", "proposal_clarification_required"),
+    );
+    await workspace.vm.$emit("send", "본문을 줄여 줘");
+    await flushPromises();
+    expect(wrapper.findComponent(FeatureSidebar).props("functionFeedback"))
+      .toContain("이 초안은 필수 확인 질문에 먼저 답해야 합니다.");
+  });
+
+  it("알 수 없는 기안 422는 근거 부족이 아닌 입력값 검증 안내로 표시한다", async () => {
+    vi.mocked(playgroundApi.generateProposalDraft).mockRejectedValueOnce(
+      new ApiError("validation failed", 422),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+    const workspace = wrapper.findComponent(ChatWorkspace);
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await workspace.vm.$emit("send", "합성 구매 기안");
+    await flushPromises();
+
+    const feedback = wrapper.findComponent(FeatureSidebar).props("functionFeedback");
+    expect(feedback).toContain("입력 길이와 필수 항목을 확인한 뒤 다시 시도해 주세요.");
+    expect(feedback).not.toContain("관련 근거를 찾지 못했습니다");
   });
 
   it("기안 기능은 파일이 없으면 API를 호출하지 않고 왼쪽 파일 선택을 안내한다", async () => {
@@ -340,6 +655,22 @@ describe("App DB document flow", () => {
     expect(playgroundApi.sendChat).toHaveBeenLastCalledWith(expect.objectContaining({
       selected_files: [expect.objectContaining({ source: "upload" })],
     }));
+  });
+
+  it("동명 파일 충돌은 저장소 장애가 아니라 파일명 변경 안내로 표시한다", async () => {
+    vi.mocked(playgroundApi.uploadFile).mockRejectedValue(
+      new ApiError("같은 이름의 파일이 이미 있습니다.", 409),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+    const file = new File(["synthetic"], "synthetic-note.md", { type: "text/markdown" });
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("uploadFile", file);
+    await flushPromises();
+
+    expect(wrapper.findComponent(FileSidebar).props("uploadStatus")).toBe("error");
+    expect(wrapper.findComponent(FileSidebar).props("uploadFeedback"))
+      .toBe("파일 첨부 실패: 오늘 같은 이름으로 첨부한 파일이 이미 있습니다. 원본 파일명을 바꾼 뒤 다시 첨부해 주세요.");
   });
 
   it("설정 대화상자에서 상대 경로만 PATCH하고 전체 설정 응답을 반영한다", async () => {

@@ -65,6 +65,8 @@ class PackedProposalContext:
 
     text: str
     citation_ids: tuple[str, ...]
+    source_chunk_ids: tuple[str, ...]
+    context_sha256: str
     usage: ProposalContextUsage
 
 
@@ -199,6 +201,7 @@ def pack_proposal_context(
 
     fragments: list[str] = []
     citation_ids: list[str] = []
+    source_chunk_ids: list[str] = []
     document_usage: dict[tuple[str, str], int] = {}
     packed_documents: set[tuple[str, str]] = set()
     excerpt_was_truncated = False
@@ -228,6 +231,7 @@ def pack_proposal_context(
         fragment = f"{header}{excerpt}"
         fragments.append(fragment)
         citation_ids.append(citation_id)
+        source_chunk_ids.append(str(item.citation.chunk_id))
         document_usage[document_key] = document_usage.get(document_key, 0) + len(fragment)
         packed_documents.add(document_key)
 
@@ -246,4 +250,10 @@ def pack_proposal_context(
         retry_count=retry_count,
         first_attempt_context_chars=first_attempt_context_chars,
     )
-    return PackedProposalContext(text=text, citation_ids=tuple(citation_ids), usage=usage)
+    return PackedProposalContext(
+        text=text,
+        citation_ids=tuple(citation_ids),
+        source_chunk_ids=tuple(source_chunk_ids),
+        context_sha256=sha256(text.encode("utf-8")).hexdigest(),
+        usage=usage,
+    )

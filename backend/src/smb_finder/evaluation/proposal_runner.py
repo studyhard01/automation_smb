@@ -1,4 +1,4 @@
-"""외부 기안 dataset을 읽기 전용으로 연결하는 preflight·baseline·채점 실행기."""
+"""외부 기안 dataset을 읽기 전용으로 연결하는 preflight·oracle·채점 실행기."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import math
 import posixpath
 import re
+import unicodedata
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from .proposal_models import (
     ProposalPrediction,
     ProposalPredictionContext,
     ProposalPredictionContextUsage,
+    ProposalPredictionEvidenceFilter,
     ProposalPredictionProjection,
     ProposalPredictionTimings,
     ProposalToolStageEvent,
@@ -94,6 +96,26 @@ class _PredictionSnapshot:
     base_directory: Path
 
 
+@dataclass(frozen=True)
+class _RenderedCell:
+    """본문을 노출하지 않고 OOXML 레이아웃을 검사하기 위한 메모리 셀."""
+
+    reference: str
+    row: int
+    column: int
+    value: str
+    style_index: int
+
+
+@dataclass(frozen=True)
+class _WorksheetLayout:
+    """시트별 셀, 병합, 명시적 행 높이의 최소 검사 표현."""
+
+    cells: dict[tuple[int, int], _RenderedCell]
+    merges: tuple[tuple[int, int, int, int], ...]
+    explicit_height_rows: frozenset[int]
+
+
 def _read_jsonl(path: Path, model: type[BaseModel], id_field: str) -> tuple[bytes, list[BaseModel]]:
     """파일을 byte 단위로 한 번만 읽고 쓰기 없이 Pydantic으로 검증한다."""
 
@@ -135,6 +157,23 @@ def load_proposal_dataset(
     artifacts = {record.artifact_id: record for record in artifact_records if isinstance(record, ProposalDatasetArtifact)}
     cases = [record for record in case_records if isinstance(record, ProposalDatasetCaseInput)]
     return ProposalDatasetSnapshot(artifacts=artifacts, cases=cases, fingerprint=fingerprint)
+
+
+def proposal_reference_availability(
+    case: ProposalDatasetCaseInput,
+    artifacts: dict[str, ProposalDatasetArtifact],
+) -> tuple[bool, list[str]]:
+    """preflight·live·scorer가 공유하는 canonical generation reference eligibility."""
+
+    missing_ids = [
+        artifact_id
+        for artifact_id in case.reference_artifact_ids
+        if (artifact := artifacts.get(artifact_id)) is None
+        or artifact.extraction_status not in {"ok", "partial"}
+        or not artifact.chunks
+    ]
+    ready = bool(case.reference_artifact_ids) and not missing_ids
+    return ready, missing_ids
 
 
 def load_proposal_predictions(path: str | Path) -> _PredictionSnapshot:
@@ -214,14 +253,15 @@ def _build_context_plan(
     model_effective_input_limit_tokens: int | None,
 ) -> _ContextPlan:
     expected_ids = case.reference_artifact_ids
-    missing_ids = [artifact_id for artifact_id in expected_ids if artifact_id not in artifacts]
+    references_ready, missing_ids = proposal_reference_availability(case, artifacts)
     raw_chunks = [
         chunk
         for artifact_id in expected_ids
         if (artifact := artifacts.get(artifact_id)) is not None
+        and artifact_id not in missing_ids
         for chunk in artifact.chunks
     ]
-    reference_missing = not expected_ids or bool(missing_ids) or not raw_chunks
+    reference_missing = not references_ready or not raw_chunks
     raw_chars = sum(len(chunk.text) for chunk in raw_chunks)
     raw_tokens = conservative_estimated_tokens(raw_chars)
     if reference_missing:
@@ -358,25 +398,34 @@ def _shared_strings(workbook: zipfile.ZipFile) -> list[str]:
 
 
 def _worksheet_path(workbook: zipfile.ZipFile, sheet_names: tuple[str, ...]) -> str:
-    root = ElementTree.fromstring(workbook.read("xl/workbook.xml"))
-    sheets = root.findall(f"{{{_MAIN_NS}}}sheets/{{{_MAIN_NS}}}sheet")
-    selected = next((sheet for name in sheet_names for sheet in sheets if sheet.attrib.get("name") == name), None)
+    paths = _worksheet_paths(workbook)
+    selected = next((paths[name] for name in sheet_names if name in paths), None)
     if selected is None:
         raise ValueError("worksheet_missing")
-    relationship_id = selected.attrib.get(f"{{{_OFFICE_REL_NS}}}id", "")
+    return selected
+
+
+def _worksheet_paths(workbook: zipfile.ZipFile) -> dict[str, str]:
+    """workbook 관계를 해석해 외부 경로를 노출하지 않는 시트명→part 표를 만든다."""
+
+    root = ElementTree.fromstring(workbook.read("xl/workbook.xml"))
+    sheets = root.findall(f"{{{_MAIN_NS}}}sheets/{{{_MAIN_NS}}}sheet")
     relationships = ElementTree.fromstring(workbook.read("xl/_rels/workbook.xml.rels"))
-    relationship = next(
-        (
-            item
-            for item in relationships.findall(f"{{{_PACKAGE_REL_NS}}}Relationship")
-            if item.attrib.get("Id") == relationship_id
-        ),
-        None,
-    )
-    if relationship is None:
-        raise ValueError("worksheet_relationship_missing")
-    target = relationship.attrib.get("Target", "").replace("\\", "/")
-    return posixpath.normpath(target.lstrip("/") if target.startswith("xl/") else f"xl/{target.lstrip('/')}")
+    targets = {
+        item.attrib.get("Id", ""): item.attrib.get("Target", "")
+        for item in relationships.findall(f"{{{_PACKAGE_REL_NS}}}Relationship")
+    }
+    paths: dict[str, str] = {}
+    for sheet in sheets:
+        name = sheet.attrib.get("name", "")
+        relationship_id = sheet.attrib.get(f"{{{_OFFICE_REL_NS}}}id", "")
+        target = targets.get(relationship_id, "").replace("\\", "/")
+        if not name or not target:
+            continue
+        paths[name] = posixpath.normpath(
+            target.lstrip("/") if target.startswith("xl/") else f"xl/{target.lstrip('/')}"
+        )
+    return paths
 
 
 def _cell_values(workbook: zipfile.ZipFile, worksheet_path: str) -> dict[str, str]:
@@ -401,17 +450,193 @@ def _cell_values(workbook: zipfile.ZipFile, worksheet_path: str) -> dict[str, st
     return values
 
 
+def _column_number(letters: str) -> int:
+    number = 0
+    for letter in letters.upper():
+        number = number * 26 + ord(letter) - ord("A") + 1
+    return number
+
+
+def _cell_coordinates(reference: str) -> tuple[int, int]:
+    match = re.fullmatch(r"\$?([A-Za-z]+)\$?(\d+)", reference)
+    if match is None:
+        raise ValueError("cell_reference_invalid")
+    return int(match.group(2)), _column_number(match.group(1))
+
+
+def _worksheet_layout(workbook: zipfile.ZipFile, worksheet_path: str) -> _WorksheetLayout:
+    shared = _shared_strings(workbook)
+    root = ElementTree.fromstring(workbook.read(worksheet_path))
+    cells: dict[tuple[int, int], _RenderedCell] = {}
+    for cell in root.findall(f".//{{{_MAIN_NS}}}c"):
+        reference = cell.attrib.get("r", "")
+        if not reference:
+            continue
+        row, column = _cell_coordinates(reference)
+        data_type = cell.attrib.get("t", "")
+        if data_type == "inlineStr":
+            value = "".join(node.text or "" for node in cell.findall(f".//{{{_MAIN_NS}}}t"))
+        else:
+            value_node = cell.find(f"{{{_MAIN_NS}}}v")
+            raw_value = value_node.text if value_node is not None and value_node.text is not None else ""
+            value = shared[int(raw_value)] if data_type == "s" and raw_value else raw_value
+        cells[(row, column)] = _RenderedCell(
+            reference=reference,
+            row=row,
+            column=column,
+            value=value.replace("\r\n", "\n").replace("\r", "\n"),
+            style_index=int(cell.attrib.get("s", "0")),
+        )
+    merges = []
+    for merge in root.findall(f".//{{{_MAIN_NS}}}mergeCell"):
+        cell_range = merge.attrib.get("ref", "")
+        if ":" not in cell_range:
+            continue
+        start, end = cell_range.split(":", maxsplit=1)
+        start_row, start_column = _cell_coordinates(start)
+        end_row, end_column = _cell_coordinates(end)
+        merges.append((start_row, start_column, end_row, end_column))
+    explicit_height_rows = frozenset(
+        int(row.attrib["r"])
+        for row in root.findall(f".//{{{_MAIN_NS}}}row")
+        if "r" in row.attrib and "ht" in row.attrib and row.attrib.get("customHeight", "1") not in {"0", "false"}
+    )
+    return _WorksheetLayout(
+        cells=cells,
+        merges=tuple(merges),
+        explicit_height_rows=explicit_height_rows,
+    )
+
+
+def _style_capabilities(workbook: zipfile.ZipFile) -> tuple[frozenset[int], frozenset[int]]:
+    root = ElementTree.fromstring(workbook.read("xl/styles.xml"))
+    border_nodes = root.findall(f"{{{_MAIN_NS}}}borders/{{{_MAIN_NS}}}border")
+    complete_border_ids = {
+        index
+        for index, border in enumerate(border_nodes)
+        if all(
+            (side := border.find(f"{{{_MAIN_NS}}}{name}")) is not None and bool(side.attrib.get("style"))
+            for name in ("left", "right", "top", "bottom")
+        )
+    }
+    wrapped: set[int] = set()
+    bordered: set[int] = set()
+    for index, style in enumerate(root.findall(f"{{{_MAIN_NS}}}cellXfs/{{{_MAIN_NS}}}xf")):
+        alignment = style.find(f"{{{_MAIN_NS}}}alignment")
+        if alignment is not None and alignment.attrib.get("wrapText", "0").casefold() in {"1", "true"}:
+            wrapped.add(index)
+        try:
+            border_id = int(style.attrib.get("borderId", "0"))
+        except ValueError:
+            border_id = -1
+        if border_id in complete_border_ids:
+            bordered.add(index)
+    return frozenset(wrapped), frozenset(bordered)
+
+
+def _normalize_layout_text(value: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value).casefold()).strip()
+
+
+def _contains_expected(cell_value: str, expected: str) -> bool:
+    actual_value = _normalize_layout_text(cell_value)
+    expected_value = _normalize_layout_text(expected)
+    return bool(expected_value) and (actual_value == expected_value or actual_value.endswith(expected_value))
+
+
+def _content_units(document: ProposalPredictedDocument) -> list[str]:
+    units: list[str] = []
+    for section in document.sections:
+        units.append(section.heading)
+        for block in section.blocks:
+            if block.type == "paragraph":
+                units.append(block.text)
+            elif block.type == "list":
+                units.extend(block.items)
+        units.extend(section.missing_information)
+    units.extend(document.missing_information)
+    return [unit for unit in units if unit.strip()]
+
+
+def _merged_across_columns(layout: _WorksheetLayout, cell: _RenderedCell) -> bool:
+    return any(
+        start_row <= cell.row <= end_row
+        and start_column <= cell.column <= end_column
+        and end_column > start_column
+        for start_row, start_column, end_row, end_column in layout.merges
+    )
+
+
+def _matrix_cells(
+    layout: _WorksheetLayout,
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    inline: bool,
+) -> tuple[_RenderedCell, ...] | None:
+    expected_matrix = [headers, *rows]
+    width = len(headers)
+    if width < 2:
+        return None
+    for (start_row, start_column), candidate in layout.cells.items():
+        if not _contains_expected(candidate.value, headers[0]):
+            continue
+        patterns: list[list[tuple[int, int]]] = []
+        if inline and start_column == 1 and width <= 6:
+            base, remainder = divmod(26, width)
+            spans = []
+            current = 1
+            for index in range(width):
+                size = base + (1 if index < remainder else 0)
+                spans.append((current, current + size - 1))
+                current += size
+            patterns.append(spans)
+        patterns.append([(start_column + offset, start_column + offset) for offset in range(width)])
+        for spans in patterns:
+            matched: list[_RenderedCell] = []
+            valid = True
+            for row_offset, expected_row in enumerate(expected_matrix):
+                row_number = start_row + row_offset
+                for expected, (span_start, span_end) in zip(expected_row, spans, strict=True):
+                    logical_cell = layout.cells.get((row_number, span_start))
+                    if logical_cell is None or _normalize_layout_text(logical_cell.value) != _normalize_layout_text(expected):
+                        valid = False
+                        break
+                    physical_cells = [layout.cells.get((row_number, column)) for column in range(span_start, span_end + 1)]
+                    if any(cell is None for cell in physical_cells):
+                        valid = False
+                        break
+                    if span_end > span_start and (
+                        row_number,
+                        span_start,
+                        row_number,
+                        span_end,
+                    ) not in layout.merges:
+                        valid = False
+                        break
+                    matched.extend(cell for cell in physical_cells if cell is not None)
+                if not valid:
+                    break
+            if valid:
+                return tuple(matched)
+    return None
+
+
 def inspect_proposal_workbook(
     content: bytes,
     fields: ProposalPredictedFields,
     *,
     source_sheet: str,
     projection: ProposalPredictionProjection | None = None,
+    document: ProposalPredictedDocument | None = None,
+    contract_version: str = "legacy-v1",
 ) -> ProposalXlsxStatus:
     """OOXML을 메모리에서 읽고 결과 문자열 대신 boolean과 hash만 반환한다."""
 
     status = ProposalXlsxStatus(
         generation_status="ok" if content else "not_generated",
+        contract_version=contract_version,
+        layout_status="failed" if contract_version == "proposal-xlsx-v2" else "not_applicable",
         generated=bool(content),
         workbook_sha256=hashlib.sha256(content).hexdigest(),
         output_line_count=projection.output_line_count if projection is not None else len(fields.body.splitlines()),
@@ -429,6 +654,9 @@ def inspect_proposal_workbook(
             cells = _cell_values(workbook, worksheet_path)
             status.title_written = cells.get("C8", "").strip() == fields.title.strip()
             status.approval_written = cells.get("A10", "").strip() == fields.approval_request.strip()
+            if contract_version == "proposal-xlsx-v2" and document is not None:
+                _inspect_v2_workbook(workbook, status, worksheet_path, document)
+                return status
             lines = fields.body.replace("\r\n", "\n").replace("\r", "\n").strip().splitlines()
             actual_lines = [cells.get(f"A{15 + index}", "") for index in range(len(lines))]
             status.body_written = actual_lines == lines
@@ -437,24 +665,168 @@ def inspect_proposal_workbook(
     return status
 
 
+def _inspect_v2_workbook(
+    workbook: zipfile.ZipFile,
+    status: ProposalXlsxStatus,
+    main_path: str,
+    document: ProposalPredictedDocument,
+) -> None:
+    """V2 본문과 표가 실제 OOXML geometry로 보존됐는지 진단한다."""
+
+    paths = _worksheet_paths(workbook)
+    layouts = {name: _worksheet_layout(workbook, path) for name, path in paths.items()}
+    main_name = next(name for name, path in paths.items() if path == main_path)
+    main_layout = layouts[main_name]
+    wrapped_styles, bordered_styles = _style_capabilities(workbook)
+
+    units = _content_units(document)
+    available_main_cells = [cell for cell in main_layout.cells.values() if cell.row >= 15 and cell.value.strip()]
+    tables = [
+        block
+        for section in document.sections
+        for block in section.blocks
+        if block.type == "table"
+    ]
+    matched_table_cells: list[_RenderedCell] = []
+    table_rows: set[tuple[str, int]] = set()
+    inline_count = 0
+    appendix_count = 0
+    rendered_count = 0
+    table_geometry_valid = True
+    table_border_valid = True
+    wide_table_expected = False
+    for table in tables:
+        width = len(table.headers)
+        wide_table_expected = wide_table_expected or width > 6
+        matched_name: str | None = None
+        matched_cells: tuple[_RenderedCell, ...] | None = None
+        candidate_names = ["세부내용"] if width > 6 else [main_name, "세부내용"]
+        for name in candidate_names:
+            layout = layouts.get(name)
+            if layout is None:
+                continue
+            found = _matrix_cells(layout, table.headers, table.rows, inline=name == main_name)
+            if found is not None:
+                matched_name = name
+                matched_cells = found
+                break
+        if matched_name is None or matched_cells is None:
+            table_geometry_valid = False
+            table_border_valid = False
+            continue
+        rendered_count += 1
+        if matched_name == main_name:
+            inline_count += 1
+        else:
+            appendix_count += 1
+        layout = layouts[matched_name]
+        matched_table_cells.extend(matched_cells)
+        table_rows.update((matched_name, cell.row) for cell in matched_cells)
+        if any(cell.style_index not in bordered_styles for cell in matched_cells):
+            table_border_valid = False
+
+    main_table_rows = {row for name, row in table_rows if name == main_name}
+    editable_text_cells = [cell for cell in available_main_cells if cell.row not in main_table_rows]
+    joined_text = " ".join(cell.value for cell in sorted(editable_text_cells, key=lambda item: (item.row, item.column)))
+    rendered_content_count = sum(_normalize_layout_text(unit) in _normalize_layout_text(joined_text) for unit in units)
+
+    fake_rows = {
+        _normalize_layout_text(" | ".join(row))
+        for table in tables
+        for row in [table.headers, *table.rows]
+    }
+    status.fake_pipe_table_absent = not any(
+        _normalize_layout_text(cell.value) in fake_rows and "|" in cell.value for cell in available_main_cells
+    )
+    omitted_content_count = max(0, len(units) - rendered_content_count)
+    omission_cell = next(
+        (cell for cell in editable_text_cells if "생략" in _normalize_layout_text(cell.value)),
+        None,
+    )
+    omission_notified = bool(omitted_content_count and omission_cell is not None)
+    content_rows = {(main_name, cell.row) for cell in editable_text_cells}
+    status.body_text_single_line_valid = all(
+        cell.style_index not in wrapped_styles and "\n" not in cell.value and "\r" not in cell.value
+        for cell in editable_text_cells
+    )
+    status.body_editable_unmerged_valid = all(
+        not _merged_across_columns(main_layout, cell) for cell in editable_text_cells
+    )
+    status.body_default_height_valid = all(
+        row not in layouts[name].explicit_height_rows for name, row in content_rows
+    )
+    status.table_wrap_valid = all(cell.style_index in wrapped_styles for cell in matched_table_cells)
+    status.table_explicit_row_height_valid = all(
+        row in layouts[name].explicit_height_rows for name, row in table_rows
+    )
+    status.table_geometry_valid = table_geometry_valid
+    status.table_border_valid = table_border_valid
+    status.expected_table_count = len(tables)
+    status.rendered_table_count = rendered_count
+    status.inline_table_count = inline_count
+    status.appendix_table_count = appendix_count
+    status.expected_content_block_count = len(units)
+    status.rendered_content_block_count = rendered_content_count
+    status.omitted_content_block_count = omitted_content_count
+    status.content_omission_notified = omission_notified
+    status.body_written = (
+        (omitted_content_count == 0 or omission_notified)
+        and rendered_count == len(tables)
+    )
+
+    if wide_table_expected and "세부내용" not in layouts:
+        status.appendix_status = "missing"
+    elif wide_table_expected or appendix_count:
+        status.appendix_status = "valid" if appendix_count and rendered_count == len(tables) else "invalid"
+    else:
+        status.appendix_status = "not_required"
+    status.layout_status = (
+        "passed"
+        if all(
+            (
+                status.body_written,
+                status.body_text_single_line_valid,
+                status.body_editable_unmerged_valid,
+                status.body_default_height_valid,
+                status.table_geometry_valid,
+                status.table_border_valid,
+                status.table_wrap_valid,
+                status.table_explicit_row_height_valid,
+                status.fake_pipe_table_absent,
+                status.appendix_status in {"not_required", "valid"},
+            )
+        )
+        else "failed"
+    )
+
+
 def _prediction_workbook_status(
     prediction: ProposalPrediction | None,
     base_directory: Path | None,
     case: ProposalDatasetCaseInput,
 ) -> ProposalXlsxStatus:
     if prediction is None or prediction.fields is None or not prediction.workbook_path or base_directory is None:
-        return ProposalXlsxStatus()
+        contract = prediction.xlsx_contract if prediction is not None else "legacy-v1"
+        return ProposalXlsxStatus(
+            contract_version=contract,
+            layout_status="failed" if contract == "proposal-xlsx-v2" else "not_applicable",
+        )
     workbook_path = Path(prediction.workbook_path)
     resolved = workbook_path if workbook_path.is_absolute() else base_directory / workbook_path
     try:
         content = resolved.read_bytes()
     except OSError:
-        return ProposalXlsxStatus()
+        return ProposalXlsxStatus(
+            contract_version=prediction.xlsx_contract,
+            layout_status="failed" if prediction.xlsx_contract == "proposal-xlsx-v2" else "not_applicable",
+        )
     return inspect_proposal_workbook(
         content,
         prediction.fields,
         source_sheet=case.expected.source_sheet if case.expected else "기안지",
         projection=prediction.projection,
+        document=prediction.document,
+        contract_version=prediction.xlsx_contract,
     )
 
 
@@ -533,6 +905,7 @@ def _baseline_document(case: ProposalDatasetCaseInput, citation_id: str) -> Prop
         ]
     return ProposalPredictedDocument(
         schema_version="proposal-document-v2",
+        proposal_type=case.proposal_type_label,
         title=case.expected.title[:80],
         approval_request=case.expected.approval_request[:1_000],
         sections=sections,
@@ -558,6 +931,7 @@ def _document_projection_line_count(document: ProposalPredictedDocument) -> int:
 def _baseline_prediction(
     case: ProposalDatasetCaseInput,
     plan: _ContextPlan,
+    artifacts: dict[str, ProposalDatasetArtifact],
 ) -> tuple[ProposalPrediction, ProposalXlsxStatus]:
     if case.expected is None:
         raise ProposalEvaluationError("baseline_expected_output_missing")
@@ -576,15 +950,17 @@ def _baseline_prediction(
         truncated=False,
     )
     xlsx = ProposalXlsxStatus()
+    xlsx_contract = "legacy-v1"
     try:
-        from smb_finder.playground.proposal_draft import (
-            ProposalDocumentV2,
-            insert_proposal_fields,
-            project_document_to_legacy_fields,
-        )
+        from smb_finder.playground import proposal_draft as proposal_module
 
         template_path = Path(__file__).resolve().parents[1] / "playground" / "templates" / "proposal_draft.xlsx"
-        projected = project_document_to_legacy_fields(ProposalDocumentV2.model_validate(document.model_dump()))
+        core_document = proposal_module.ProposalDocumentV2.model_validate(document.model_dump())
+        if case.proposal_type_label == "event_attendance":
+            core_document = proposal_module.normalize_proposal_document(core_document, "event_attendance")
+            document = ProposalPredictedDocument.model_validate(core_document.model_dump())
+            source_line_count = _document_projection_line_count(document)
+        projected = proposal_module.project_document_to_legacy_fields(core_document)
         fields = ProposalPredictedFields.model_validate(projected.model_dump())
         output_line_count = len(fields.body.splitlines())
         projection = ProposalPredictionProjection(
@@ -593,12 +969,19 @@ def _baseline_prediction(
             omitted_line_count=max(0, source_line_count - output_line_count),
             truncated=source_line_count > output_line_count or "생략" in fields.body,
         )
-        generated = insert_proposal_fields(template_path.read_bytes(), projected)
+        renderer = getattr(proposal_module, "render_proposal_workbook", None)
+        if renderer is None:
+            generated = proposal_module.insert_proposal_fields(template_path.read_bytes(), projected)
+        else:
+            generated = renderer(template_path.read_bytes(), core_document)
+            xlsx_contract = "proposal-xlsx-v2"
         xlsx = inspect_proposal_workbook(
             generated,
             fields,
             source_sheet=case.expected.source_sheet,
             projection=projection,
+            document=document,
+            contract_version=xlsx_contract,
         )
     except ValidationError:
         xlsx = ProposalXlsxStatus(generation_status="projection_invalid")
@@ -609,14 +992,42 @@ def _baseline_prediction(
     except (ImportError, OSError, ValueError):
         xlsx = ProposalXlsxStatus(generation_status="generation_error")
     workbook_succeeded = all(
-        (xlsx.generated, xlsx.zip_valid, xlsx.required_parts_present, xlsx.title_written, xlsx.approval_written, xlsx.body_written)
+        (
+            xlsx.generated,
+            xlsx.zip_valid,
+            xlsx.required_parts_present,
+            xlsx.title_written,
+            xlsx.approval_written,
+            xlsx.body_written,
+            xlsx.layout_status in {"not_applicable", "passed"},
+        )
     )
+    excluded_chunks = [
+        chunk.chunk_id
+        for artifact_id in case.excluded_post_event_artifact_ids
+        if (artifact := artifacts.get(artifact_id)) is not None
+        for chunk in artifact.chunks
+    ]
     prediction = ProposalPrediction(
         case_id=case.case_id,
         fields=fields,
         document=document,
+        requested_proposal_type=case.proposal_type_label,
+        resolved_proposal_type=case.proposal_type_label,
+        proposal_type_source="user" if case.proposal_type_label is not None else None,
+        evidence_filter=ProposalPredictionEvidenceFilter(
+            input_document_count=len(case.reference_artifact_ids) + len(case.excluded_post_event_artifact_ids),
+            included_document_count=len(case.reference_artifact_ids),
+            excluded_document_count=len(case.excluded_post_event_artifact_ids),
+            input_citation_count=len(plan.packed_chunk_ids) + len(excluded_chunks),
+            included_citation_count=len(plan.packed_chunk_ids),
+            excluded_citation_count=len(excluded_chunks),
+            excluded_reason_counts={"post_event": len(case.excluded_post_event_artifact_ids)},
+        ),
         evidence_artifact_ids=case.reference_artifact_ids,
         evidence_chunk_ids=plan.packed_chunk_ids,
+        excluded_evidence_artifact_ids=case.excluded_post_event_artifact_ids,
+        excluded_evidence_chunk_ids=excluded_chunks,
         citation_map={citation_id: plan.packed_chunk_ids[0]},
         context=ProposalPredictionContext(
             raw_chars=plan.stats.raw_chars,
@@ -635,6 +1046,7 @@ def _baseline_prediction(
             truncated=plan.stats.truncated,
         ),
         projection=projection,
+        xlsx_contract=xlsx_contract,
         tool_events=[
             ProposalToolStageEvent(stage="evidence", status="simulated"),
             ProposalToolStageEvent(stage="llm", status="simulated"),
@@ -665,15 +1077,17 @@ def run_proposal_evaluation(
     pass_threshold: float = PASS_THRESHOLD,
     hard_gate_score_cap: float = HARD_GATE_SCORE_CAP,
 ) -> ProposalEvaluationReport:
-    """SMB·외부 LLM 호출 없이 preflight, oracle baseline 또는 supplied prediction을 평가한다."""
+    """preflight, oracle 계약 검사 또는 저장된 prediction을 평가한다."""
 
     if runtime_context_window_tokens <= reserved_prompt_tokens + reserved_output_tokens:
         raise ProposalEvaluationError("runtime_context_budget_invalid")
     if model_context_limit_tokens is not None and model_context_limit_tokens <= reserved_prompt_tokens + reserved_output_tokens:
         raise ProposalEvaluationError("model_context_limit_invalid")
-    if mode == "predictions" and predictions_path is None:
+    prediction_mode = mode in {"predictions", "live"}
+    oracle_mode = mode in {"oracle_contract_check", "baseline"}
+    if prediction_mode and predictions_path is None:
         raise ProposalEvaluationError("predictions_required")
-    if mode != "predictions" and predictions_path is not None:
+    if not prediction_mode and predictions_path is not None:
         raise ProposalEvaluationError("predictions_not_allowed")
 
     snapshot = load_proposal_dataset(documents_path, proposal_cases_path)
@@ -697,6 +1111,7 @@ def run_proposal_evaluation(
     if mode == "preflight":
         report = ProposalEvaluationReport(
             mode=mode,
+            evaluation_kind="preflight",
             scope=scope,
             dataset_fingerprint=snapshot.fingerprint,
             runtime_context_window_tokens=runtime_context_window_tokens,
@@ -716,10 +1131,10 @@ def run_proposal_evaluation(
     prediction_snapshot = load_proposal_predictions(predictions_path) if predictions_path is not None else None
     results = []
     for case, plan in zip(cases, plans, strict=True):
-        if mode == "baseline" and plan.stats.status == "ready":
-            prediction, xlsx = _baseline_prediction(case, plan)
+        if oracle_mode and plan.stats.status == "ready":
+            prediction, xlsx = _baseline_prediction(case, plan, snapshot.artifacts)
             prediction_hash = _canonical_prediction_hash(prediction)
-        elif mode == "predictions" and prediction_snapshot is not None:
+        elif prediction_mode and prediction_snapshot is not None:
             prediction = prediction_snapshot.predictions.get(case.case_id)
             prediction_hash = prediction_snapshot.hashes.get(case.case_id)
             xlsx = _prediction_workbook_status(prediction, prediction_snapshot.base_directory, case)
@@ -742,6 +1157,14 @@ def run_proposal_evaluation(
         )
     report = ProposalEvaluationReport(
         mode=mode,
+        evaluation_kind=(
+            "oracle_contract_check"
+            if oracle_mode
+            else "live_predictions"
+            if mode == "live"
+            else "supplied_predictions"
+        ),
+        deprecated_baseline_alias_used=mode == "baseline",
         scope=scope,
         dataset_fingerprint=snapshot.fingerprint,
         prediction_fingerprint=prediction_snapshot.fingerprint if prediction_snapshot is not None else None,
@@ -756,11 +1179,18 @@ def run_proposal_evaluation(
         cases=results,
         aggregate=aggregate_proposal_results(results),
     )
+    report = report.model_copy(
+        update={
+            "product_quality_eligible": bool(results)
+            and not oracle_mode
+            and all(item.coverage.product_quality_eligible for item in results)
+        }
+    )
     validate_sanitized_report(report)
     return report
 
 
-def validate_sanitized_report(report: ProposalEvaluationReport) -> None:
+def validate_sanitized_report(report: BaseModel) -> None:
     """보고서 계약에 민감 문자열용 필드가 다시 들어오면 저장 전에 실패시킨다."""
 
     def walk(value: object) -> None:
@@ -777,13 +1207,23 @@ def validate_sanitized_report(report: ProposalEvaluationReport) -> None:
     walk(report.model_dump(mode="json"))
 
 
-def write_proposal_evaluation_report(path: str | Path, report: ProposalEvaluationReport) -> None:
+def write_proposal_evaluation_report(
+    path: str | Path,
+    report: ProposalEvaluationReport,
+    *,
+    exclusive: bool = False,
+) -> None:
     """검증된 비식별 JSON만 명시한 로컬 경로에 기록한다."""
 
     validate_sanitized_report(report)
     output_path = Path(path)
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+        if exclusive:
+            with output_path.open("x", encoding="utf-8", newline="\n") as stream:
+                stream.write(report.model_dump_json(indent=2))
+                stream.write("\n")
+        else:
+            output_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
     except OSError as exc:
         raise ProposalEvaluationError("report_write_failed") from exc

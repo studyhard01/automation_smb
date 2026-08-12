@@ -23,7 +23,11 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 COPY --from=uv-bin /uv /usr/local/bin/uv
 COPY pyproject.toml uv.lock ./
-RUN uv sync --native-tls --frozen --no-dev --no-install-project
+RUN if [ -n "${UV_INSECURE_HOST}" ]; then \
+        uv sync --native-tls --allow-insecure-host "${UV_INSECURE_HOST}" --frozen --no-dev --no-install-project; \
+    else \
+        uv sync --native-tls --frozen --no-dev --no-install-project; \
+    fi
 
 
 FROM python:3.11-slim-bookworm AS runtime

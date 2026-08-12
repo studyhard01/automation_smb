@@ -925,6 +925,28 @@ p {
   gap: 3px;
 }
 
+.proposal-draft-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.proposal-draft-heading strong {
+  min-width: 0;
+}
+
+.proposal-draft-heading em {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: var(--accent-strong);
+  background: var(--accent-weak);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+}
+
 .proposal-draft-file strong,
 .proposal-draft-file small {
   overflow: hidden;
@@ -942,6 +964,81 @@ p {
   font-size: 10px;
 }
 
+.proposal-draft-file .proposal-evidence-summary,
+.proposal-draft-file .proposal-revision-summary {
+  overflow: visible;
+  line-height: 15px;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.proposal-draft-file .proposal-evidence-summary {
+  color: var(--accent-strong);
+}
+
+.proposal-draft-actions {
+  display: grid;
+  gap: 6px;
+}
+
+.proposal-clarification-questions {
+  display: grid;
+  grid-column: 2 / -1;
+  gap: 10px;
+  margin-top: 2px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.proposal-clarification-questions > p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.proposal-clarification-questions label {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.proposal-clarification-questions textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 9px 10px;
+  color: var(--text);
+  background: var(--panel);
+  font: inherit;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.proposal-clarification-questions textarea:focus {
+  border-color: var(--accent);
+  outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.proposal-clarification-questions > button {
+  justify-self: end;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 9px 14px;
+  color: #fff;
+  background: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.proposal-clarification-questions > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .proposal-draft-result a {
   border-radius: var(--radius);
   padding: 9px 12px;
@@ -955,6 +1052,31 @@ p {
 
 .proposal-draft-result a:hover {
   background: var(--accent-strong);
+}
+
+.proposal-draft-actions button,
+.composer-cancel-button {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 8px 11px;
+  color: var(--text);
+  background: var(--panel);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.proposal-draft-actions button:hover,
+.composer-cancel-button:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
+.proposal-draft-actions button:disabled,
+.composer-cancel-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .conversation-search-results,
@@ -1184,6 +1306,35 @@ p {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.composer-cancel-button {
+  margin-left: auto;
+}
+
+.proposal-type-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.proposal-type-select select {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 5px 28px 5px 10px;
+  color: var(--text);
+  background: var(--panel);
+  font: inherit;
+}
+
+.proposal-type-select select:focus {
+  border-color: var(--accent);
+  outline: 0;
+  box-shadow: 0 0 0 3px rgba(194, 31, 58, 0.08);
 }
 
 .composer-input-row {

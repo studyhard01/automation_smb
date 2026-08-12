@@ -16,16 +16,20 @@ from xml.etree import ElementTree
 import httpx
 import pytest
 from fastapi import FastAPI
+from smbprotocol.exceptions import NtStatus, SMBOSError
 
 from smb_finder.config import Settings
 from smb_finder.models import DocumentCitation, RetrievalScores
 from smb_finder.playground.document_api import DocumentRuntime
 from smb_finder.playground.proposal_draft import (
     LocalProposalDraftGenerator,
+    ProposalClaimVerdict,
     ProposalDraftError,
     ProposalDraftFields,
     ProposalDraftResult,
     ProposalDraftService,
+    ProposalEvidenceVerification,
+    ProposalQuestionCandidate,
     insert_proposal_fields,
 )
 from smb_finder.playground.upload_api import create_upload_router
@@ -70,6 +74,7 @@ class StubWriter:
         self.received = b""
         self.proposal_content = b""
         self.proposal_file_name = ""
+        self.proposal_writes: list[tuple[str, bytes]] = []
 
     def close(self) -> None:
         self.closed = True
@@ -96,6 +101,7 @@ class StubWriter:
         assert relative_directory == "team/proposal"
         self.proposal_content = content
         self.proposal_file_name = file_name
+        self.proposal_writes.append((file_name, content))
         return FileUploadResponse(
             file_name=file_name,
             size_bytes=len(content),
@@ -110,15 +116,82 @@ class StubDraftGenerator:
         self.fields = fields
         self.instructions: list[str] = []
         self.evidence: list[list[DocumentCitation]] = []
+        self.proposal_types: list[str] = []
+        self.revisions: list[tuple[str, str, str]] = []
         self.closed = False
 
-    def generate(self, instruction: str, evidence: list[DocumentCitation]) -> ProposalDraftResult:
+    def generate(
+        self,
+        instruction: str,
+        evidence: list[DocumentCitation],
+        *,
+        proposal_type: str = "general",
+    ) -> ProposalDraftResult:
         self.instructions.append(instruction)
         self.evidence.append(evidence)
+        self.proposal_types.append(proposal_type)
         return ProposalDraftResult(fields=self.fields, model="synthetic-draft-model")
+
+    def revise(
+        self,
+        feedback: str,
+        document,  # noqa: ANN001
+        evidence: list[DocumentCitation],
+        *,
+        proposal_type: str,
+    ) -> ProposalDraftResult:
+        self.revisions.append((feedback, document.title, proposal_type))
+        self.evidence.append(evidence)
+        revised_fields = self.fields.model_copy(
+            update={"body": f"{self.fields.body}\n수정 사항: {feedback}"}
+        )
+        return ProposalDraftResult(fields=revised_fields, model="synthetic-draft-model")
 
     def close(self) -> None:
         self.closed = True
+
+
+class AssessingStubDraftGenerator(StubDraftGenerator):
+    """첫 생성은 질문하고 답변 반영본은 근거 있음으로 판정하는 합성 double."""
+
+    def __init__(self, fields: ProposalDraftFields) -> None:
+        super().__init__(fields)
+        self.assessment_count = 0
+
+    def assess(self, instruction, document, evidence, **kwargs):  # noqa: ANN001, ANN003
+        self.assessment_count += 1
+        if kwargs.get("allow_questions", True):
+            return ProposalEvidenceVerification(
+                schema_version="proposal-evidence-verification-v1",
+                claims=[
+                    ProposalClaimVerdict(
+                        claim_id="C0001",
+                        status="unsupported",
+                        action="ask",
+                        citations=[],
+                    )
+                ],
+                questions=[
+                    ProposalQuestionCandidate(
+                        field_key="purchase_amount",
+                        prompt="구매 승인 금액은 얼마인가요?",
+                        reason="missing",
+                        priority=1,
+                    )
+                ],
+            )
+        return ProposalEvidenceVerification(
+            schema_version="proposal-evidence-verification-v1",
+            claims=[
+                ProposalClaimVerdict(
+                    claim_id="C0001",
+                    status="supported",
+                    action="keep",
+                    citations=["U002"],
+                )
+            ],
+            questions=[],
+        )
 
 
 def _citation() -> DocumentCitation:
@@ -511,10 +584,25 @@ def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download
     payload = generated.json()
     assert draft_generator.instructions == ["합성 구매 계획 기안을 작성해 줘"]
     assert draft_generator.evidence == [retriever.citations]
+    assert draft_generator.proposal_types == ["purchase"]
     assert payload["title"] == "합성 자동화 구매 계획"
     assert payload["fields"] == fields.model_dump()
     assert payload["document"]["schema_version"] == "proposal-document-v2"
+    assert payload["document"]["proposal_type"] == "purchase"
     assert payload["document"]["sections"][0]["semantic_role"] == "details"
+    assert payload["proposal_type"] == "purchase"
+    assert payload["proposal_type_source"] == "rule"
+    assert payload["evidence_filter"] == {
+        "schema_version": "proposal-evidence-filter-v1",
+        "input_document_count": 1,
+        "included_document_count": 1,
+        "excluded_document_count": 0,
+        "input_citation_count": 1,
+        "included_citation_count": 1,
+        "excluded_citation_count": 0,
+        "excluded_reason_counts": {},
+        "fallback_used": False,
+    }
     assert payload["context_usage"]["schema_version"] == "proposal-context-usage-v1"
     assert payload["model_used"] == "synthetic-draft-model"
     assert payload["saved_to_smb"] is True
@@ -534,9 +622,299 @@ def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download
         sheet.findtext(".//main:c[@r='A10']/main:is/main:t", namespaces=namespace)
         == "관련 내용을 검토 후 재가하여 주시기 바랍니다."
     )
-    assert sheet.findtext(".//main:c[@r='A15']/main:is/main:t", namespaces=namespace) == "1. 목적"
-    assert sheet.findtext(".//main:c[@r='A16']/main:is/main:t", namespaces=namespace) == "합성 자동화 장비를 구매합니다."
-    assert set(payload["timings_ms"]) == {"validation", "retrieval", "llm", "workbook", "smb"}
+    assert sheet.findtext(".//main:c[@r='A15']/main:is/main:t", namespaces=namespace) == "1. 주요 내용"
+    assert sheet.findtext(".//main:c[@r='A16']/main:is/main:t", namespaces=namespace) == "1. 목적"
+    assert (
+        sheet.findtext(".//main:c[@r='A17']/main:is/main:t", namespaces=namespace)
+        == "합성 자동화 장비를 구매합니다."
+    )
+    assert set(payload["timings_ms"]) == {
+        "validation",
+        "retrieval",
+        "evidence_filter",
+        "llm",
+        "verification",
+        "workbook",
+        "smb",
+    }
+
+
+def test_proposal_generation_defers_save_until_required_clarification_is_answered(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, proposal_draft_default_relative_directory="team/proposal")
+    writer = StubWriter()
+    manager = UploadManager(settings, writer=writer)
+    generator = AssessingStubDraftGenerator(
+        ProposalDraftFields(
+            title="합성 장비 구매",
+            approval_request="검토 후 재가하여 주시기 바랍니다.",
+            body="합성 장비를 구매하며 승인 금액은 확인이 필요합니다.",
+        )
+    )
+    template_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "smb_finder"
+        / "playground"
+        / "templates"
+        / "proposal_draft.xlsx"
+    )
+    service = ProposalDraftService(settings, manager, template_path=template_path, draft_generator=generator)
+    retriever = StubRetriever()
+    runtime = DocumentRuntime(
+        settings=settings,
+        file_searcher=StubFileSearcher(),
+        scoped_retriever=retriever,
+        upload_manager=manager,
+    )
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, manager, service, runtime_getter=lambda: runtime))
+    selected = retriever.citations[0]
+    selected_files = [
+        {
+            "source": "llmops",
+            "doc_id": str(selected.doc_id),
+            "revision_id": str(selected.revision_id),
+            "file_name": "synthetic.xlsx",
+            "title": "합성 구매 근거",
+        }
+    ]
+
+    generated = _request(
+        app,
+        "POST",
+        "/api/playground/drafts/proposal",
+        json_body={"instruction": "합성 장비 구매 기안을 작성해 줘", "selected_files": selected_files},
+    )
+
+    assert generated.status_code == 201
+    pending = generated.json()
+    assert pending["completion"]["status"] == "needs_clarification"
+    assert pending["completion"]["questions"] == [
+        {
+            "question_id": "Q001",
+            "field_key": "purchase_amount",
+            "prompt": "구매 승인 금액은 얼마인가요?",
+            "reason": "missing",
+        }
+    ]
+    assert pending["saved_to_smb"] is False
+    assert pending["file_name"] is None
+    assert pending["download_url"] is None
+    assert writer.proposal_writes == []
+    blocked_download = _request(app, "GET", f"/api/playground/drafts/proposal/{pending['draft_id']}")
+    assert blocked_download.status_code == 409
+    assert blocked_download.json()["detail"]["code"] == "proposal_clarification_required"
+
+    clarified = _request(
+        app,
+        "POST",
+        f"/api/playground/drafts/proposal/{pending['draft_id']}/clarifications",
+        json_body={
+            "answers": [{"question_id": "Q001", "answer": "승인 금액은 120만원입니다."}],
+            "selected_files": selected_files,
+        },
+    )
+
+    assert clarified.status_code == 201
+    completed = clarified.json()
+    assert completed["clarification_of_draft_id"] == pending["draft_id"]
+    assert completed["answered_question_count"] == 1
+    assert completed["completion"]["status"] == "completed"
+    assert completed["completion"]["clarification_round"] == 1
+    assert completed["saved_to_smb"] is True
+    assert completed["download_url"]
+    assert len(writer.proposal_writes) == 1
+    assert generator.assessment_count == 2
+
+
+def test_proposal_revision_inherits_scope_and_type_creates_v11_v12_and_preserves_base(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, proposal_draft_default_relative_directory="team/proposal")
+    writer = StubWriter()
+    manager = UploadManager(settings, writer=writer)
+    fields = ProposalDraftFields(
+        title="합성 자동화 구매 계획",
+        approval_request="관련 내용을 검토 후 재가하여 주시기 바랍니다.",
+        body="1. 목적\n합성 자동화 장비를 구매합니다.",
+    )
+    draft_generator = StubDraftGenerator(fields)
+    template_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "smb_finder"
+        / "playground"
+        / "templates"
+        / "proposal_draft.xlsx"
+    )
+    service = ProposalDraftService(
+        settings,
+        manager,
+        template_path=template_path,
+        clock=lambda: datetime(2026, 7, 29, 15, 30, tzinfo=UTC),
+        draft_generator=draft_generator,
+    )
+    retriever = StubRetriever()
+    runtime = DocumentRuntime(
+        settings=settings,
+        file_searcher=StubFileSearcher(),
+        scoped_retriever=retriever,
+        upload_manager=manager,
+    )
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, manager, service, runtime_getter=lambda: runtime))
+    selected = retriever.citations[0]
+    selected_files = [
+        {
+            "source": "llmops",
+            "doc_id": str(selected.doc_id),
+            "revision_id": str(selected.revision_id),
+            "file_name": "synthetic.xlsx",
+            "title": "합성 구매 근거",
+        }
+    ]
+    generated = _request(
+        app,
+        "POST",
+        "/api/playground/drafts/proposal",
+        json_body={"instruction": "합성 구매 계획 기안을 작성해 줘", "selected_files": selected_files},
+    ).json()
+    original_bytes = _request(app, "GET", generated["download_url"]).content
+
+    first = _request(
+        app,
+        "POST",
+        f"/api/playground/drafts/proposal/{generated['draft_id']}/revisions",
+        json_body={"feedback": "요청 문장을 간결하게 수정해 줘", "selected_files": selected_files},
+    )
+
+    assert first.status_code == 201
+    first_payload = first.json()
+    assert first_payload["revision_of_draft_id"] == generated["draft_id"]
+    assert first_payload["revision_number"] == "1.1"
+    assert first_payload["file_name"].endswith("_v1.1.xlsx")
+    assert first_payload["proposal_type"] == "purchase"
+    assert first_payload["proposal_type_source"] == "rule"
+    assert first_payload["revision_summary"] == "피드백을 반영한 v1.1 수정본입니다. 변경 항목: 본문."
+    assert set(first_payload["timings_ms"]) == {
+        "validation",
+        "retrieval",
+        "evidence_filter",
+        "llm",
+        "verification",
+        "workbook",
+        "smb",
+    }
+    assert _request(app, "GET", generated["download_url"]).content == original_bytes
+    assert _request(app, "GET", first_payload["download_url"]).content != original_bytes
+
+    second = _request(
+        app,
+        "POST",
+        f"/api/playground/drafts/proposal/{first_payload['draft_id']}/revisions",
+        json_body={"feedback": "본문을 한 번 더 다듬어 줘", "selected_files": selected_files},
+    )
+    assert second.status_code == 201
+    assert second.json()["revision_number"] == "1.2"
+    assert second.json()["file_name"].endswith("_v1.2.xlsx")
+    assert [name for name, _ in writer.proposal_writes] == [
+        generated["file_name"],
+        first_payload["file_name"],
+        second.json()["file_name"],
+    ]
+
+
+def test_event_proposal_does_not_call_llm_when_only_receipt_evidence_remains(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, proposal_draft_default_relative_directory="team/proposal")
+    writer = StubWriter()
+    manager = UploadManager(settings, writer=writer)
+    generator = StubDraftGenerator(
+        ProposalDraftFields(title="합성 행사 참가", approval_request="검토 바랍니다.", body="합성 본문")
+    )
+    service = ProposalDraftService(settings, manager, draft_generator=generator)
+    receipt = _citation().model_copy(
+        update={"title": "합성 행사 결제 영수증", "excerpt": "합성 카드 전표 승인 내역"}
+    )
+    retriever = StubRetriever([receipt])
+    runtime = DocumentRuntime(
+        settings=settings,
+        file_searcher=StubFileSearcher(),
+        scoped_retriever=retriever,
+        upload_manager=manager,
+    )
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, manager, service, runtime_getter=lambda: runtime))
+
+    response = _request(
+        app,
+        "POST",
+        "/api/playground/drafts/proposal",
+        json_body={
+            "instruction": "합성 박람회 참가 기안을 작성해 줘",
+            "proposal_type": "event_attendance",
+            "selected_files": [
+                {
+                    "source": "llmops",
+                    "doc_id": str(receipt.doc_id),
+                    "revision_id": str(receipt.revision_id),
+                    "file_name": "synthetic-receipt.pdf",
+                    "title": receipt.title,
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "proposal_relevant_evidence_unavailable"
+    assert response.json()["detail"]["evidence_filter"]["excluded_reason_counts"] == {"receipt": 1}
+    assert generator.instructions == []
+    assert writer.proposal_writes == []
+
+
+def test_proposal_revision_rejects_a_different_selected_file_snapshot_before_retrieval(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, proposal_draft_default_relative_directory="team/proposal")
+    writer = StubWriter()
+    manager = UploadManager(settings, writer=writer)
+    generator = StubDraftGenerator(
+        ProposalDraftFields(title="합성 계획", approval_request="검토 바랍니다.", body="합성 본문")
+    )
+    service = ProposalDraftService(settings, manager, draft_generator=generator)
+    retriever = StubRetriever()
+    runtime = DocumentRuntime(
+        settings=settings,
+        file_searcher=StubFileSearcher(),
+        scoped_retriever=retriever,
+        upload_manager=manager,
+    )
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, manager, service, runtime_getter=lambda: runtime))
+    citation = retriever.citations[0]
+    selected_files = [
+        {
+            "source": "llmops",
+            "doc_id": str(citation.doc_id),
+            "revision_id": str(citation.revision_id),
+            "file_name": "synthetic.xlsx",
+            "title": "합성 근거",
+        }
+    ]
+    generated = _request(
+        app,
+        "POST",
+        "/api/playground/drafts/proposal",
+        json_body={"instruction": "합성 계획 기안을 작성해 줘", "selected_files": selected_files},
+    ).json()
+    calls_before = len(retriever.calls)
+    changed_snapshot = [dict(selected_files[0], doc_id=str(uuid4()))]
+
+    response = _request(
+        app,
+        "POST",
+        f"/api/playground/drafts/proposal/{generated['draft_id']}/revisions",
+        json_body={"feedback": "문구를 수정해 줘", "selected_files": changed_snapshot},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "proposal_revision_scope_mismatch"
+    assert len(retriever.calls) == calls_before
 
 
 def test_legacy_nas_fallback_is_usable_only_with_safe_relative_directory(tmp_path: Path) -> None:
@@ -731,6 +1109,15 @@ class FakeSmb:
         raise AssertionError("공유폴더 쓰기 경로는 rename을 호출하면 안 됩니다.")
 
 
+class CollisionSmb(FakeSmb):
+    """실제 smbclient처럼 충돌을 FileExistsError가 아닌 SMBOSError로 반환한다."""
+
+    def open_file(self, path: str, *, mode: str) -> _RemoteBuffer:
+        assert mode == "xb"
+        self.opened.append((path, mode))
+        raise SMBOSError(NtStatus.STATUS_OBJECT_NAME_COLLISION, path)
+
+
 def test_smb_writer_rejects_oversize_before_creating_remote_file(tmp_path: Path) -> None:
     fake = FakeSmb()
     writer = SmbUploadWriter(_settings(tmp_path, smb_upload_max_size_bytes=4), smb_module=fake)
@@ -787,6 +1174,36 @@ def test_smb_writer_returns_conflict_and_preserves_existing_final_file(tmp_path:
     assert raised.value.code == "file_already_exists"
     assert raised.value.status_code == 409
     assert fake.files == {expected_path: b"existing"}
+    assert fake.removed == []
+    assert fake.renamed == []
+
+
+def test_smb_writer_maps_smbprotocol_name_collision_to_conflict(tmp_path: Path) -> None:
+    fake = CollisionSmb()
+    writer = SmbUploadWriter(_settings(tmp_path), smb_module=fake)
+
+    with pytest.raises(UploadError) as raised:
+        writer.upload(io.BytesIO(b"new"), "synthetic.txt", "team/inbox")
+
+    assert raised.value.code == "file_already_exists"
+    assert raised.value.status_code == 409
+    assert len(fake.opened) == 1
+    assert fake.files == {}
+    assert fake.removed == []
+    assert fake.renamed == []
+
+
+def test_proposal_writer_maps_smbprotocol_name_collision_to_conflict(tmp_path: Path) -> None:
+    fake = CollisionSmb()
+    writer = SmbUploadWriter(_settings(tmp_path), smb_module=fake)
+
+    with pytest.raises(UploadError) as raised:
+        writer.create_xlsx(b"synthetic-workbook", "proposal.xlsx", "team/proposal")
+
+    assert raised.value.code == "file_already_exists"
+    assert raised.value.status_code == 409
+    assert len(fake.opened) == 1
+    assert fake.files == {}
     assert fake.removed == []
     assert fake.renamed == []
 

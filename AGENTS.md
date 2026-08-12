@@ -105,6 +105,23 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 완료 보고에는 총점, hard gate 통과 여부, 저장된 합성 evidence의 freshness와 목표 미달 항목을 함께 적는다.
 평가 기준과 strict mode는 [`docs/PROJECT_QUALITY_RUBRIC.md`](docs/PROJECT_QUALITY_RUBRIC.md)를 따른다.
 
+## 사용자 피드백 반영·Docker 검증 사이클
+
+사용자 피드백으로 제품 코드를 변경할 때는 아래 순서를 한 번의 완료 단위로 적용한다.
+
+1. 피드백을 재현하고 수용 기준을 정한다.
+2. 코드를 수정하고 대상 테스트와 산출물·화면 QA를 실행한다.
+3. 프로젝트 품질 평가를 통과시킨다.
+4. 새 Docker 이미지를 빌드한다.
+5. 테스트와 빌드가 모두 성공한 뒤에만 기존 healthy 컨테이너를 교체한다.
+6. health, OpenAPI, UI, 합성 데이터 기반 read-only smoke를 확인하고 주소와 결과를 보고한다.
+7. 다음 사용자 피드백을 받아 같은 흐름을 반복한다.
+
+- 테스트나 build가 실패하면 기존 healthy 컨테이너를 유지한다.
+- 문서만 바뀌었거나 사용자가 Docker 반영을 제외한 경우에만 Docker 단계를 생략하며 이유를 보고한다.
+- Docker registry push, 원격 배포, 실제 SMB 쓰기, commit, git push는 각각 별도의 명시적 승인이 필요하다.
+- XLSX처럼 시각 품질이 중요한 산출물은 ZIP 무결성뿐 아니라 셀 구조와 실제 렌더/응용 프로그램 표시를 함께 확인한다.
+
 # dev-team 호출 시 최종 보고 필수 항목
 
 사용자가 `@dev-team` 또는 `dev-team`을 호출해 개발을 진행한 경우, 구현 완료 보고에는 아래 항목을 반드시 포함한다.

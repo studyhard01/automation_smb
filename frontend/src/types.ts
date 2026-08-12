@@ -2,6 +2,11 @@ export type FileSource = "llmops" | "upload";
 export type SearchStore = "postgresql" | "minio" | "neo4j";
 export type FunctionId = "summary" | "proposal_draft";
 export type ConversationStatus = "ready" | "loading" | "success" | "error";
+export type ProposalTypeRequest = "auto" | "purchase" | "event_attendance" | "general";
+export type ProposalType = Exclude<ProposalTypeRequest, "auto">;
+export type ProposalTypeSource = "user" | "rule" | "fallback";
+export const PROPOSAL_TEXT_MAX_LENGTH = 2000;
+export const PROPOSAL_CLARIFICATION_ANSWER_MAX_LENGTH = 500;
 
 export interface DocumentSearchHit {
   source: FileSource;
@@ -115,18 +120,139 @@ export interface ProposalDraftFields {
 export interface ProposalDraftRequest {
   instruction: string;
   selected_files: SelectedFilePayload[];
+  proposal_type: ProposalTypeRequest;
+}
+
+export interface ProposalDraftRevisionRequest {
+  feedback: string;
+  selected_files: SelectedFilePayload[];
+}
+
+export interface ProposalClarificationAnswer {
+  question_id: string;
+  answer: string;
+}
+
+export interface ProposalDraftClarificationRequest {
+  answers: ProposalClarificationAnswer[];
+  selected_files: SelectedFilePayload[];
+}
+
+export interface ProposalClarificationQuestion {
+  question_id: string;
+  field_key: string;
+  prompt: string;
+  reason: "missing" | "conflict";
+}
+
+export interface ProposalCompletionSummary {
+  schema_version: "proposal-completion-v1";
+  status: "completed" | "needs_clarification" | "completed_with_omissions";
+  questions: ProposalClarificationQuestion[];
+  supported_claim_count: number;
+  derived_claim_count: number;
+  omitted_claim_count: number;
+  conflicting_claim_count: number;
+  clarification_round: number;
+}
+
+export interface ProposalEvidenceFilter {
+  schema_version: "proposal-evidence-filter-v1";
+  input_document_count: number;
+  included_document_count: number;
+  excluded_document_count: number;
+  input_citation_count: number;
+  included_citation_count: number;
+  excluded_citation_count: number;
+  excluded_reason_counts: Record<string, number>;
+  fallback_used: boolean;
+}
+
+export interface ProposalParagraphBlock {
+  type: "paragraph";
+  text: string;
+}
+
+export interface ProposalListBlock {
+  type: "list";
+  ordered: boolean;
+  items: string[];
+}
+
+export interface ProposalTableBlock {
+  type: "table";
+  headers: string[];
+  rows: string[][];
+}
+
+export type ProposalBlock = ProposalParagraphBlock | ProposalListBlock | ProposalTableBlock;
+export type ProposalSemanticRole =
+  | "purpose"
+  | "background"
+  | "request"
+  | "details"
+  | "budget"
+  | "schedule"
+  | "expected_effect"
+  | "attachments"
+  | "notes"
+  | "other";
+
+export interface ProposalSectionV2 {
+  heading: string;
+  semantic_role: ProposalSemanticRole;
+  citations: string[];
+  blocks: ProposalBlock[];
+  missing_information: string[];
+}
+
+export interface ProposalDocumentV2 {
+  schema_version: "proposal-document-v2";
+  proposal_type: ProposalType | null;
+  title: string;
+  approval_request: string;
+  sections: ProposalSectionV2[];
+  missing_information: string[];
+}
+
+export interface ProposalContextUsage {
+  schema_version: "proposal-context-usage-v1";
+  source_citation_count: number;
+  packed_citation_count: number;
+  deduplicated_citation_count: number;
+  source_document_count: number;
+  packed_document_count: number;
+  context_budget_chars: number;
+  context_chars: number;
+  estimated_input_tokens: number;
+  truncated: boolean;
+  retry_count: number;
+  first_attempt_context_chars: number | null;
+  prompt_eval_count: number | null;
 }
 
 export interface ProposalDraftGenerated {
   draft_id: string;
+  title: string;
   fields: ProposalDraftFields;
-  file_name: string;
-  download_url: string;
-  destination_label: string;
+  document: ProposalDocumentV2;
+  proposal_type: ProposalType;
+  proposal_type_source: ProposalTypeSource;
+  evidence_filter: ProposalEvidenceFilter;
+  context_usage: ProposalContextUsage;
+  completion: ProposalCompletionSummary;
+  file_name: string | null;
+  download_url: string | null;
+  destination_label: string | null;
   saved_to_smb: boolean;
   model_used: string;
   elapsed_ms: number;
   timings_ms: Record<string, number>;
+  clarification_of_draft_id?: string;
+  answered_question_count?: number;
+  revision_of_draft_id?: string;
+  revision_number?: string;
+  revision_summary?: string;
 }
 
 export interface FileUploadResponse {
@@ -216,6 +342,8 @@ export interface ChatUiMessage {
   pending?: boolean;
   searchResponse?: DocumentSearchResponse;
   proposalDraft?: ProposalDraftGenerated;
+  proposalDraftSelectedFiles?: SelectedFilePayload[];
+  proposalClarificationCompleted?: boolean;
 }
 
 export interface ConversationDefinition {
