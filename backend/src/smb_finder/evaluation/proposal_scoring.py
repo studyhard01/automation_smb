@@ -1,4 +1,4 @@
-"""기안 생성 결과를 100점으로 재현 가능하게 채점하는 결정론 규칙."""
+"""기안 생성 결과를 결정론 계약 55점과 온프레미스 LLM judge 45점으로 채점한다."""
 
 from __future__ import annotations
 
@@ -14,6 +14,8 @@ from statistics import mean
 from .proposal_models import (
     ProposalCaseEvaluation,
     ProposalCaseCoverage,
+    ProposalContentJudgeAggregate,
+    ProposalContentJudgeDiagnostics,
     ProposalContextCaseStats,
     ProposalContextFailureAggregate,
     ProposalDatasetArtifact,
@@ -460,7 +462,7 @@ def score_llm_content(
     case: ProposalDatasetCaseInput,
     prediction: ProposalPrediction | None,
 ) -> tuple[float, ProposalStructureDiagnostics, ProposalProfileDiagnostics]:
-    """3필드 16점과 V2 section·block 14점, citation 5점을 채점한다."""
+    """LLM judge와 별개로 기존 정답 문구·구조 진단을 계산한다."""
 
     structure_score, citation_score, diagnostics, profile = _structure_and_citations(case, prediction)
     if case.expected is None or prediction is None or prediction.status != "ok" or prediction.fields is None:
@@ -744,39 +746,41 @@ def score_evidence_context(
 
 
 def score_xlsx_result(status: ProposalXlsxStatus) -> float:
-    """생성 3·ZIP 5·필수 OOXML 4·세 출력 필드 4/4/5점으로 채점한다."""
+    """XLSX 무결성·편집성·레이아웃을 20점으로 채점한다."""
 
+    if not status.generated:
+        return 0.0
     if status.contract_version == "proposal-xlsx-v2":
         return _round_score(
-            2.0 * float(status.generated)
-            + 3.0 * float(status.zip_valid)
-            + 2.0 * float(status.required_parts_present)
-            + 2.0 * float(status.title_written)
-            + 2.0 * float(status.approval_written)
-            + 1.0 * float(status.body_written)
+            1.5 * float(status.generated)
+            + 2.5 * float(status.zip_valid)
+            + 1.5 * float(status.required_parts_present)
+            + 1.5 * float(status.title_written)
+            + 1.5 * float(status.approval_written)
+            + 1.5 * float(status.body_written)
             + 1.0 * float(status.omitted_content_block_count == 0)
-            + 2.0 * float(status.body_text_single_line_valid)
-            + 2.0 * float(status.body_editable_unmerged_valid)
-            + 2.0 * float(status.body_default_height_valid)
-            + 1.0 * float(status.table_geometry_valid)
-            + 1.0 * float(status.table_border_valid)
-            + 1.0 * float(status.table_wrap_valid)
-            + 1.0 * float(status.table_explicit_row_height_valid)
-            + 1.0 * float(status.fake_pipe_table_absent)
-            + 1.0 * float(status.appendix_status in {"not_required", "valid"})
+            + 1.5 * float(status.body_text_single_line_valid)
+            + 1.5 * float(status.body_editable_unmerged_valid)
+            + 1.5 * float(status.body_default_height_valid)
+            + 0.75 * float(status.table_geometry_valid)
+            + 0.75 * float(status.table_border_valid)
+            + 0.75 * float(status.table_wrap_valid)
+            + 0.75 * float(status.table_explicit_row_height_valid)
+            + 0.75 * float(status.fake_pipe_table_absent)
+            + 0.75 * float(status.appendix_status in {"not_required", "valid"})
         )
     return _round_score(
-        3.0 * float(status.generated)
-        + 5.0 * float(status.zip_valid)
-        + 4.0 * float(status.required_parts_present)
-        + 4.0 * float(status.title_written)
-        + 4.0 * float(status.approval_written)
-        + 5.0 * float(status.body_written)
+        2.5 * float(status.generated)
+        + 4.0 * float(status.zip_valid)
+        + 3.0 * float(status.required_parts_present)
+        + 3.0 * float(status.title_written)
+        + 3.0 * float(status.approval_written)
+        + 4.5 * float(status.body_written)
     )
 
 
 def assess_tool_flow(prediction: ProposalPrediction | None) -> tuple[ProposalToolFlowStatus, float, bool]:
-    """네 stage 성공 각 3점과 순서 3점을 계산한다."""
+    """네 stage 성공 각 2점과 순서 2점을 계산한다."""
 
     if prediction is None:
         return ProposalToolFlowStatus(), 0.0, False
@@ -790,8 +794,8 @@ def assess_tool_flow(prediction: ProposalPrediction | None) -> tuple[ProposalToo
             observed_order.append(event.stage)
         statuses[event.stage] = event.status
     ordered = not duplicate and observed_order == list(_STAGE_ORDER)
-    score = sum(3.0 for stage in _STAGE_ORDER if statuses.get(stage) in _SUCCESS_STAGE_STATUSES)
-    score += 3.0 * float(ordered)
+    score = sum(2.0 for stage in _STAGE_ORDER if statuses.get(stage) in _SUCCESS_STAGE_STATUSES)
+    score += 2.0 * float(ordered)
     succeeded = ordered and all(statuses.get(stage) in _SUCCESS_STAGE_STATUSES for stage in _STAGE_ORDER)
     flow = ProposalToolFlowStatus(
         evidence=statuses.get("evidence", "missing"),
@@ -801,7 +805,7 @@ def assess_tool_flow(prediction: ProposalPrediction | None) -> tuple[ProposalToo
         ordered=ordered,
         stage_count=len(prediction.tool_events),
     )
-    return flow, _round_score(min(score, 15.0)), succeeded
+    return flow, _round_score(min(score, 10.0)), succeeded
 
 
 def _zero_scores() -> ProposalScoreBreakdown:
@@ -883,7 +887,13 @@ def score_proposal_case(
         context,
         effective_input_budget_tokens=effective_input_budget_tokens,
     )
-    llm_score, structure, profile = score_llm_content(case, prediction)
+    _, structure, profile = score_llm_content(case, prediction)
+    content_judge = (
+        prediction.content_judge
+        if prediction is not None and prediction.content_judge is not None
+        else ProposalContentJudgeDiagnostics()
+    )
+    llm_score = _round_score(content_judge.total_score)
     event_attendance, event_attendance_valid = assess_event_attendance(prediction)
     revision, revision_valid = assess_revision(case, prediction)
     factual = assess_factual_labels(case, prediction, artifacts)
@@ -900,8 +910,8 @@ def score_proposal_case(
     clarification_valid = bool(expected_question_keys) and actual_question_keys == expected_question_keys
     if clarification_valid:
         # 필수 답변 전 파일 생성·저장을 막은 것이 올바른 도구 동작이므로 두 후속 stage의 만점을 대체한다.
-        xlsx_score = 25.0
-        tool_score = 15.0
+        xlsx_score = 20.0
+        tool_score = 10.0
         tool_succeeded = True
         event_attendance_valid = True
     prediction_succeeded = prediction is not None and prediction.status == "ok"
@@ -976,6 +986,7 @@ def score_proposal_case(
             if prediction is not None and prediction.context is not None
             else None
         ),
+        content_judge=content_judge,
         structure=structure,
         profile=profile,
         evidence_filter=evidence_filter,
@@ -1050,9 +1061,16 @@ def aggregate_proposal_results(results: list[ProposalCaseEvaluation]) -> Proposa
     ]
     factual_points = sum(item.factual.scored_points for item in factual_scored)
     factual_possible = sum(item.factual.possible_points for item in factual_scored)
+    completed_judges = [
+        item.content_judge for item in evaluated if item.content_judge.status in {"completed", "oracle"}
+    ]
 
     def average(attribute: str) -> float:
         return mean(float(getattr(result.scores, attribute)) for result in evaluated) if evaluated else 0.0
+
+    def judge_average(attribute: str) -> float:
+        values = [float(getattr(item.scores, attribute)) for item in completed_judges if item.scores is not None]
+        return mean(values) if values else 0.0
 
     return ProposalEvaluationAggregate(
         total_case_count=len(results),
@@ -1098,6 +1116,31 @@ def aggregate_proposal_results(results: list[ProposalCaseEvaluation]) -> Proposa
                 item.evidence_filter.summary_status == "invalid" for item in filter_evaluated
             ),
             excluded_artifact_recall=correctly_excluded / expected_excluded if expected_excluded else 1.0,
+        ),
+        content_judge=ProposalContentJudgeAggregate(
+            completed_case_count=sum(item.content_judge.status == "completed" for item in evaluated),
+            failed_case_count=sum(item.content_judge.status == "failed" for item in evaluated),
+            not_run_case_count=sum(item.content_judge.status == "not_run" for item in evaluated),
+            oracle_case_count=sum(item.content_judge.status == "oracle" for item in evaluated),
+            average_total_score=_round_score(
+                mean(item.total_score for item in completed_judges) if completed_judges else 0.0
+            ),
+            grounded_accuracy_average=_round_score(judge_average("grounded_accuracy")),
+            decision_completeness_average=_round_score(judge_average("decision_completeness")),
+            purpose_and_necessity_average=_round_score(judge_average("purpose_and_necessity")),
+            actionability_and_feasibility_average=_round_score(
+                judge_average("actionability_and_feasibility")
+            ),
+            logical_structure_average=_round_score(judge_average("logical_structure")),
+            business_writing_average=_round_score(judge_average("business_writing")),
+            conciseness_and_readability_average=_round_score(
+                judge_average("conciseness_and_readability")
+            ),
+            unsupported_material_claim_count=sum(
+                item.unsupported_material_claim_count for item in completed_judges
+            ),
+            missing_critical_item_count=sum(item.missing_critical_item_count for item in completed_judges),
+            contradiction_count=sum(item.contradiction_count for item in completed_judges),
         ),
         supplemental=ProposalSupplementalAggregate(
             event_evaluated_case_count=len(event_evaluated),

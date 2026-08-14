@@ -1,6 +1,8 @@
 # 구현 현황
 
-기준일: 2026-08-11
+기준일: 2026-08-12
+
+Bot Main Core WBS 재감사: 2026-08-14
 
 ## 한눈에 보기
 
@@ -14,14 +16,18 @@
 | 선택 범위 검색 | 완료 | Hybrid/RRF, scope 위반 차단, Citation 반환 |
 | 근거 답변 | 완료 | 온프레미스 Ollama native JSON, 근거 없으면 LLM 미호출 |
 | 오른쪽 문서 기능 | 완료 | 선택 문서 요약과 파일 선택 후 설명을 받는 LLM 기안 초안 생성 제공 |
-| 기안 초안 | 완료 | 유형별 문서 단위 관련성 선별 후 strict V2를 생성하며, 행사 참석은 참가 목적·참가 내용·행사 주요 내용만 남겨 XLSX로 신규 저장 |
+| 기안 초안 | 완료 | 유형별 문서 선별 후 strict V2 생성·품질 편집·주장 검증을 수행하고, 표준 결재 문구와 유형별 핵심 사실 안전망을 적용해 XLSX로 신규 저장 |
 | 기안 수정 | 완료 | 생성 당시 문서 snapshot과 유형을 유지한 채 피드백으로 v1.1 이상 수정본을 별도 생성하고 원본 다운로드를 보존 |
-| 기안 평가 | 구조 완료 / 기준셋 미완성 | oracle 계약 검사와 gold 비노출 실제 LLM live 평가를 분리하고, 근거·내용·V2 XLSX·도구 흐름·지연을 비식별 채점. 현재 case는 사람 검토 test split이 없어 제품 품질 점수로는 부적격 |
+| 기안 평가 | 구조 완료 / 기준셋 미완성 | oracle 계약 검사와 gold 비노출 실제 LLM live 평가를 분리하고, 근거 25·온프레미스 LLM Judge 내용 45·V2 XLSX 20·도구 흐름 10점과 지연을 비식별 채점. 현재 case는 사람 검토 test split이 없어 제품 품질 점수로는 부적격 |
 | MinIO 보기 | 완료 | Preview/Canonical read-only, Object URI 미노출 |
 | Neo4j 버전 관계 | 완료 | 각 검색 결과의 버전 확인 버튼에서 즉시 조회 |
 | 저장소 상태 | 완료 | PostgreSQL·MinIO·Neo4j 연결/degraded 상태 표시 |
 | 파일 첨부 | 완료 | `[업로드] 문서명_YYYYMMDD_v1.0.확장자`를 최종 이름으로 exclusive 신규 생성 후 대화 참고 파일 자동 추가 |
 | 환경 설정 | 완료 | 왼쪽 하단 설정에서 업로드·기안 상대 경로와 저장소·로컬 LLM 상태 관리, 비밀·내부 주소 미노출 |
+| Main Core 기본 Flow | 부분 구현 | 활성 FastAPI·Router는 있으나 LangGraph는 비활성 Studio 실험에 머물고 Mock Retriever/Model graph 회귀가 없음 |
+| Main Core Gateway·Policy | 부분 구현 | Citation·선택 Revision scope·안전한 오류는 활성이나 공통 Model Gateway와 단일 오류 Flow가 없음 |
+| MCP Metadata·Session | 미구현 | 레거시 MCP/tooling은 활성 app에 연결되지 않고 전용 metadata tool·애플리케이션 Session Cache가 없음 |
+| MCP Metadata 확장 | 미구현 | 레거시 catalog의 검색 2개 외 활성 문서 metadata 기반 신규 tool이 없음 |
 | Docker 패키징 | 완료 | Vue/FastAPI 단일 non-root image, Compose runtime env·healthcheck·LAN port |
 | LAN 접속 | 부분 완료 | host LAN 주소 HTTP 200 확인, 다른 물리 PC와 Windows 방화벽 규칙은 관리자 확인 필요 |
 | 지연 목표 | 미달 | 검색은 목표권, LLM 포함 채팅은 추가 개선 필요 |
@@ -41,8 +47,8 @@
 - `playground/document_models.py`: 채팅 API 계약
 - `playground/proposal_context.py`: 중복 제거·관련도 정렬·문서별 상한과 컨텍스트 사용량 집계
 - `playground/proposal_evidence.py`: 유형별 사후 증빙을 문서 단위로 제외하고 비식별 집계를 생성
-- `playground/proposal_draft.py`: 유형 판정·strict V2 생성/수정, 3필드 호환 투영, block 기반 XLSX 렌더, 원본 보존 registry와 KST 저장명 생성
-- `evaluation/proposal_*.py`: 외부 기안 dataset preflight·oracle 계약 검사·gold 비노출 live 생성·100점 평가·비식별 context/지연 통계
+- `playground/proposal_draft.py`: 유형 판정·strict V2 생성/품질 편집/수정, 주장 검증·유형별 안전망, 3필드 호환 투영, block 기반 XLSX 렌더, 원본 보존 registry와 KST 저장명 생성
+- `evaluation/proposal_*.py`: 외부 기안 dataset preflight·oracle 계약 검사·gold 비노출 live 생성·온프레미스 Judge·100점 평가·비식별 context/지연 통계
 - `playground/upload_api.py`: 공개 설정 GET/PATCH와 multipart 파일 첨부 API
 - `playground/upload_service.py`: runtime 상대 경로·업로드 UUID registry, SMB create-only 쓰기/읽기와 즉시 근거 추출
 - `playground/upload_models.py`: 비밀 없는 설정·첨부 응답 계약
@@ -81,6 +87,10 @@
 
 ## 최근 검증
 
+- 2026-08-12 품질 우선 경로: strict JSON 오류 1회 복구, 유형별 2차 편집, 검증 citation 재구성, 행사 핵심 사실·명시 기대효과 보존, 비근거 구매 배경 제거를 적용
+- 완전 합성 구매·행사·일반 기안 3종을 실제 로컬 LLM으로 생성하고 Excel artifact 렌더에서 `기안지!A1:AE29`, 수식 오류 0, 내용 잘림·표 구조 오류 0 확인
+- 완전 합성 formal live 1건은 평균 90.598·1/1 통과, context/runtime budget 실패 0, SMB 호출 0. 다만 `candidate/unassigned`라 제품 품질 점수에는 부적격
+- 품질 편집과 주장 검증을 순차 수행하므로 합성 3종 생성의 LLM+검증은 약 6.8~11.4초였다. 이번 단계는 사용자 요청에 따라 지연보다 결과 품질을 우선했다.
 - 기안 Backend Ruff 통과, draft/upload 집중 테스트 47개, draft/evaluation 결합 테스트 37개와 live runner 테스트 22개 통과
 - Frontend 유형 선택·요청·수정본 카드 표시를 포함한 7개 파일 40개 테스트, typecheck, production build 통과
 - 실제 Microsoft Excel read-only 개방과 PNG 렌더 통과: 일반 본문 병합 0·사용자 지정 행 높이 0, 표 논리 셀만 병합·wrap 확인
@@ -145,14 +155,15 @@
 현재 Playground는 Figma 초안의 정보 구조를 기준으로 자연어 DB 검색 → 파일 첨부 → 후보 선택 → 대화 참고 파일 → 하단
 설정 순서로 정리했다. 파일 버전 확인은 각 검색 후보의 직접 동작이며, 오른쪽 실행 기능은 선택 문서 요약과 선택 문서 기반
 기안 XLSX 생성과 피드백 기반 수정본 생성을 제공한다. 기안 생성은 사용자 설명 입력, 유형 확정, 관련 문서 선별, 근거 패킹,
-로컬 LLM strict V2 JSON, 기존 3필드와 엑셀 `C8`·`A10`·`A15:A47` 호환 투영, SMB 신규 저장과 대화창 다운로드 등록을
-순서대로 수행한다. 수정은 원본 문서 범위와 유형을 상속해 별도 버전으로 저장한다. 컨텍스트 제한 오류일 때만 예산을 절반으로
-줄여 한 번 재시도하며 원문·경로 없는 사용량을 응답에 남긴다.
+로컬 LLM strict V2 JSON, 유형별 품질 편집, 주장 검증·검증 citation 재구성, 결정론적 핵심 사실 안전망, 기존 3필드와 엑셀
+`C8`·`A10`·`A15:A47` 호환 투영, SMB 신규 저장과 대화창 다운로드 등록을 순서대로 수행한다. 수정은 원본 문서 범위와 유형을
+상속해 별도 버전으로 저장한다. 구조 오류는 복구 지시로 한 번, 컨텍스트 제한 오류는 예산을 절반으로 줄여 한 번 재시도하며
+원문·경로 없는 사용량을 응답에 남긴다.
 
-기본 Docker 서비스 주소는 `http://127.0.0.1:8011/playground`이며 컨테이너 내부 포트도 8011이다. 최근 검증 실행은
-포트 충돌을 피하려 host port만 8013으로 명시 override했다.
-`.env`와 `.env.docker`는 수정하지 않았다. 이번 재배포에서는 승인된 합성 첨부만으로 실제 기안 생성·수정 POST와
-create-only 신규 저장을 검증했으며 기존 공유폴더 파일의 수정·덮어쓰기·이동·삭제는 수행하지 않았다.
+기본 Docker 서비스 주소는 `http://127.0.0.1:8011/playground`이며 컨테이너 내부 포트도 8011이다. 2026-08-12 재배포는
+기본 host port 8011에서 healthy, health·OpenAPI·Playground·합성 read-only 검색과 브라우저 console error 0건을 확인했다.
+`.env`와 `.env.docker`는 수정하지 않았다. 이번 품질 검증은 fake local exclusive 저장소와 완전 합성 근거만 사용했으며 실제
+SMB 신규 저장이나 기존 공유폴더 파일의 수정·덮어쓰기·이동·삭제는 수행하지 않았다.
 
 현재 기능 흐름은 실제 저장소와 연결되어 동작한다. 다음 기안 평가 과제는 같은 업무의 초안·수정본을 `group_id` 단위로
 분리하고 사람이 instruction·참고/제외 문서·필수 사실을 검토한 test split을 고정해 제품 품질 baseline을 다시 측정하는

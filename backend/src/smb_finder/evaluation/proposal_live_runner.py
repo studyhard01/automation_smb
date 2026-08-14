@@ -31,7 +31,9 @@ from smb_finder.playground.proposal_draft import (
 )
 from smb_finder.playground.proposal_evidence import filter_proposal_evidence
 
+from .proposal_content_judge import ProposalContentJudge
 from .proposal_models import (
+    ProposalContentJudgeDiagnostics,
     EvaluationScope,
     ProposalDatasetArtifact,
     ProposalDatasetCaseInput,
@@ -61,7 +63,7 @@ _UUID_NAMESPACE = UUID("fa14aa91-e3bc-4d40-9f39-c67df8072df7")
 _PROCESS_RUN_ID = uuid4().hex
 _PROCESS_STARTED_AT_NS = time.time_ns()
 _HOST_SHA256 = hashlib.sha256(socket.gethostname().encode("utf-8")).hexdigest()
-_GENERATION_CONTRACT_VERSION = "proposal-live-generation-contract-v2"
+_GENERATION_CONTRACT_VERSION = "proposal-live-generation-contract-v4"
 
 
 class _ProposalGenerator(Protocol):
@@ -211,6 +213,7 @@ def _case_generation_fingerprint(case: ProposalDatasetCaseInput) -> str:
 def _generation_config_fingerprint(
     settings: Settings,
     generator_type: type[object],
+    content_judge: ProposalContentJudge | None,
 ) -> str:
     """원문 endpoint/model을 저장하지 않고 생성 결과에 영향을 주는 설정을 결속한다."""
 
@@ -250,6 +253,11 @@ def _generation_config_fingerprint(
         "document_schema": "proposal-document-v2",
         "context_usage_schema": "proposal-context-usage-v1",
         "evidence_filter_schema": "proposal-evidence-filter-v1",
+        "content_judge_config_sha256": (
+            content_judge.config_fingerprint
+            if content_judge is not None
+            else hashlib.sha256(b"content-judge-not-configured").hexdigest()
+        ),
         "xlsx_contract": "proposal-xlsx-v2",
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -670,6 +678,7 @@ def _build_prediction(
     case: ProposalDatasetCaseInput,
     artifacts: dict[str, ProposalDatasetArtifact],
     generator: _ProposalGenerator,
+    content_judge: ProposalContentJudge | None,
     template: bytes,
     workbook_path: Path,
     checkpoint_directory: Path,
@@ -696,6 +705,14 @@ def _build_prediction(
             filtered.citations,
             proposal_type=resolution.proposal_type,
         )
+        refiner = getattr(generator, "refine", None)
+        if callable(refiner) and result.document is not None:
+            result = refiner(
+                case.instruction,
+                result.document,
+                filtered.citations,
+                proposal_type=resolution.proposal_type,
+            )
     except Exception as exc:
         llm_ms = (time.perf_counter() - llm_started) * 1000
         raise _StageError(
@@ -755,6 +772,24 @@ def _build_prediction(
             ),
         ) from exc
     llm_ms = (time.perf_counter() - llm_started) * 1000
+    judge_result = ProposalContentJudgeDiagnostics()
+    if content_judge is not None:
+        stable_evidence = {
+            identity[item.chunk_id][1]: item.excerpt
+            for item in filtered.citations
+            if item.chunk_id in identity
+        }
+        judge_evidence = [
+            (citation_id, stable_evidence[chunk_id])
+            for citation_id, chunk_id in citation_map.items()
+            if chunk_id in stable_evidence
+        ]
+        judge_result = content_judge.judge(
+            case.instruction,
+            document,
+            judge_evidence,
+            proposal_type=resolution.proposal_type,
+        )
     fields = project_document_to_legacy_fields(document)
     predicted_document = ProposalPredictedDocument.model_validate(document.model_dump())
     predicted_fields = ProposalPredictedFields.model_validate(fields.model_dump())
@@ -776,6 +811,7 @@ def _build_prediction(
             proposal_type_source=resolution.source,
             evidence_filter=ProposalPredictionEvidenceFilter.model_validate(filtered.summary.model_dump()),
             completion=completion,
+            content_judge=judge_result,
             evidence_artifact_ids=sorted(included_artifact_ids),
             evidence_chunk_ids=filtered_chunk_ids,
             excluded_evidence_artifact_ids=sorted(set(candidate_ids) - included_artifact_ids),
@@ -877,6 +913,7 @@ def _build_prediction(
         proposal_type_source=resolution.source,
         evidence_filter=ProposalPredictionEvidenceFilter.model_validate(filtered.summary.model_dump()),
         completion=completion,
+        content_judge=judge_result,
         evidence_artifact_ids=sorted(included_artifact_ids),
         evidence_chunk_ids=filtered_chunk_ids,
         excluded_evidence_artifact_ids=sorted(set(candidate_ids) - included_artifact_ids),
@@ -1006,6 +1043,7 @@ def _run_live_proposal_predictions_locked(
     resume: bool = False,
     settings: Settings | None = None,
     generator: _ProposalGenerator | None = None,
+    content_judge: ProposalContentJudge | None = None,
     template_path: str | Path | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> ProposalLiveRunReport:
@@ -1036,6 +1074,7 @@ def _run_live_proposal_predictions_locked(
         generation_config_fingerprint=_generation_config_fingerprint(
             effective_settings,
             LocalProposalDraftGenerator,
+            content_judge,
         ),
         cases=scoped_cases,
     )
@@ -1102,6 +1141,7 @@ def _run_live_proposal_predictions_locked(
                     case,
                     snapshot.artifacts,
                     live_generator,
+                    content_judge,
                     template,
                     workbook_target,
                     checkpoint.parent,
@@ -1346,6 +1386,7 @@ def run_live_proposal_predictions(
     resume: bool = False,
     settings: Settings | None = None,
     generator: _ProposalGenerator | None = None,
+    content_judge: ProposalContentJudge | None = None,
     template_path: str | Path | None = None,
     clock: Callable[[], float] = time.perf_counter,
 ) -> ProposalLiveRunReport:
@@ -1374,6 +1415,7 @@ def run_live_proposal_predictions(
             resume=resume,
             settings=settings,
             generator=generator,
+            content_judge=content_judge,
             template_path=template_path,
             clock=clock,
         )

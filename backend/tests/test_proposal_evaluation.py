@@ -9,10 +9,12 @@ from xml.sax.saxutils import escape
 
 import pytest
 
+from smb_finder.evaluation.proposal_models import ProposalXlsxStatus
 from smb_finder.evaluation.proposal_runner import (
     run_proposal_evaluation,
     write_proposal_evaluation_report,
 )
+from smb_finder.evaluation.proposal_scoring import score_xlsx_result
 
 
 ARTIFACT_REFERENCE = f"art-{'a' * 20}"
@@ -241,6 +243,25 @@ def _prediction(*, workbook_name: str, evidence_artifacts: list[str] | None = No
         },
         "evidence_artifact_ids": evidence_artifacts or [ARTIFACT_REFERENCE],
         "evidence_chunk_ids": [CHUNK_REFERENCE],
+        "content_judge": {
+            "schema_version": "proposal-content-judge-v1",
+            "rubric_version": "proposal-content-rubric-v1",
+            "status": "completed",
+            "judge_model": "synthetic-judge",
+            "scores": {
+                "grounded_accuracy": 12,
+                "decision_completeness": 9,
+                "purpose_and_necessity": 7,
+                "actionability_and_feasibility": 6,
+                "logical_structure": 5,
+                "business_writing": 4,
+                "conciseness_and_readability": 2,
+            },
+            "unsupported_material_claim_count": 0,
+            "missing_critical_item_count": 0,
+            "contradiction_count": 0,
+            "confidence": 1,
+        },
         "citation_map": {"E001": CHUNK_REFERENCE},
         "context": {"estimated_tokens": 100, "context_sha256": "a" * 64},
         "context_usage": {
@@ -330,19 +351,30 @@ def test_perfect_prediction_scores_100_points(tmp_path: Path) -> None:
 
     assert report.cases[0].scores.model_dump() == {
         "evidence_context": 25.0,
-        "llm_content": 35.0,
-        "xlsx_result": 25.0,
-        "tool_flow": 15.0,
+        "llm_content": 45.0,
+        "xlsx_result": 20.0,
+        "tool_flow": 10.0,
         "raw_total": 100.0,
         "final_total": 100.0,
     }
     assert report.cases[0].hard_gates.passed is True
+    assert report.aggregate.content_judge.average_total_score == 45
+    assert report.aggregate.content_judge.completed_case_count == 1
     assert report.cases[0].status == "passed"
     assert report.cases[0].profile.label_status == "not_labeled"
     sanitized = report.model_dump_json()
     assert "합성 장비 도입" not in sanitized
     assert "result.xlsx" not in sanitized
     assert "proposal-document-v2" not in sanitized
+
+
+def test_xlsx_score_is_zero_when_workbook_was_not_generated() -> None:
+    """레이아웃 기본값이 참이어도 파일이 없으면 XLSX 점수를 주지 않는다."""
+
+    status = ProposalXlsxStatus(contract_version="proposal-xlsx-v2")
+
+    assert status.generated is False
+    assert score_xlsx_result(status) == 0
 
 
 def test_evidence_leakage_hard_gate_caps_score(tmp_path: Path) -> None:
@@ -499,7 +531,7 @@ def test_v2_table_and_list_structure_are_scored(tmp_path: Path) -> None:
 
     result = run_proposal_evaluation(documents, cases, mode="predictions", predictions_path=predictions).cases[0]
 
-    assert result.scores.llm_content == 35
+    assert result.scores.llm_content == 45
     assert result.structure.structure_fidelity_score == 14
     assert result.structure.expected_table_row_count == result.structure.predicted_table_row_count == 2
     assert result.structure.expected_list_item_count == result.structure.predicted_list_item_count == 1
@@ -529,7 +561,7 @@ def test_v2_xlsx_contract_requires_real_table_geometry_and_layout(tmp_path: Path
     assert result.xlsx.table_border_valid is True
     assert result.xlsx.fake_pipe_table_absent is True
     assert result.xlsx.inline_table_count == 1
-    assert result.scores.xlsx_result == 25
+    assert result.scores.xlsx_result == 20
     assert result.hard_gates.xlsx_render_contract_valid is True
 
 
@@ -698,7 +730,7 @@ def test_labeled_proposal_type_and_relative_section_order_are_scored(tmp_path: P
     assert mismatching_result.profile.resolution_status == "mismatched"
     assert mismatching_result.profile.source_status == "invalid"
     assert mismatching_result.profile.section_order_status == "violated"
-    assert mismatching_result.scores.llm_content < matching_result.scores.llm_content
+    assert mismatching_result.structure.structure_fidelity_score < matching_result.structure.structure_fidelity_score
 
 
 def test_event_attendance_requires_three_compact_headings_in_order(tmp_path: Path) -> None:

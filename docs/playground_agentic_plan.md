@@ -13,6 +13,40 @@ Playground는 실제 의료 환경과 무관한 합성 데이터로만 기능을
 운영용 의료데이터 탐지, provider별 합성 데이터 허용 gate, 별도 안전 프로필은 기본 기능 테스트 이후에 다시
 설계한다. 현재 기능 경로에는 이를 추가하지 않는다.
 
+## Bot Main Core WBS 프런트엔드 반영 계획 (P0-A)
+
+상태는 **백엔드 중심 구현 대기**다. 현재 검색·선택·대화 UI를 유지하며 P0에서 화면을 재설계하지 않는다. 프런트엔드
+구현은 FastAPI/OpenAPI의 공개 응답, 오류 코드, fallback 의미와 합성 fixture가 확정된 뒤 시작한다. MCP Metadata
+Tool과 Session Cache는 P0에서 직접 조작하거나 조회하는 UI를 만들지 않는다.
+
+| WBS 항목 | 현재 프런트엔드 상태 | P0 반영과 우선순위 |
+|---|---|---|
+| FastAPI·LangGraph Flow, Router, Mock Retriever/Model | `client.ts`가 `/api/playground/chat`을 호출하고 `App.vue`가 loading/success/error 흐름을 처리한다. graph·router·mock 선택 UI는 없다. | **유지**. mock/실연결 전환을 사용자 토글로 노출하지 않고, 백엔드가 같은 공개 계약을 보장하면 기존 흐름으로 검증한다. |
+| Model Gateway, Citation/Policy, 오류 처리 Flow | `ChatResponse`가 `error_code`를 받고 `App.vue`가 오류 상태로 전환한다. `ChatWorkspace.vue`는 Citation, `elapsed_ms`, `over_budget`을 표시한다. | **P0 프런트 연동 1순위**. 백엔드 계약 확정 후 Citation 없음/근거 부족, degraded/fallback, 재시도 가능 오류를 서로 구분해 안전한 사용자 문구와 `status`/`alert`로 표시한다. raw policy·provider 진단은 표시하지 않는다. |
+| MCP Metadata Tool, Session Cache, timeout/fallback | `session_id`는 탭 메모리에서만 이어 쓰고 새 대화에서 초기화한다. MCP·cache 전용 API/화면은 없으며 현재는 총 지연과 예산 초과만 표시한다. | **직접 UI 없음**. timeout/fallback 결과만 기존 답변 상태에 반영하고 cache key·내용·history·통계는 노출하지 않는다. |
+| MCP Metadata new tool 확장 | 현재 API client에 tool catalog 호출이 없고 `tool_calls.tool_id` 타입은 기존 검색 tool 하나로 제한돼 있다. | **백엔드 계약 후속**. 새 MCP tool별 버튼이나 디버그 패널은 추가하지 않는다. 승인된 사용자 흐름에 필요한 결과만 기존 문서 카드 계약으로 받으며, 공개 tool ID 타입 변경은 backend fixture 확정 후 수행한다. |
+
+UI/API 계약 반영 기준은 다음과 같다.
+
+- Citation은 서버가 조립한 공개 제목·섹션·안전한 excerpt만 표시하고, 빈 근거와 `insufficient_evidence`를 정상 답변처럼
+  보이지 않게 한다. Citation의 scope·정렬·redaction 책임은 백엔드가 가진다.
+- degraded/fallback/error는 서로 다른 사용자 상태로 표시하되 내부 dependency 이름, tool 인자·원문 결과, trace를
+  그대로 출력하지 않는다. HTTP 오류와 200 응답의 `error_code` 모두 같은 안전 문구 규칙을 사용한다.
+- 전체 `elapsed_ms`, 검색 지연, `over_budget`은 현재처럼 표시한다. 단계별 내부 endpoint나 cache latency는 노출하지
+  않으며 P0에서 별도 성능 대시보드를 만들지 않는다.
+- `MCP_API_TOKEN`, 인증 header, MCP·LLM 내부 endpoint/host/IP, Session Cache key·값·대화 원문은 UI, URL,
+  브라우저 저장소, console/log에 절대 넣지 않는다. `session_id`는 불투명 값으로 탭 메모리에서만 다룬다.
+
+프런트엔드 구현 착수 전 백엔드는 정상 Citation, 근거 부족, degraded/fallback, timeout/error의 공개 응답 fixture와
+세션 만료·초기화 의미를 먼저 고정해야 한다. 이후 아래 명령이 모두 통과하고, 각 fixture에서 상태 문구·접근성 role·민감
+필드 미노출을 컴포넌트 테스트로 확인하면 완료로 판정한다.
+
+```powershell
+npm.cmd --prefix frontend run typecheck
+npm.cmd --prefix frontend run test
+npm.cmd --prefix frontend run build
+```
+
 ## 사용자 흐름
 
 ### 기본 문서 흐름

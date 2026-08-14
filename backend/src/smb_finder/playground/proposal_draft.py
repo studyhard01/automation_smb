@@ -13,9 +13,9 @@ import time
 import unicodedata
 import uuid
 import zipfile
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
@@ -735,9 +735,37 @@ _PROPOSAL_TYPE_PROMPTS: dict[ResolvedProposalType, str] = {
     ),
 }
 
+_PROPOSAL_QUALITY_CHECKLISTS: dict[ResolvedProposalType, str] = {
+    "purchase": (
+        "근거에 있는 구매 목적, 품목, 수량, 단가, 총액, 납기, 유지보수, 기대효과와 승인 요청을 빠짐없이 확인하세요. "
+        "반복 품목은 실제 table로 유지하고 금액·수량을 바꾸거나 새로 계산하지 마세요."
+    ),
+    "event_attendance": (
+        "근거에 있는 행사 일시, 장소, 참석자·인원, 1인당 참가비와 총 참가비를 참가 내용에 빠짐없이 포함하세요. "
+        "참가 목적과 행사 주요 내용은 중복 없이 구분하고 세 개의 canonical heading만 사용하세요."
+    ),
+    "general": (
+        "근거에 있는 목적, 운영 범위, 기간, 담당 역할, 승인 요청 사항과 기대효과를 빠짐없이 확인하세요. "
+        "결재자가 실행할 주체인 것처럼 쓰지 말고 승인받아 추진할 사항을 명확히 하세요."
+    ),
+}
+
+_PROPOSAL_APPROVAL_REQUESTS: dict[ResolvedProposalType, str] = {
+    "purchase": "다음과 같이 구매를 진행하고자 하오니 검토 후 승인하여 주시기 바랍니다.",
+    "event_attendance": "다음과 같이 행사에 참석하고자 하오니 검토 후 승인하여 주시기 바랍니다.",
+    "general": "다음과 같이 업무를 추진하고자 하오니 검토 후 승인하여 주시기 바랍니다.",
+}
+_EXPLICIT_BACKGROUND_TERMS = ("배경", "필요성", "문제점", "현황", "어려움", "한계", "저하")
+
 _EVENT_SECTION_ORDER = ("참가 목적", "참가 내용", "행사 주요 내용")
 _EVENT_SCHEDULE_TERMS = ("일정", "시간표", "타임테이블", "agenda", "schedule")
 _EVENT_MAIN_CONTENT_TERMS = ("주요", "프로그램", "세션", "발표", "전시", "주제", "내용")
+_EVENT_DATE_VALUE_PATTERN = re.compile(
+    r"(?:20\d{2}[년./-]\s*\d{1,2}[월./-]\s*\d{1,2}일?|\d{1,2}월\s*\d{1,2}일)"
+)
+_EVENT_LOCATION_TERMS = ("장소", "개최", "열린다", "진행된다", "컨벤션", "회의실", "세미나실", "강당")
+_EVENT_PARTICIPANT_PATTERN = re.compile(r"(?:참석자|참가자|인원)|(?<!\d)\d+\s*명")
+_EVENT_FEE_PATTERN = re.compile(r"참가비|등록비|교육비")
 
 
 @dataclass
@@ -805,6 +833,184 @@ def normalize_proposal_document(document: ProposalDocumentV2, proposal_type: Res
             "proposal_type": proposal_type,
             "sections": sections,
             "missing_information": missing_information,
+        }
+    )
+
+
+def _event_decision_fact_safety_net(
+    document: ProposalDocumentV2,
+    evidence: list[DocumentCitation],
+    packed_citation_map: tuple[tuple[str, str], ...],
+) -> ProposalDocumentV2:
+    """근거에 있는 행사 승인 핵심값이 빠졌으면 해당 근거 문장을 그대로 보강한다."""
+
+    document_text = "\n".join(claim.text for claim in _proposal_claims(document))
+    missing_checks: list[Callable[[str], bool]] = []
+    if _EVENT_DATE_VALUE_PATTERN.search(document_text) is None:
+        missing_checks.append(lambda value: _EVENT_DATE_VALUE_PATTERN.search(value) is not None)
+    if not any(term in document_text for term in _EVENT_LOCATION_TERMS):
+        missing_checks.append(lambda value: any(term in value for term in _EVENT_LOCATION_TERMS))
+    if _EVENT_PARTICIPANT_PATTERN.search(document_text) is None:
+        missing_checks.append(lambda value: _EVENT_PARTICIPANT_PATTERN.search(value) is not None)
+    if _EVENT_FEE_PATTERN.search(document_text) is None:
+        missing_checks.append(
+            lambda value: _EVENT_FEE_PATTERN.search(value) is not None and _MONEY_VALUE_PATTERN.search(value) is not None
+        )
+    if not missing_checks:
+        return document
+
+    citation_by_chunk = {source_chunk_id: citation_id for citation_id, source_chunk_id in packed_citation_map}
+    additions: list[tuple[str, str]] = []
+    satisfied: set[int] = set()
+    for citation in evidence:
+        citation_id = citation_by_chunk.get(str(citation.chunk_id))
+        if citation_id is None:
+            continue
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?다])\s+|[\r\n]+", citation.excerpt)
+            if sentence.strip()
+        ]
+        for sentence in sentences:
+            matched = {index for index, check in enumerate(missing_checks) if index not in satisfied and check(sentence)}
+            if not matched:
+                continue
+            normalized = sentence.rstrip(".!? ") + "."
+            if normalized not in {text for text, _ in additions}:
+                additions.append((normalized, citation_id))
+            satisfied.update(matched)
+        if len(satisfied) == len(missing_checks):
+            break
+    if not additions:
+        return document
+
+    sections = list(document.sections)
+    details_index = next(
+        (index for index, section in enumerate(sections) if section.heading == "참가 내용"),
+        None,
+    )
+    if details_index is None:
+        sections.append(
+            ProposalSectionV2(
+                heading="참가 내용",
+                semantic_role="details",
+                citations=list(dict.fromkeys(citation_id for _, citation_id in additions)),
+                blocks=[ProposalParagraphBlock(type="paragraph", text=text) for text, _ in additions],
+                missing_information=[],
+            )
+        )
+    else:
+        details = sections[details_index]
+        sections[details_index] = details.model_copy(
+            update={
+                "citations": list(
+                    dict.fromkeys([*details.citations, *(citation_id for _, citation_id in additions)])
+                ),
+                "blocks": [
+                    *details.blocks,
+                    *(ProposalParagraphBlock(type="paragraph", text=text) for text, _ in additions),
+                ],
+            }
+        )
+    return normalize_proposal_document(document.model_copy(update={"sections": sections}), "event_attendance")
+
+
+def _explicit_expected_effect_safety_net(
+    document: ProposalDocumentV2,
+    evidence: list[DocumentCitation],
+    packed_citation_map: tuple[tuple[str, str], ...],
+) -> ProposalDocumentV2:
+    """근거에 기대효과가 명시되면 모델의 과장된 재서술 대신 원문 문장을 사용한다."""
+
+    citation_by_chunk = {source_chunk_id: citation_id for citation_id, source_chunk_id in packed_citation_map}
+    grounded: list[tuple[str, str]] = []
+    for citation in evidence:
+        citation_id = citation_by_chunk.get(str(citation.chunk_id))
+        if citation_id is None:
+            continue
+        for sentence in re.split(r"(?<=[.!?다])\s+|[\r\n]+", citation.excerpt):
+            sentence = sentence.strip()
+            if "기대효과" not in sentence:
+                continue
+            grounded.append((sentence.rstrip(".!? ") + ".", citation_id))
+    if not grounded:
+        return document
+
+    sections = list(document.sections)
+    expected_index = next(
+        (index for index, section in enumerate(sections) if section.semantic_role == "expected_effect"),
+        None,
+    )
+    expected = ProposalSectionV2(
+        heading=sections[expected_index].heading if expected_index is not None else "기대효과",
+        semantic_role="expected_effect",
+        citations=list(dict.fromkeys(citation_id for _, citation_id in grounded)),
+        blocks=[ProposalParagraphBlock(type="paragraph", text=text) for text, _ in grounded],
+        missing_information=[],
+    )
+    if expected_index is None:
+        sections.append(expected)
+    else:
+        sections[expected_index] = expected
+    return document.model_copy(update={"sections": sections})
+
+
+def _purchase_background_safety_net(
+    document: ProposalDocumentV2,
+    evidence: list[DocumentCitation],
+) -> ProposalDocumentV2:
+    """구매 근거가 배경·문제를 명시하지 않으면 모델이 추론한 배경 section을 제거한다."""
+
+    source_text = "\n".join(citation.excerpt for citation in evidence)
+    if any(term in source_text for term in _EXPLICIT_BACKGROUND_TERMS):
+        return document
+    return document.model_copy(
+        update={
+            "sections": [section for section in document.sections if section.semantic_role != "background"]
+        }
+    )
+
+
+def _merge_quality_refinement(
+    original: ProposalDocumentV2,
+    refined: ProposalDocumentV2,
+) -> ProposalDocumentV2:
+    """편집 패스가 기존 근거 주장을 바꾸지 못하게 하고 필수 승인 section만 새로 허용한다."""
+
+    by_heading = {section.heading: section for section in original.sections}
+    by_role: dict[ProposalSemanticRole, list[ProposalSectionV2]] = defaultdict(list)
+    for section in original.sections:
+        by_role[section.semantic_role].append(section)
+
+    sections: list[ProposalSectionV2] = []
+    consumed: set[int] = set()
+    for refined_section in refined.sections:
+        source = by_heading.get(refined_section.heading)
+        if source is None:
+            role_candidates = by_role.get(refined_section.semantic_role, [])
+            if len(role_candidates) == 1:
+                source = role_candidates[0]
+        if source is not None:
+            consumed.add(id(source))
+            sections.append(
+                refined_section.model_copy(
+                    update={
+                        "citations": source.citations,
+                        "blocks": source.blocks,
+                        "missing_information": source.missing_information,
+                    }
+                )
+            )
+        elif refined_section.semantic_role in {"request", "budget"}:
+            sections.append(refined_section)
+
+    sections.extend(section for section in original.sections if id(section) not in consumed)
+    return refined.model_copy(
+        update={
+            "sections": sections,
+            "missing_information": list(
+                dict.fromkeys([*original.missing_information, *refined.missing_information])
+            ),
         }
     )
 
@@ -918,12 +1124,19 @@ def _enforce_required_fact_safety_net(
         + [f"{citation.title}\n{citation.excerpt}" for citation in evidence]
     )
     source_money = _money_values(source_text)
+    normalized_source = re.sub(r"\s+", " ", source_text).casefold()
     verdict_by_id = {verdict.claim_id: verdict for verdict in verification.claims}
     corrected_verdicts: list[ProposalClaimVerdict] = []
     for claim in claims:
         verdict = verdict_by_id.get(claim.claim_id)
         if verdict is None:
             continue
+        if verdict.status == "derived" and not re.search(r"\d", claim.text):
+            normalized_claim = re.sub(r"\s+", " ", claim.text).casefold().strip()
+            if normalized_claim in normalized_source:
+                verdict = verdict.model_copy(update={"status": "supported"})
+            else:
+                verdict = verdict.model_copy(update={"status": "unsupported", "action": "omit", "citations": []})
         unsupported_money = _money_values(claim.text) - source_money
         if unsupported_money and verdict.status == "supported":
             verdict = verdict.model_copy(update={"status": "unsupported", "action": "ask", "citations": []})
@@ -1009,29 +1222,47 @@ def apply_proposal_evidence_verification(
     sections: list[ProposalSectionV2] = []
     for section_index, section in enumerate(document.sections):
         blocks: list[ProposalBlock] = []
+        verified_citations: list[str] = []
+
+        def collect_verified_citations(claim_id: str) -> None:
+            for citation in verdicts[claim_id].citations:
+                if citation.startswith("E") and citation not in verified_citations:
+                    verified_citations.append(citation)
+
         for block_index, block in enumerate(section.blocks):
             if isinstance(block, ProposalParagraphBlock):
                 claim_id = claim_by_path[(section_index, block_index, None)]
                 if should_keep(claim_id):
                     blocks.append(block)
+                    collect_verified_citations(claim_id)
             elif isinstance(block, ProposalListBlock):
-                items = [
-                    item
-                    for item_index, item in enumerate(block.items)
-                    if should_keep(claim_by_path[(section_index, block_index, item_index)])
-                ]
+                items: list[str] = []
+                for item_index, item in enumerate(block.items):
+                    claim_id = claim_by_path[(section_index, block_index, item_index)]
+                    if should_keep(claim_id):
+                        items.append(item)
+                        collect_verified_citations(claim_id)
                 if items:
                     blocks.append(block.model_copy(update={"items": items}))
             else:
-                rows = [
-                    row
-                    for row_index, row in enumerate(block.rows)
-                    if should_keep(claim_by_path[(section_index, block_index, row_index)])
-                ]
+                rows: list[list[str]] = []
+                for row_index, row in enumerate(block.rows):
+                    claim_id = claim_by_path[(section_index, block_index, row_index)]
+                    if should_keep(claim_id):
+                        rows.append(row)
+                        collect_verified_citations(claim_id)
                 if rows:
                     blocks.append(block.model_copy(update={"rows": rows}))
         if blocks:
-            sections.append(section.model_copy(update={"blocks": blocks, "missing_information": []}))
+            sections.append(
+                section.model_copy(
+                    update={
+                        "blocks": blocks,
+                        "citations": verified_citations or section.citations,
+                        "missing_information": [],
+                    }
+                )
+            )
 
     if not sections and questions:
         source = document.sections[0]
@@ -1119,6 +1350,53 @@ class LocalProposalDraftGenerator:
             evidence,
             proposal_type=proposal_type,
             current_document=document,
+        )
+
+    def refine(
+        self,
+        instruction: str,
+        document: ProposalDocumentV2,
+        evidence: list[DocumentCitation],
+        *,
+        proposal_type: ResolvedProposalType,
+    ) -> ProposalDraftResult:
+        """속도보다 내용 완결성을 우선해 초안을 한 번 더 편집 검토한다."""
+
+        feedback = (
+            "원본 작성 요청과 참고 근거를 다시 대조해 현재 기안을 최종 편집 검토하세요. 근거에 없는 사실, 긴급성, "
+            "효과를 추가하지 말고 기존의 정확한 사실은 보존하세요. 각 문단·목록 항목·표 행은 가능한 한 하나의 사실만 "
+            "담고, 중복 문장은 합치며, 결재자가 바로 판단할 수 있는 순서로 정리하세요. section citation은 해당 section의 "
+            "사실을 실제로 뒷받침하는 근거만 사용하세요. "
+            f"{_PROPOSAL_QUALITY_CHECKLISTS[proposal_type]}\n\n원본 작성 요청:\n{instruction.strip()}"
+        )
+        refined = self._generate(
+            feedback,
+            evidence,
+            proposal_type=proposal_type,
+            current_document=document,
+        )
+        if refined.document is None:
+            return refined
+        normalized_document = _merge_quality_refinement(document, refined.document).model_copy(
+            update={"approval_request": _PROPOSAL_APPROVAL_REQUESTS[proposal_type]}
+        )
+        normalized_document = _explicit_expected_effect_safety_net(
+            normalized_document,
+            evidence,
+            refined.packed_citation_map,
+        )
+        if proposal_type == "purchase":
+            normalized_document = _purchase_background_safety_net(normalized_document, evidence)
+        if proposal_type == "event_attendance":
+            normalized_document = _event_decision_fact_safety_net(
+                normalized_document,
+                evidence,
+                refined.packed_citation_map,
+            )
+        return replace(
+            refined,
+            document=normalized_document,
+            fields=project_document_to_legacy_fields(normalized_document),
         )
 
     def assess(
@@ -1353,10 +1631,13 @@ class LocalProposalDraftGenerator:
                 422,
             )
 
-        for attempt in range(2):
+        context_retry_used = False
+        structure_retry_used = False
+        active_system_prompt = system_prompt
+        while True:
             payload = self._build_payload(
                 model,
-                system_prompt,
+                active_system_prompt,
                 instruction,
                 context,
                 current_document_json=current_document_json,
@@ -1379,7 +1660,10 @@ class LocalProposalDraftGenerator:
                 usage = context.usage.model_copy(
                     update={
                         "estimated_input_tokens": estimate_proposal_tokens(
-                            len(system_prompt) + len(instruction) + len(context.text) + len(current_document_json)
+                            len(active_system_prompt)
+                            + len(instruction)
+                            + len(context.text)
+                            + len(current_document_json)
                         ),
                         "prompt_eval_count": prompt_eval_count,
                     }
@@ -1417,19 +1701,28 @@ class LocalProposalDraftGenerator:
                 context_error = exc
             except (json.JSONDecodeError, KeyError, TypeError, ValueError, ValidationError) as exc:
                 _logger.warning("기안 구조화 응답 생성 실패: failure_type=%s", type(exc).__name__)
-                raise ProposalDraftError(
-                    "proposal_llm_response_invalid",
-                    "로컬 LLM이 올바른 기안 JSON을 반환하지 않았습니다.",
-                    502,
-                ) from exc
+                if structure_retry_used:
+                    raise ProposalDraftError(
+                        "proposal_llm_response_invalid",
+                        "로컬 LLM이 올바른 기안 JSON을 반환하지 않았습니다.",
+                        502,
+                    ) from exc
+                structure_retry_used = True
+                active_system_prompt = (
+                    system_prompt
+                    + " 이전 응답은 strict JSON 계약을 충족하지 못했습니다. 모든 필수 키와 올바른 block 구조를 갖춘 "
+                    "proposal-document-v2 JSON 객체 하나만 다시 반환하세요. 설명, 코드 펜스, 추가 키는 금지합니다."
+                )
+                continue
 
-            if attempt == 1:
+            if context_retry_used:
                 raise ProposalDraftError(
                     "proposal_context_limit_exceeded",
                     "기안 참고 문서가 로컬 LLM의 컨텍스트 제한을 초과했습니다.",
                     422,
                     context_usage=context.usage,
                 ) from context_error
+            context_retry_used = True
             first_attempt_chars = context.usage.context_chars
             half_budget = max(1, context.usage.context_budget_chars // 2)
             context = pack_proposal_context(
@@ -1444,8 +1737,6 @@ class LocalProposalDraftGenerator:
                 retry_count=1,
                 first_attempt_context_chars=first_attempt_chars,
             )
-
-        raise AssertionError("기안 LLM 재시도 횟수 경계를 벗어났습니다.")
 
     def _build_payload(
         self,
@@ -2395,6 +2686,14 @@ class ProposalDraftService:
             filtered.citations,
             proposal_type=type_resolution.proposal_type,
         )
+        refiner = getattr(self._draft_generator, "refine", None)
+        if callable(refiner) and draft_result.document is not None:
+            draft_result = refiner(
+                instruction,
+                draft_result.document,
+                filtered.citations,
+                proposal_type=type_resolution.proposal_type,
+            )
         llm_ms = round((time.perf_counter() - llm_started) * 1000, 1)
         generated_structured_document = draft_result.document is not None
         document = draft_result.document or _legacy_document(draft_result.fields)
@@ -2608,6 +2907,14 @@ class ProposalDraftService:
             filtered.citations,
             proposal_type=base.proposal_type,
         )
+        refiner = getattr(self._draft_generator, "refine", None)
+        if callable(refiner) and clarified_result.document is not None:
+            clarified_result = refiner(
+                clarification_instruction,
+                clarified_result.document,
+                filtered.citations,
+                proposal_type=base.proposal_type,
+            )
         llm_ms = round((time.perf_counter() - llm_started) * 1000, 1)
         clarified_document = clarified_result.document or _legacy_document(clarified_result.fields)
         try:
@@ -2763,6 +3070,14 @@ class ProposalDraftService:
             filtered.citations,
             proposal_type=base.proposal_type,
         )
+        refiner = getattr(self._draft_generator, "refine", None)
+        if callable(refiner) and revised_result.document is not None:
+            revised_result = refiner(
+                revision_instruction,
+                revised_result.document,
+                filtered.citations,
+                proposal_type=base.proposal_type,
+            )
         llm_ms = round((time.perf_counter() - llm_started) * 1000, 1)
         revised_document = revised_result.document or _legacy_document(revised_result.fields)
         try:

@@ -24,6 +24,8 @@ from .proposal_models import (
     EvaluationScope,
     ProposalContextAggregate,
     ProposalContextCaseStats,
+    ProposalContentJudgeDiagnostics,
+    ProposalContentJudgeScores,
     ProposalDatasetArtifact,
     ProposalDatasetCaseInput,
     ProposalEvaluationReport,
@@ -1024,6 +1026,20 @@ def _baseline_prediction(
             excluded_citation_count=len(excluded_chunks),
             excluded_reason_counts={"post_event": len(case.excluded_post_event_artifact_ids)},
         ),
+        content_judge=ProposalContentJudgeDiagnostics(
+            status="oracle",
+            judge_model="oracle-contract",
+            scores=ProposalContentJudgeScores(
+                grounded_accuracy=12,
+                decision_completeness=9,
+                purpose_and_necessity=7,
+                actionability_and_feasibility=6,
+                logical_structure=5,
+                business_writing=4,
+                conciseness_and_readability=2,
+            ),
+            confidence=1,
+        ),
         evidence_artifact_ids=case.reference_artifact_ids,
         evidence_chunk_ids=plan.packed_chunk_ids,
         excluded_evidence_artifact_ids=case.excluded_post_event_artifact_ids,
@@ -1184,6 +1200,7 @@ def run_proposal_evaluation(
             "product_quality_eligible": bool(results)
             and not oracle_mode
             and all(item.coverage.product_quality_eligible for item in results)
+            and all(item.content_judge.status == "completed" for item in results)
         }
     )
     validate_sanitized_report(report)

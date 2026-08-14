@@ -24,7 +24,12 @@ from smb_finder.playground.proposal_draft import (
     ProposalDraftError,
     ProposalEvidenceVerification,
     ProposalClaimVerdict,
+    ProposalParagraphBlock,
     _enforce_required_fact_safety_net,
+    _explicit_expected_effect_safety_net,
+    _merge_quality_refinement,
+    _purchase_background_safety_net,
+    apply_proposal_evidence_verification,
     insert_proposal_fields,
     normalize_proposal_document,
     project_document_to_legacy_fields,
@@ -168,6 +173,36 @@ def test_required_money_safety_net_accepts_user_supplied_event_fee() -> None:
     payload["sections"][1]["blocks"][0]["rows"] = [["열 수 불일치"]]
     with pytest.raises(ValidationError):
         ProposalDocumentV2.model_validate(payload)
+
+
+def test_evidence_verification_replaces_section_citations_with_verified_claim_sources() -> None:
+    document = ProposalDocumentV2.model_validate(_document_payload())
+    document = document.model_copy(
+        update={
+            "sections": [
+                document.sections[0].model_copy(update={"citations": ["E002"]}),
+                document.sections[1].model_copy(update={"citations": ["E001"]}),
+            ]
+        }
+    )
+    verification = ProposalEvidenceVerification(
+        schema_version="proposal-evidence-verification-v1",
+        claims=[
+            ProposalClaimVerdict(claim_id="C0001", status="supported", action="keep", citations=["E001"]),
+            ProposalClaimVerdict(claim_id="C0002", status="supported", action="keep", citations=["E002"]),
+        ],
+        questions=[],
+    )
+
+    verified, completion = apply_proposal_evidence_verification(
+        document,
+        verification,
+        allow_questions=True,
+        clarification_round=0,
+    )
+
+    assert completion.status == "completed"
+    assert [section.citations for section in verified.sections] == [["E001"], ["E002"]]
 
 
 def test_proposal_type_resolution_is_explicit_conservative_and_deterministic() -> None:
@@ -613,6 +648,41 @@ class _SequenceClient:
         return None
 
 
+class _InvalidThenValidClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def post(self, url: str, *, json: dict) -> httpx.Response:
+        self.calls.append(json)
+        request = httpx.Request("POST", url)
+        content = {"schema_version": "wrong-contract"} if len(self.calls) == 1 else _document_payload()
+        return httpx.Response(
+            200,
+            json={"message": {"content": json_module.dumps(content, ensure_ascii=False)}},
+            request=request,
+        )
+
+    def close(self) -> None:
+        return None
+
+
+class _AlwaysValidClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def post(self, url: str, *, json: dict) -> httpx.Response:
+        self.calls.append(json)
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            200,
+            json={"message": {"content": json_module.dumps(_document_payload(), ensure_ascii=False)}},
+            request=request,
+        )
+
+    def close(self) -> None:
+        return None
+
+
 json_module = json
 
 
@@ -651,6 +721,181 @@ def test_context_limit_retry_is_bounded_to_two_calls() -> None:
     assert raised.value.context_usage.retry_count == 1
     assert raised.value.context_usage.first_attempt_context_chars is not None
     assert len(client.calls) == 2
+
+
+def test_invalid_structured_response_retries_once_with_repair_instruction() -> None:
+    client = _InvalidThenValidClient()
+    generator = LocalProposalDraftGenerator(_settings(), client=client)
+
+    result = generator.generate("합성 구매 기안을 작성해 줘", [_citation(1, "합성 구매 근거")])
+
+    assert result.document is not None
+    assert len(client.calls) == 2
+    assert "strict JSON 계약을 충족하지 못했습니다" in client.calls[1]["messages"][0]["content"]
+
+
+def test_quality_refinement_uses_type_checklist_and_normalizes_approval_request() -> None:
+    client = _AlwaysValidClient()
+    generator = LocalProposalDraftGenerator(_settings(), client=client)
+    document = ProposalDocumentV2.model_validate(_document_payload())
+
+    result = generator.refine(
+        "합성 구매 승인 요청",
+        document,
+        [_citation(1, "합성 분석 키트 A 3세트 총 360,000원")],
+        proposal_type="purchase",
+    )
+
+    assert result.document is not None
+    assert result.document.approval_request == "다음과 같이 구매를 진행하고자 하오니 검토 후 승인하여 주시기 바랍니다."
+    assert "품목, 수량, 단가, 총액" in client.calls[0]["messages"][1]["content"]
+
+
+def test_event_quality_refinement_adds_missing_grounded_decision_sentence() -> None:
+    client = _AlwaysValidClient()
+    generator = LocalProposalDraftGenerator(_settings(), client=client)
+    document = ProposalDocumentV2.model_validate(_document_payload())
+    evidence = [
+        _citation(
+            1,
+            "합성 행사는 2026년 10월 15일 합성 컨벤션 홀에서 열린다. 참석자는 2명이며 참가비는 총 160,000원이다.",
+        )
+    ]
+
+    result = generator.refine(
+        "합성 행사 참석 승인 요청",
+        document,
+        evidence,
+        proposal_type="event_attendance",
+    )
+
+    assert result.document is not None
+    body = project_document_to_legacy_fields(result.document).body
+    assert "2026년 10월 15일" in body
+    assert "합성 컨벤션 홀" in body
+    assert "참석자는 2명" in body
+    assert "참가비는 총 160,000원" in body
+
+
+def test_quality_refinement_preserves_existing_claims_and_rejects_new_background() -> None:
+    original = ProposalDocumentV2.model_validate(_document_payload())
+    refined_payload = _document_payload()
+    refined_payload["sections"][0]["blocks"] = [
+        {"type": "paragraph", "text": "근거에 없던 효율 저하를 새로 주장합니다."}
+    ]
+    refined_payload["sections"].insert(
+        1,
+        {
+            "heading": "배경·필요성",
+            "semantic_role": "background",
+            "citations": ["E001"],
+            "blocks": [{"type": "paragraph", "text": "근거에 없는 새 배경입니다."}],
+            "missing_information": [],
+        },
+    )
+    refined_payload["sections"].append(
+        {
+            "heading": "구매 요청",
+            "semantic_role": "request",
+            "citations": ["E001"],
+            "blocks": [{"type": "paragraph", "text": "합성 품목 구매를 승인해 주시기 바랍니다."}],
+            "missing_information": [],
+        }
+    )
+    refined = ProposalDocumentV2.model_validate(refined_payload)
+
+    merged = _merge_quality_refinement(original, refined)
+
+    purpose = next(section for section in merged.sections if section.semantic_role == "purpose")
+    assert purpose.blocks == original.sections[0].blocks
+    assert all(section.semantic_role != "background" for section in merged.sections)
+    assert any(section.semantic_role == "request" for section in merged.sections)
+
+
+def test_explicit_expected_effect_uses_source_sentence_instead_of_model_expansion() -> None:
+    document = ProposalDocumentV2.model_validate(_document_payload())
+    document = document.model_copy(
+        update={
+            "sections": [
+                *document.sections[:-1],
+                document.sections[-1].model_copy(
+                    update={
+                        "heading": "기대효과",
+                        "semantic_role": "expected_effect",
+                        "blocks": [
+                            ProposalParagraphBlock(
+                                type="paragraph",
+                                text="업무 효율이 크게 향상될 것으로 기대합니다.",
+                            )
+                        ],
+                    }
+                ),
+            ]
+        }
+    )
+    citation = _citation(1, "도입 후 기대효과는 시험 준비 시간 단축과 절차 표준화이다.")
+
+    grounded = _explicit_expected_effect_safety_net(
+        document,
+        [citation],
+        (("E001", str(citation.chunk_id)),),
+    )
+
+    expected = next(section for section in grounded.sections if section.semantic_role == "expected_effect")
+    assert expected.blocks[0].text == "도입 후 기대효과는 시험 준비 시간 단축과 절차 표준화이다."
+
+
+def test_non_numeric_derived_claim_is_omitted_when_not_present_in_source() -> None:
+    document = ProposalDocumentV2.model_validate(_document_payload())
+    from smb_finder.playground.proposal_draft import _proposal_claims
+
+    claims = _proposal_claims(document)
+    verification = ProposalEvidenceVerification(
+        schema_version="proposal-evidence-verification-v1",
+        claims=[
+            ProposalClaimVerdict(
+                claim_id=claim.claim_id,
+                status="derived" if index == 0 else "supported",
+                action="keep",
+                citations=["E001"],
+            )
+            for index, claim in enumerate(claims)
+        ],
+        questions=[],
+    )
+
+    corrected = _enforce_required_fact_safety_net(
+        verification,
+        claims,
+        instruction="합성 구매 승인 요청",
+        evidence=[_citation(1, "합성 품목은 10,000원이다.")],
+        user_answers=[],
+        proposal_type="purchase",
+        allow_questions=True,
+    )
+
+    assert corrected.claims[0].status == "unsupported"
+    assert corrected.claims[0].action == "omit"
+
+
+def test_purchase_background_is_kept_only_when_reference_explicitly_supports_it() -> None:
+    payload = _document_payload()
+    payload["sections"].append(
+        {
+            "heading": "배경·필요성",
+            "semantic_role": "background",
+            "citations": ["E001"],
+            "blocks": [{"type": "paragraph", "text": "업무 효율이 저하되고 있습니다."}],
+            "missing_information": [],
+        }
+    )
+    document = ProposalDocumentV2.model_validate(payload)
+
+    removed = _purchase_background_safety_net(document, [_citation(1, "합성 키트 도입 목적을 안내한다.")])
+    preserved = _purchase_background_safety_net(document, [_citation(1, "현재 문제점과 도입 필요성을 안내한다.")])
+
+    assert all(section.semantic_role != "background" for section in removed.sections)
+    assert any(section.semantic_role == "background" for section in preserved.sections)
 
 
 def test_revision_reserves_base_document_from_runtime_context_budget() -> None:

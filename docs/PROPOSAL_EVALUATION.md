@@ -27,18 +27,34 @@ ID만 누락돼도 잘못된 근거로 평가하지 않도록 skip한다.
 
 ## 100점 채점표
 
-| 범주 | 점수 | 결정론 검사 |
+| 범주 | 점수 | 검사 |
 |---|---:|---|
 | 근거·context | 25 | legacy는 recall 10·chunk 5·누출 5·budget 5. filter 계약 노출 시 recall 8·chunk 4·사후자료 제외 recall 3·오제외 방지 2·누출 방지 3·budget 5 |
-| LLM 내용 | 35 | 제목 5, 재가 문구 4, legacy 본문 투영 7, V2 section 역할·제목·유형 profile 7, 표·목록·문단 block 7, citation 5 |
-| XLSX 결과 | 25 | legacy는 기존 3필드 계약, V2는 생성·OOXML·3필드·본문 레이아웃·실제 표·appendix를 합산 |
-| 도구 흐름 | 15 | evidence·LLM·workbook·save stage 성공 각 3, 정확한 순서 3 |
+| LLM Judge 기안 내용 | 45 | 근거 정확성 12·의사결정 정보 완결성 9·목적/필요성 7·실행 가능성 6·논리 구조 5·업무 문체 4·간결성/가독성 2 |
+| XLSX 결과 | 20 | 생성·OOXML·3필드·본문 편집성·실제 표·appendix를 합산하며, 파일 미생성은 세부 기본값과 무관하게 0점 |
+| 도구 흐름 | 10 | evidence·LLM·workbook·save stage 성공 각 2, 정확한 순서 2 |
 
-문자열 유사도는 NFKC 정규화와 공백 통합 후 `SequenceMatcher`로 계산한다. V2 구조 점수는 dataset의
-`body_sections` 역할·제목 순서와 `body_rows`의 다중 셀 표, 목록 marker를 `document.sections[].blocks`와 비교한다.
-`E###` citation 문법과 packed citation 범위를 3점, `citation_map`이 실제 사용 chunk ID를 가리키는지를 2점으로 검사한다.
-외부 judge나 임베딩 모델을 사용하지 않으므로 같은 입력은 같은 점수를 낸다. 현재 XLSX 계약은 `기안지` sheet의 `C8`,
-`A10`, `A15` 이후 본문 행을 검사한다. dataset의 `source_sheet`는 이전 양식명을 보조 탐색할 때만 사용한다.
+내용 점수는 고정한 온프레미스 Ollama judge가 사용자 지시, 실제 packed 근거, 생성 기안만 보고 strict JSON으로 채점한다.
+target/gold 기안과 `expected`는 judge 입력에 넣지 않는다. 세부 점수 외에 근거 없는 중요 주장, 필수 의사결정 정보 누락,
+근거와의 모순 건수와 confidence를 함께 남긴다. judge model·temperature 0·rubric 버전·context/output 한도는 실행별로 고정하고
+manifest fingerprint에 포함한다. 외부 endpoint는 거부하며 JSON 오류는 한 번만 교정 재시도한다. judge 실패는 생성 결과를
+폐기하지 않고 내용 0점과 제한된 failure code로 남긴다. 이때 이론상 최고점이 55점이므로 80점 통과는 불가능하다.
+
+문자열 유사도와 V2 구조 비교는 세부 진단 및 회귀 분석용으로 유지하지만 45점 내용 점수에는 더하지 않는다. 현재 XLSX
+계약은 `기안지` sheet의 `C8`, `A10`, `A15` 이후 본문 행을 검사한다. dataset의 `source_sheet`는 이전 양식명을 보조 탐색할 때만
+사용한다.
+
+### LLM Judge 기안 내용 세부 기준
+
+| 요소 | 배점 | 핵심 판단 |
+|---|---:|---|
+| 근거 정확성 | 12 | 중요 주장·수치·날짜·대상·결론이 제공 근거와 일치하고 추측이나 모순이 없는가 |
+| 의사결정 정보 완결성 | 9 | 결재자가 판단하는 데 필요한 범위·조건·금액·일정·책임·요청 사항을 근거가 허용하는 범위에서 빠짐없이 담았는가 |
+| 목적과 필요성 | 7 | 기안 목적, 문제·배경, 지금 승인해야 하는 이유가 명확한가 |
+| 실행 가능성과 구체성 | 6 | 승인 후 행동, 담당·일정·방법·제약이 실행 가능한 수준으로 구체적인가 |
+| 논리 구조 | 5 | 제목·재가 문구·section·표가 일관된 흐름으로 구성되고 중복이나 충돌이 없는가 |
+| 업무 문체 | 4 | 객관적이고 정중하며 결재 문서에 적합한 표현인가 |
+| 간결성과 가독성 | 2 | 불필요한 반복 없이 빠르게 핵심을 읽을 수 있는가 |
 
 ### coverage와 제품 품질 eligibility
 
@@ -72,7 +88,7 @@ reviewed test라도 구조화 `fact_expectations`가 없으면 `scoring_basis=di
 10. 필수 사실이 실제 입력에 없어 `missing_action=ask`인 case는 정확한 fact key만 최대 3개 질문하고 workbook/save를 건너뛰어야 한다.
 
 10번 case는 답변 전 파일을 만들지 않는 것이 올바른 종료다. `completion.status=needs_clarification`이고 비식별
-`question_field_keys` 집합이 기대 집합과 정확히 같으면 XLSX·save hard gate와 해당 25점·15점을 충족한 것으로 대체한다.
+`question_field_keys` 집합이 기대 집합과 정확히 같으면 XLSX·save hard gate와 해당 20점·10점을 충족한 것으로 대체한다.
 질문 prompt와 답변 원문은 평가 보고서에 저장하지 않는다. 필수 질문이 없는 일반 case는 기존처럼 실제 XLSX와 네 stage를 모두
 통과해야 한다.
 
@@ -97,7 +113,8 @@ reviewed test라도 구조화 `fact_expectations`가 없으면 `scoring_basis=di
 - `event_attendance`: purpose → background → details → schedule → budget → expected_effect → attachments
 - `general`: purpose → background → request → details → schedule → expected_effect → attachments → notes → other
 
-기존 dataset에는 이 label이 없으므로 `not_labeled`로 기록하고 종전 35점 산식을 그대로 적용한다.
+기존 dataset에 이 label이 없으면 `not_labeled`로 기록한다. profile·구조 비교는 진단값이고 내용 점수는 label 유무와 관계없이
+동일한 LLM Judge 루브릭으로 산정한다.
 
 ### evidence filter 평가
 
@@ -341,7 +358,11 @@ uv run --no-sync python scripts/run_proposal_evaluation.py `
 `live`는 다음 수직 경로만 호출한다.
 
 `DocumentCitation 구성 → resolve_proposal_type → filter_proposal_evidence → LocalProposalDraftGenerator.generate →
-normalize_proposal_document → project_document_to_legacy_fields → render_proposal_workbook`
+LocalProposalDraftGenerator.refine → normalize_proposal_document → 주장 검증·결정론적 안전망 →
+project_document_to_legacy_fields → render_proposal_workbook`
+
+`refine`은 제품 API와 같은 유형별 품질 checklist를 사용한다. 생성 fingerprint의 계약 버전은 v4이며, 이전 checkpoint를
+새 생성 결과로 오인해 재사용하지 않는다.
 
 filter 전 후보에는 reference와 `excluded_post_event_artifact_ids`를 함께 넣어 실제 선별을 시험한다. 생성 직전 target ID 또는
 `is_target=true` artifact를 발견하면 실패한다. 기대 제외 후보가 filter 뒤에 남아도 oracle label로 실행을 막지 않고 그대로
@@ -357,9 +378,9 @@ checkpoint JSONL은 생성 본문과 로컬 workbook 상대 경로가 들어가�
 
 checkpoint 옆 manifest v2는 dataset fingerprint, scope, 모든 scope case의 생성 입력 fingerprint, template SHA-256과
 `generation_config_fingerprint`를 결속한다. 생성 설정 fingerprint에는 provider·model·LLM endpoint identity와 core 구현,
-`num_ctx`·출력 token·context 문자/문서/citation 예산·timeout·temperature·prompt reserve·schema/XLSX 계약을 넣되 model과
-endpoint 원문은 저장하지 않는다. instruction/reference/제외 후보/target/type, template 또는 생성 설정이 달라지거나 manifest가
-없는 구 checkpoint는 `--resume`로 재사용하지 않고 `checkpoint_manifest_mismatch`로 거부한다.
+`num_ctx`·출력 token·context 문자/문서/citation 예산·timeout·temperature·prompt reserve·schema/XLSX 계약과 judge model·rubric·
+context/output/timeout을 넣되 model과 endpoint 원문은 저장하지 않는다. instruction/reference/제외 후보/target/type, template 또는
+생성 설정이 달라지거나 manifest가 없는 구 checkpoint는 `--resume`로 재사용하지 않고 `checkpoint_manifest_mismatch`로 거부한다.
 
 checkpoint별 exclusive run lock은 PID, process 시작/run identity와 host hash를 기록하고 전체 invocation 동안 유지한다. 같은 host에서
 owner PID가 종료됐음이 명확할 때만 stale lock을 복구하며 active, 다른 host, 손상되어 소유자를 판정할 수 없는 lock은 모두 거부한다.
@@ -380,6 +401,10 @@ uv run --no-sync python scripts/run_proposal_evaluation.py `
   --proposal-cases "<외부-dataset>/proposal_cases.jsonl" `
   --checkpoint "<저장소-밖-승인된-로컬>/predictions.jsonl" `
   --artifact-directory "<저장소-밖-승인된-로컬>/xlsx" `
+  --judge-model "<고정한-온프레미스-judge-model>" `
+  --judge-num-ctx 32768 `
+  --judge-max-tokens 1024 `
+  --judge-timeout-ms 180000 `
   --live-report ".runtime/proposal_live/live_report.json" `
   --output ".runtime/proposal_live/evaluation.json" `
   --max-cases 3 `
@@ -474,10 +499,27 @@ context 제한 오류도 0건이었지만 raw runtime 예산 초과는 각각 6�
 품질 baseline은 아니다.
 
 checkpoint manifest v2는 dataset·scope·case 생성 입력·template뿐 아니라 provider/model/endpoint, core 구현, context/token/timeout,
-packing과 schema 계약을 원문 없는 `generation_config_fingerprint`로 결속한다. 성공 결과는 외부 raw pending journal과 workbook
+packing·schema 계약·judge 설정을 원문 없는 `generation_config_fingerprint`로 결속한다. 성공 결과는 외부 raw pending journal과 workbook
 hash를 먼저 fsync한 뒤 checkpoint append와 create-new XLSX publish를 수행한다. append/publish가 중단되면 resume이 journal을
 사용해 LLM 재호출 없이 복구하며, 복구 전에는 비식별 최종 보고서를 만들지 않는다. run lock은 같은 host에서 소유 PID가
 종료된 사실이 명확할 때만 회수한다.
+
+### 2026-08-13 동일 실제 사례 모델 비교
+
+같은 구조 전용 case, 같은 reference와 사용자 지시, 동일 32,768 context에서 세 생성 모델을 각각 한 번 실행했다. 내용 채점은
+세 실행 모두 `qwen3.6:35b-a3b`, temperature 0의 고정 judge를 사용했다. 대상 case가 아직 `candidate/unassigned`이므로 아래 점수는
+보고용 모델 비교 진단이며 승인된 제품 품질 baseline은 아니다.
+
+| 생성 모델 | 근거 25 | 내용 45 | XLSX 20 | 흐름 10 | 최종 / 100 | 결과 |
+|---|---:|---:|---:|---:|---:|---|
+| `qwen3:30b-a3b` | 25 | 40 | 20 | 10 | **95** | 통과 |
+| `qwen3.6:35b-a3b` | 25 | 29 | 0 | 6 | **49** | 확인 질문으로 XLSX 미생성, hard gate cap |
+| `qwen3.5:9b` | 10 | 0 | 0 | 4 | **14** | 구조화 출력 생성 오류 |
+
+고정 judge 관점에서 30B 결과는 중요 근거 오류·모순 없이 읽기 좋은 기안을 만들었으나 의사결정 필수 항목 3개가 부족해 내용
+5점을 잃었다. 35B-A3B 생성은 같은 모델의 self-judge가 포함된 제한이 있는데도 근거 오류·모순과 불필요한 확인 질문 때문에
+낮았다. 9B는 judge 단계 전에 strict V2 구조화 출력에 실패했다. 단일 case 결과이므로 모델 교체 결론은 reviewed test split의
+다건 반복 평가 후 확정한다.
 
 v2 evidence filter는 로컬 완료 9건을 평가해 실패 3건, 기대 제외 12개 중 정확 제외 0개, 정상 reference 오제외 12개,
 제외 citation/context 누출 3건이었다. SMB는 완료 결과 중 11건을 평가해 실패 5건, 기대 제외 35개 중 정확 제외 0개,

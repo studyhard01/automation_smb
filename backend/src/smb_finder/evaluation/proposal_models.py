@@ -388,6 +388,76 @@ class ProposalPredictionCompletion(BaseModel):
         return value
 
 
+class ProposalContentJudgeScores(BaseModel):
+    """기안 내용 45점을 근거·의사결정·문서 품질 요소로 분해한 LLM judge 점수."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grounded_accuracy: float = Field(ge=0, le=12)
+    decision_completeness: float = Field(ge=0, le=9)
+    purpose_and_necessity: float = Field(ge=0, le=7)
+    actionability_and_feasibility: float = Field(ge=0, le=6)
+    logical_structure: float = Field(ge=0, le=5)
+    business_writing: float = Field(ge=0, le=4)
+    conciseness_and_readability: float = Field(ge=0, le=2)
+
+    @property
+    def total(self) -> float:
+        """개별 루브릭을 합산한 45점 만점 점수."""
+
+        return round(
+            self.grounded_accuracy
+            + self.decision_completeness
+            + self.purpose_and_necessity
+            + self.actionability_and_feasibility
+            + self.logical_structure
+            + self.business_writing
+            + self.conciseness_and_readability,
+            4,
+        )
+
+
+class ProposalContentJudgeDiagnostics(BaseModel):
+    """원문·자유서술 없이 보존하는 온프레미스 LLM judge 판정."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["proposal-content-judge-v1"] = "proposal-content-judge-v1"
+    rubric_version: Literal["proposal-content-rubric-v1"] = "proposal-content-rubric-v1"
+    status: Literal["not_run", "completed", "failed", "oracle"] = "not_run"
+    judge_model: str | None = Field(default=None, max_length=200)
+    scores: ProposalContentJudgeScores | None = None
+    unsupported_material_claim_count: int = Field(default=0, ge=0)
+    missing_critical_item_count: int = Field(default=0, ge=0)
+    contradiction_count: int = Field(default=0, ge=0)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    elapsed_ms: float = Field(default=0.0, ge=0)
+    failure_code: Literal[
+        "none",
+        "not_configured",
+        "invalid_endpoint",
+        "context_limit",
+        "http_error",
+        "invalid_response",
+    ] = "none"
+
+    @model_validator(mode="after")
+    def validate_status(self) -> ProposalContentJudgeDiagnostics:
+        if self.status in {"completed", "oracle"} and (self.scores is None or self.failure_code != "none"):
+            raise ValueError("완료된 content judge에는 점수가 필요합니다.")
+        if self.status == "failed" and self.failure_code == "none":
+            raise ValueError("실패한 content judge에는 failure code가 필요합니다.")
+        if self.status == "not_run" and self.scores is not None:
+            raise ValueError("실행하지 않은 content judge에는 점수를 둘 수 없습니다.")
+        return self
+
+    @property
+    def total_score(self) -> float:
+        """실패·미실행은 0점, 완료·oracle은 루브릭 합계로 반환한다."""
+
+        return self.scores.total if self.scores is not None else 0.0
+
+
 class ProposalPrediction(BaseModel):
     """외부 실행 결과 JSONL 한 줄. workbook 경로와 출력 문자열은 입력에서만 사용한다."""
 
@@ -402,6 +472,7 @@ class ProposalPrediction(BaseModel):
     proposal_type_source: Literal["user", "rule", "fallback"] | None = None
     evidence_filter: ProposalPredictionEvidenceFilter | None = None
     completion: ProposalPredictionCompletion | None = None
+    content_judge: ProposalContentJudgeDiagnostics | None = None
     evidence_artifact_ids: list[str] = Field(default_factory=list)
     evidence_chunk_ids: list[str] = Field(default_factory=list)
     excluded_evidence_artifact_ids: list[str] = Field(default_factory=list)
@@ -506,9 +577,9 @@ class ProposalScoreBreakdown(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     evidence_context: float = Field(ge=0, le=25)
-    llm_content: float = Field(ge=0, le=35)
-    xlsx_result: float = Field(ge=0, le=25)
-    tool_flow: float = Field(ge=0, le=15)
+    llm_content: float = Field(ge=0, le=45)
+    xlsx_result: float = Field(ge=0, le=20)
+    tool_flow: float = Field(ge=0, le=10)
     raw_total: float = Field(ge=0, le=100)
     final_total: float = Field(ge=0, le=100)
 
@@ -713,6 +784,7 @@ class ProposalCaseEvaluation(BaseModel):
     hard_gates: ProposalHardGates
     context: ProposalContextCaseStats
     observed_context_estimated_tokens: int | None = Field(default=None, ge=0)
+    content_judge: ProposalContentJudgeDiagnostics = Field(default_factory=ProposalContentJudgeDiagnostics)
     structure: ProposalStructureDiagnostics
     profile: ProposalProfileDiagnostics
     evidence_filter: ProposalEvidenceFilterDiagnostics
@@ -799,6 +871,28 @@ class ProposalCoverageAggregate(BaseModel):
     factual_normalized_scored_points: float | None = Field(default=None, ge=0, le=100)
 
 
+class ProposalContentJudgeAggregate(BaseModel):
+    """LLM judge 실행 상태와 세부 루브릭 평균."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    completed_case_count: int = Field(default=0, ge=0)
+    failed_case_count: int = Field(default=0, ge=0)
+    not_run_case_count: int = Field(default=0, ge=0)
+    oracle_case_count: int = Field(default=0, ge=0)
+    average_total_score: float = Field(default=0.0, ge=0, le=45)
+    grounded_accuracy_average: float = Field(default=0.0, ge=0, le=12)
+    decision_completeness_average: float = Field(default=0.0, ge=0, le=9)
+    purpose_and_necessity_average: float = Field(default=0.0, ge=0, le=7)
+    actionability_and_feasibility_average: float = Field(default=0.0, ge=0, le=6)
+    logical_structure_average: float = Field(default=0.0, ge=0, le=5)
+    business_writing_average: float = Field(default=0.0, ge=0, le=4)
+    conciseness_and_readability_average: float = Field(default=0.0, ge=0, le=2)
+    unsupported_material_claim_count: int = Field(default=0, ge=0)
+    missing_critical_item_count: int = Field(default=0, ge=0)
+    contradiction_count: int = Field(default=0, ge=0)
+
+
 class ProposalEvaluationAggregate(BaseModel):
     """기안 평가 전체 집계."""
 
@@ -812,9 +906,9 @@ class ProposalEvaluationAggregate(BaseModel):
     pass_rate: float = Field(ge=0, le=1)
     average_total_score: float = Field(ge=0, le=100)
     evidence_context_average: float = Field(ge=0, le=25)
-    llm_content_average: float = Field(ge=0, le=35)
-    xlsx_result_average: float = Field(ge=0, le=25)
-    tool_flow_average: float = Field(ge=0, le=15)
+    llm_content_average: float = Field(ge=0, le=45)
+    xlsx_result_average: float = Field(ge=0, le=20)
+    tool_flow_average: float = Field(ge=0, le=10)
     latency_p50_ms: float = Field(ge=0)
     latency_p95_ms: float = Field(ge=0)
     generated_completed_case_count: int = Field(default=0, ge=0)
@@ -823,6 +917,7 @@ class ProposalEvaluationAggregate(BaseModel):
     hard_gate_failure_counts: dict[str, int]
     context_failures: ProposalContextFailureAggregate
     evidence_filter: ProposalEvidenceFilterAggregate
+    content_judge: ProposalContentJudgeAggregate = Field(default_factory=ProposalContentJudgeAggregate)
     supplemental: ProposalSupplementalAggregate
     coverage: ProposalCoverageAggregate = Field(default_factory=ProposalCoverageAggregate)
 
@@ -832,7 +927,7 @@ class ProposalEvaluationReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["proposal-evaluation-report-v1"] = "proposal-evaluation-report-v1"
+    schema_version: Literal["proposal-evaluation-report-v2"] = "proposal-evaluation-report-v2"
     mode: EvaluationMode
     evaluation_kind: Literal[
         "preflight",

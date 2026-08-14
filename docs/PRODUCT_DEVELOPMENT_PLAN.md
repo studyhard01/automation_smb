@@ -33,9 +33,19 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 - MinIO Preview/Canonical read-only 조회
 - 명시적으로 활성화한 SMB 파일 첨부와 비밀 없는 상대 경로 설정
 
+### P0로 편입
+
+- 활성 `DocumentRuntime` 계약을 사용하는 FastAPI·LangGraph 최소 Flow와 결정론적 Router
+- 외부 DB·LLM 없이 실행되는 Mock Retriever/Model 프로필
+- 공통 Model Gateway와 Citation·Policy·오류 계약
+- 활성 FastAPI lifespan에 연결되는 read-only MCP Metadata Tool
+- bounded in-memory Session Cache와 timeout/fallback 계약
+- 위 항목의 상세 순서와 완료 기준은 [Bot Main Core 구현 계획](BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md)을 따른다.
+
 ### 현재 제외
 
-- Langflow, LangGraph Studio, MCP
+- Langflow와 운영용 remote MCP/OAuth·SSO
+- LangGraph Studio의 운영 관측·평가 저장소 사용
 - 로컬 SQLite/SMB 직접 인덱싱과 `/find`, `/search-content`
 - 범용 Tool Lab, Skill CRUD
 - 첨부 파일 자동 변환·DB 인덱싱·버전 관계 생성
@@ -49,7 +59,16 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 
 ## 3. 현재 우선순위
 
-### P0 — 수직 흐름 안정화
+### P0-A — Bot Main Core 계약 복구
+
+- 현재 FastAPI와 레거시 MCP·LangGraph 실험의 실행 경계를 먼저 고정
+- FastAPI + 최소 graph + Mock Retriever/Model 수직 슬라이스
+- 공통 Model Gateway로 검색어 확장·근거 답변의 timeout·오류 계약 통합
+- read-only 문서 metadata tool과 bounded Session Cache를 활성 FastAPI lifespan에 연결
+- metadata tool은 기본 정보 → 활성 Revision → 버전 관계 → 저장소 상태 → 선택 범위 Citation 검색 순으로 확장
+- 삭제된 `FolderIndex`·SQLite 계약을 되살려 레거시 테스트만 통과시키는 방식은 사용하지 않음
+
+### P0-B — 수직 흐름 안정화
 
 - 실제 저장소 연결에서 검색 → 선택 → 채팅 회귀 테스트
 - 검색 결과 정확도와 활성 Revision 검증

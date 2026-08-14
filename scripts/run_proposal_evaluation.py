@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+from smb_finder.config import load_settings
+from smb_finder.evaluation.proposal_content_judge import LocalProposalContentJudge
 from smb_finder.evaluation.proposal_runner import (
     ProposalEvaluationError,
     run_proposal_evaluation,
@@ -38,6 +40,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-cases", type=int, default=0, help="0이면 scope 전체")
     parser.add_argument("--deadline-seconds", type=float, default=0.0, help="0이면 전체 deadline 없음")
+    parser.add_argument("--judge-model", default="", help="live 내용 45점을 판정할 온프레미스 Ollama 모델")
+    parser.add_argument("--judge-num-ctx", type=int, default=32_768)
+    parser.add_argument("--judge-max-tokens", type=int, default=1_024)
+    parser.add_argument("--judge-timeout-ms", type=int, default=180_000)
     parser.add_argument("--scope", choices=["all", "current_tool", "structure_only"], default="all")
     parser.add_argument("--runtime-context-window-tokens", type=int, default=24_576)
     parser.add_argument("--reserved-prompt-tokens", type=int, default=1_024)
@@ -71,6 +77,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "live" and not args.confirm_local_sensitive_data:
         print("local_sensitive_data_confirmation_required", file=sys.stderr)
         return 2
+    if args.mode == "live" and not args.judge_model.strip():
+        print("content_judge_model_required", file=sys.stderr)
+        return 2
+    if args.mode != "live" and args.judge_model:
+        print("content_judge_live_only", file=sys.stderr)
+        return 2
+    if not (4_096 <= args.judge_num_ctx <= 262_144):
+        print("content_judge_num_ctx_invalid", file=sys.stderr)
+        return 2
+    if not (256 <= args.judge_max_tokens <= 4_096):
+        print("content_judge_max_tokens_invalid", file=sys.stderr)
+        return 2
+    if not (1_000 <= args.judge_timeout_ms <= 600_000):
+        print("content_judge_timeout_invalid", file=sys.stderr)
+        return 2
     repository_root = Path(__file__).resolve().parents[1]
     if args.mode == "live" and any(
         Path(raw_path).resolve().is_relative_to(repository_root)
@@ -91,16 +112,29 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         if args.mode == "live":
-            live_report = run_live_proposal_predictions(
-                args.documents,
-                args.proposal_cases,
-                checkpoint_path=args.checkpoint,
-                artifact_directory=args.artifact_directory,
-                scope=args.scope,
-                max_cases=args.max_cases or None,
-                deadline_seconds=args.deadline_seconds or None,
-                resume=args.resume,
+            settings = load_settings()
+            content_judge = LocalProposalContentJudge(
+                settings.ollama_base_url,
+                args.judge_model,
+                num_ctx=args.judge_num_ctx,
+                max_tokens=args.judge_max_tokens,
+                timeout_ms=args.judge_timeout_ms,
             )
+            try:
+                live_report = run_live_proposal_predictions(
+                    args.documents,
+                    args.proposal_cases,
+                    checkpoint_path=args.checkpoint,
+                    artifact_directory=args.artifact_directory,
+                    scope=args.scope,
+                    max_cases=args.max_cases or None,
+                    deadline_seconds=args.deadline_seconds or None,
+                    resume=args.resume,
+                    settings=settings,
+                    content_judge=content_judge,
+                )
+            finally:
+                content_judge.close()
             write_proposal_live_report(args.live_report, live_report)
         report = run_proposal_evaluation(
             args.documents,
@@ -135,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
         "context_failure_count": report.aggregate.context_failures.failure_count,
         "evidence_filter_evaluated_case_count": report.aggregate.evidence_filter.evaluated_case_count,
         "evidence_filter_failed_case_count": report.aggregate.evidence_filter.failed_case_count,
+        "content_judge_completed_case_count": report.aggregate.content_judge.completed_case_count,
+        "content_judge_failed_case_count": report.aggregate.content_judge.failed_case_count,
+        "content_judge_average_score": report.aggregate.content_judge.average_total_score,
         "event_structure_failed_case_count": report.aggregate.supplemental.event_failed_case_count,
         "revision_failed_case_count": report.aggregate.supplemental.revision_failed_case_count,
     }

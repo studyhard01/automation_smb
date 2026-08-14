@@ -1,15 +1,23 @@
 # automation-smb 코드 우선 MCP 구현 계획
 
-> 상태: M0–M2 로컬 MVP 구현 완료, 검색 2개의 catalog 기반 직접 등록 완료 — 공통 catalog 확장, 사내 다중 사용자 공개,
-> OAuth/SSO와 LangGraph client 전환은 후속 단계다.
+> 상태: **과거 M0–M2 prototype 코드는 남아 있으나 활성 제품 기준 재구현 필요** — 현재 FastAPI는 `/mcp`를 마운트하지
+> 않고, 기존 catalog와 테스트는 삭제된 Finder/SQLite 계약에 의존한다. 완료 표시는 활성 `DocumentRuntime` 계약으로
+> 이관하고 회귀 테스트를 다시 통과한 뒤에만 복구한다.
 >
-> 기준일: 2026-07-24
+> 기준일: 2026-08-14
 >
 > 상위 설계: [TOOL_MCP_LANGCHAIN_ARCHITECTURE.md](TOOL_MCP_LANGCHAIN_ARCHITECTURE.md)
+>
+> 최우선 실행 계획: [Bot Main Core 구현 계획](BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md)
 
 > **2026-07-24 구조 결정:** 업무 tool은 Python 도메인 코드와 Pydantic 계약으로 먼저 구현한다. Playground는
 > 공통 executor를 in-process로 사용하고, 외부 client만 `/mcp`에서 명시적으로 승인된 tool을 호출한다. QC 도구의
 > catalog 이관과 MCP 공개 여부는 실제 SOP 계약과 운영 경계가 확정된 뒤 각각 별도 결정한다.
+
+> **2026-08-14 활성 경로 재감사:** `mcp_server.py`와 `tooling/`의 존재만으로 완료로 판정하지 않는다. 활성
+> `backend/src/smb_finder/api.py`에는 MCP mount/lifespan 연결이 없고, `pyproject.toml`에도 MCP·LangGraph 런타임
+> 의존성이 없다. MCP 공개 catalog는 옛 `find_folder`, `search_content` 두 개뿐이며 전용 문서 metadata tool과
+> 애플리케이션 Session Cache는 없다. 아래 M0–M5는 설계 자산으로 보존하되 P0 우선순위는 새 Main Core 계획을 따른다.
 
 ## 1. 구현 결정 요약
 
@@ -262,6 +270,9 @@ MCP 서버는 연결한 Host가 도구 결과를 외부 모델이나 자체 trac
 
 ## 8. 단계별 작업 계획
 
+아래 단계의 과거 완료 표시는 2026-07-24 prototype 기준이다. 2026-08-14부터는 활성 `DocumentRuntime`과 현재
+Pydantic 모델, API 계약, 테스트를 기준으로 각 gate를 다시 통과해야 완료로 복구한다.
+
 ### M0 — 회귀 기준 고정
 
 목표: 구조 변경 전에 현재 동작을 테스트로 고정한다.
@@ -345,7 +356,8 @@ docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md
 
 ### M3 — 공통 catalog 확장과 adapter 일반화
 
-상태: **검색 2개 adapter 일반화 완료, 업무 tool 단계적 이관 대기**.
+상태: **과거 검색 2개 adapter 코드는 존재하나 활성 제품 기준 미착수**. 먼저 현재 문서 metadata 계약을 M0–M2에
+이관하고 `/mcp` lifecycle·보안·timeout 회귀를 복구한 뒤 단계적 확장을 시작한다.
 
 목표: Playground registry에 남은 업무 tool을 계약·회귀 테스트와 함께 하나씩 공통 catalog로 옮긴다. catalog
 등록이 MCP 공개를 뜻하지 않으며, 각 `allowed_surfaces`는 데이터·권한·지연 검토 후 별도로 결정한다.

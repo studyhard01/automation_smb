@@ -15,14 +15,15 @@ LLMOps 데이터셋을 읽기 전용으로 조회하고, 명시적으로 허용�
 - 답변: 온프레미스 Ollama만 사용, Citation과 검색 지연 반환
 - 문서 보기: MinIO Preview/Canonical read-only 조회
 - 버전 관계: Neo4j Document/Revision 관계 read-only 조회
-- 기안 초안: 선택 문서 근거와 사용자 설명으로 로컬 LLM의 근거 인용·section·문단·목록·표를 포함한 strict V2 문서를 만들고, 기존 3필드/기안 템플릿과 호환 투영해 SMB 신규 저장한 뒤 대화창 다운로드 제공
-- 기안 평가: 외부 dataset을 읽기 전용으로 받아 근거·LLM 내용·XLSX·도구 흐름을 100점으로 채점하고, runtime/model 컨텍스트 초과를 원문 없이 집계
+- 기안 초안: 선택 문서 근거와 사용자 설명으로 strict V2 초안을 만든 뒤 유형별 품질 편집·주장 검증·결정론적 안전망을 적용하고, 기존 3필드/기안 템플릿과 호환 투영해 SMB 신규 저장한 뒤 대화창 다운로드 제공
+- 기안 평가: 외부 dataset을 읽기 전용으로 받아 근거 25·온프레미스 LLM Judge 내용 45·XLSX 20·도구 흐름 10점으로 채점하고, runtime/model 컨텍스트 초과를 원문 없이 집계
 - 파일 첨부: `[업로드] 문서명_YYYYMMDD_v1.0.확장자` 저장 규칙으로 SMB share 내부 상대 경로에 비덮어쓰기 저장하고, 업로드 직후 대화 참고 파일에 자동 추가해 원본을 즉시 근거로 사용
 - 환경 설정: 왼쪽 하단 설정에서 업로드·기안 상대 경로와 연결 상태만 관리하며 주소·계정·비밀번호는 노출하지 않음
 
-현재 제품 경계에서 제외한 항목은 Langflow, MCP, LangGraph Studio, 로컬 SQLite/SMB 직접 인덱싱, 범용 Tool/Skill
-편집기, QC·유전검사 데모, 외부 LLM provider입니다. DB가 연결되지 않았을 때 규칙 기반 가짜 결과나 fixture로
-대체하지 않고 명시적인 오류를 반환합니다.
+현재 제품 경계에서 제외한 항목은 Langflow, 운영용 remote MCP/OAuth·SSO, LangGraph Studio의 운영 관측 사용,
+로컬 SQLite/SMB 직접 인덱싱, 범용 Tool/Skill 편집기, QC·유전검사 데모, 외부 LLM provider입니다. 로컬 read-only
+MCP와 최소 LangGraph Flow는 Bot Main Core 계약 복구 P0로 편입했습니다. DB가 연결되지 않았을 때 규칙 기반 가짜
+결과나 fixture로 대체하지 않고 명시적인 오류를 반환합니다.
 
 ## 구조
 
@@ -40,7 +41,7 @@ automation_smb/
 │  │  ├─ playground/document_*.py    # 선택 문서 채팅 API·서비스·계약
 │  │  ├─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
 │  │  ├─ playground/proposal_*.py    # 선택 문서 기반 구조화 기안·XLSX 생성·다운로드 API
-│  │  └─ evaluation/proposal_*.py    # 기안 dataset preflight·gold 비노출 live 생성·100점 평가·비식별 통계
+│  │  └─ evaluation/proposal_*.py    # 기안 dataset preflight·gold 비노출 live 생성·온프레미스 Judge·100점 평가
 │  └─ tests/                         # Backend 단위·계약 테스트
 ├─ docs/                             # 목표·현황·설계·운영 문서
 ├─ scripts/                          # 실행·품질 검사·기안 평가 CLI
@@ -136,6 +137,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8011/api/playground/stores/status
 ## 문서
 
 - [현재 개발 목표와 계획](docs/PRODUCT_DEVELOPMENT_PLAN.md)
+- [Bot Main Core WBS 감사와 구현 계획](docs/BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md)
 - [구현 현황](docs/IMPLEMENTATION_STATUS.md)
 - [정리 인벤토리](docs/CLEANUP_INVENTORY.md)
 - [DB 연동 계약](docs/DATASET_DB_INTEGRATION_PLAN.md)
