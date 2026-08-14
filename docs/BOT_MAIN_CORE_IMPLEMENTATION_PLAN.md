@@ -2,7 +2,7 @@
 
 > 기준일: 2026-08-14
 >
-> 상태: 계획 작성 완료, 제품 코드 미구현
+> 상태: D1(P0-1 + 최소 P0-2 scaffold) 구현 완료, P0-3 Model Gateway 대기
 >
 > 기준 실행 경로: `backend/src/smb_finder/api.py`의 FastAPI와 PostgreSQL·MinIO·Neo4j 기반 `DocumentRuntime`
 
@@ -99,6 +99,9 @@ Mock 수직 슬라이스 인수 기준:
 - FastAPI lifespan에서 목적별 adapter가 하나의 재사용 HTTP transport를 공유하고 종료 시 닫는다.
 - 우선 이관 순서: 검색어 확장 -> 문서 근거 답변 -> proposal 생성/검증. Embedding은 동일 transport·deadline 정책을
   쓰되 생성 모델과 별도 protocol로 유지할 수 있다.
+- D1 배포 smoke에서 선택적 검색어 확장이 실패 fallback 전 6,007.9ms를 소비했고 전체 검색은 6,157.3ms였다.
+  P0-3의 첫 인수 항목은 검색어 확장에 남은 절대 deadline을 적용해 즉시 rule-based fallback하고, 목표 초과 시
+  `over_budget=true`가 되도록 예산 판정을 단일화하는 것이다.
 
 Citation/Policy 계약:
 

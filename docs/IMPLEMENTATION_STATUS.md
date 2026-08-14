@@ -24,7 +24,7 @@ Bot Main Core WBS 재감사: 2026-08-14
 | 저장소 상태 | 완료 | PostgreSQL·MinIO·Neo4j 연결/degraded 상태 표시 |
 | 파일 첨부 | 완료 | `[업로드] 문서명_YYYYMMDD_v1.0.확장자`를 최종 이름으로 exclusive 신규 생성 후 대화 참고 파일 자동 추가 |
 | 환경 설정 | 완료 | 왼쪽 하단 설정에서 업로드·기안 상대 경로와 저장소·로컬 LLM 상태 관리, 비밀·내부 주소 미노출 |
-| Main Core 기본 Flow | 부분 구현 | 활성 FastAPI·Router는 있으나 LangGraph는 비활성 Studio 실험에 머물고 Mock Retriever/Model graph 회귀가 없음 |
+| Main Core 기본 Flow | P0-1 완료 / P0-2 scaffold 완료 | 활성 `DocumentRuntime`에 optional runner를 추가하고 주입형 LangGraph·결정론 Router·Mock Retriever/Model 회귀를 연결. 실제 provider 활성화는 P0-3 대기 |
 | Main Core Gateway·Policy | 부분 구현 | Citation·선택 Revision scope·안전한 오류는 활성이나 공통 Model Gateway와 단일 오류 Flow가 없음 |
 | MCP Metadata·Session | 미구현 | 레거시 MCP/tooling은 활성 app에 연결되지 않고 전용 metadata tool·애플리케이션 Session Cache가 없음 |
 | MCP Metadata 확장 | 미구현 | 레거시 catalog의 검색 2개 외 활성 문서 metadata 기반 신규 tool이 없음 |
@@ -42,6 +42,7 @@ Bot Main Core WBS 재감사: 2026-08-14
 - `llmops_retrieval.py`: 선택 범위 Hybrid/RRF Chunk 검색
 - `llmops_artifacts.py`: PostgreSQL ACL/Revision 확인 후 MinIO 조회
 - `llmops_graph.py`: Neo4j 버전 관계 조회
+- `bot_core/`: import 부작용 없는 LangGraph factory, 결정론적 Router, Retriever/Model/Metadata Protocol과 합성 fake
 - `playground/document_api.py`: 현재 공개 API
 - `playground/document_chat.py`: 근거 검색과 로컬 LLM 합성
 - `playground/document_models.py`: 채팅 API 계약
@@ -87,6 +88,12 @@ Bot Main Core WBS 재감사: 2026-08-14
 
 ## 최근 검증
 
+- 2026-08-14 Bot Core D1: focused 33개와 활성 비통합 192개 통과, 레거시 제거 후보 10개 모듈은 exact list로 미수집
+- 합성 fake graph 200회는 p50 0.972ms, p95 1.294ms, 최대 1.577ms였고 공개 ChatResponse 15필드·`/mcp` 404 유지
+- D1 로컬 Docker 재빌드·교체 후 health/UI 200, ChatResponse 15필드, 내부 graph 필드 0개, `/mcp` 404,
+  합성 read-only 검색 3건 반환을 확인했다.
+- 같은 검색은 6,157.3ms였고 이 중 선택적 LLM 검색어 확장 실패 fallback이 6,007.9ms를 소비했다. 응답의
+  `over_budget=false`도 목표 예산과 불일치하므로 P0-3에서 absolute deadline·즉시 rule fallback·예산 판정을 우선 수정한다.
 - 2026-08-12 품질 우선 경로: strict JSON 오류 1회 복구, 유형별 2차 편집, 검증 citation 재구성, 행사 핵심 사실·명시 기대효과 보존, 비근거 구매 배경 제거를 적용
 - 완전 합성 구매·행사·일반 기안 3종을 실제 로컬 LLM으로 생성하고 Excel artifact 렌더에서 `기안지!A1:AE29`, 수식 오류 0, 내용 잘림·표 구조 오류 0 확인
 - 완전 합성 formal live 1건은 평균 90.598·1/1 통과, context/runtime budget 실패 0, SMB 호출 0. 다만 `candidate/unassigned`라 제품 품질 점수에는 부적격

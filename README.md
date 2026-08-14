@@ -38,6 +38,7 @@ automation_smb/
 │  │  ├─ llmops_retrieval.py         # 선택 Revision Hybrid/RRF 검색
 │  │  ├─ llmops_artifacts.py         # MinIO 문서 보기
 │  │  ├─ llmops_graph.py             # Neo4j 버전 관계
+│  │  ├─ bot_core/                    # 주입형 LangGraph·결정론 Router·합성 fake 계약
 │  │  ├─ playground/document_*.py    # 선택 문서 채팅 API·서비스·계약
 │  │  ├─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
 │  │  ├─ playground/proposal_*.py    # 선택 문서 기반 구조화 기안·XLSX 생성·다운로드 API

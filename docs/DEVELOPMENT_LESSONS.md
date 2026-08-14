@@ -46,7 +46,7 @@
 ### 2026-08-04 — 멀티스택 저장소는 물리 경계와 설정 소유권을 함께 드러낸다
 - 상황: Vue와 FastAPI의 물리 경계가 불명확했고, 제품 목표에서 제외한 실험 코드도 같은 package에 남아 현재 실행 경로와 향후 후보를 구분하기 어려웠다.
 - 교훈: 멀티스택 저장소는 `frontend/`·`backend/` 경계를 대칭적으로 두고, 새 수직 슬라이스를 먼저 연결·검증한 뒤 레거시의 import·dependency·문서·파일을 순서대로 제거해야 한다.
-- 다음 적용: 구조 이동과 제품 경계 변경 시 package discovery, pytest, Vite outDir, reload, dependency, 품질 rubric, canonical 문서를 함께 검증하고 영구 삭제 대상은 명시 승인을 받는다.
+- 다음 적용: 구조 이동과 제품 경계 변경 시 package discovery, pytest, Vite outDir, reload, dependency, 품질 rubric, canonical 문서를 함께 검증한다. 비활성 테스트는 glob 없이 제거 후보와 일치하는 exact list·고정 개수·pytest header로 드러내고, 새 실패를 자동 격리하거나 삭제 모델을 복원하지 않는다. 영구 삭제는 명시 승인을 받는다.
 
 ### 2026-08-04 — DB 확장 문법은 Client placeholder와 Driver 실행 계층까지 검증한다
 - 상황: PostgreSQL `pg_trgm`의 `%` 연산자가 psycopg placeholder parser와 충돌했고 Neo4j `Query` 객체가 managed transaction의 `run` 계약과 맞지 않았다.
@@ -71,7 +71,8 @@
 ### 2026-08-03 — 구축 데이터 schema는 복제하지 않고 소비 계약으로 경계 짓는다
 - 상황: 문서·Revision·Chunk·Artifact·Graph가 여러 저장소에 분산돼 한 저장소만 검색하면 버전명이나 Object key 단서를 놓칠 수 있었다.
 - 교훈: 저장소별 read-only 후보를 병렬 수집하되 최종 ID·활성 Revision은 PostgreSQL 기준 원장에서 hydrate해 중복과 stale 대상을 차단한다.
-- 다음 적용: 멀티스토어 검색은 저장소별 timeout·부분 실패·매칭 출처·단계 지연을 계약에 포함하고 실제 연결 smoke에서 모두 조회됐는지 확인한다.
+- 다음 적용: 멀티스토어 검색은 저장소별 timeout·부분 실패·매칭 출처·단계 지연을 계약에 포함한다. 선택적 LLM 확장은
+  전체 절대 deadline의 작은 몫만 쓰고 즉시 규칙 fallback하며, 실제 연결 smoke에서 전체 목표와 `over_budget` 판정까지 확인한다.
 
 ## 새 항목 템플릿
 

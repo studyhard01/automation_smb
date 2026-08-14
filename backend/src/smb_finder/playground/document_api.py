@@ -8,7 +8,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, FastAPI, HTTPException
@@ -31,6 +31,9 @@ from .document_chat import DocumentChatService
 from .document_models import ChatRequest, ChatResponse
 from .upload_service import UploadError
 
+if TYPE_CHECKING:
+    from smb_finder.bot_core import BotCoreRunner
+
 _logger = logging.getLogger(__name__)
 
 
@@ -44,6 +47,7 @@ class DocumentRuntime:
     artifact_reader: Any | None = None
     graph_reader: Any | None = None
     upload_manager: Any | None = None
+    bot_core_runner: BotCoreRunner | None = None
 
 
 def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> APIRouter:
@@ -216,13 +220,16 @@ def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> API
 
         request_id = str(uuid.uuid4())
         try:
-            response = await run_in_threadpool(
-                chat_service.run,
-                request,
-                runtime.scoped_retriever,
-                request_id=request_id,
-                upload_manager=runtime.upload_manager,
-            )
+            if runtime.bot_core_runner is not None:
+                response = await run_in_threadpool(runtime.bot_core_runner, request, request_id=request_id)
+            else:
+                response = await run_in_threadpool(
+                    chat_service.run,
+                    request,
+                    runtime.scoped_retriever,
+                    request_id=request_id,
+                    upload_manager=runtime.upload_manager,
+                )
         except LlmopsSearchError as exc:
             raise HTTPException(
                 status_code=503,
