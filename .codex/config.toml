@@ -1,0 +1,10 @@
+[features]
+hooks = true
+
+[mcp_servers.playwright]
+command = "npx"
+args = [
+    "@playwright/mcp@latest",
+    "--browser",
+    "chrome",
+]

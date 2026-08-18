@@ -1,7 +1,4 @@
-"""LangGraph 그래프 — SMB 공유폴더 에이전트 (Langflow의 'Agent + 도구 + Chat I/O'에 대응).
-
-`smbtest` Langflow flow는 Agent 노드가 SMB 컴포넌트들을 도구로 부르고 Chat Input/Output이
-연결된 형태다. 그 구조를 LangGraph로 옮긴 것이 이 그래프다:
+"""LangGraph Studio용 SMB 공유폴더 에이전트 그래프.
 
     Chat 입력(messages) → [에이전트 LLM] ⇄ [도구: find_folder/search_content/refresh_content] → Chat 응답
 
@@ -9,10 +6,7 @@
 호출하므로 검색 로직은 재구현하지 않는다(tools.py 참고). LangGraph Studio는 이 그래프의 messages
 상태를 채팅으로 렌더링하고, 노드 단위로 호출을 시각화·디버깅하게 해준다.
 
-보안 (CLAUDE.md — 항상 우선):
-- LLM은 config의 llm_base_url(**온프레미스, 기본 localhost:8080/v1**)만 쓴다. 외부 API 금지.
-- LangSmith 트레이싱은 환자/검사 데이터를 클라우드로 올리므로 .env에서 꺼 둔다(README 참고).
-- 도구는 read-only(인덱싱은 로컬 인덱스만 갱신). 공유폴더 파일을 쓰지 않는다.
+개발 프로필은 단일 로컬 테스트 흐름을 사용하며, 도구는 smb-finder의 읽기 API를 호출한다.
 """
 
 from __future__ import annotations
@@ -20,15 +14,15 @@ from __future__ import annotations
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import create_react_agent
 
-from .config import load_settings
-from .tools import TOOLS
+from smb_agent.config import load_settings
+from smb_agent.tools import TOOLS
 
 _settings = load_settings()
 
 # 온프레미스 OpenAI 호환 LLM (llama.cpp 등). base_url을 외부로 바꾸지 말 것.
 _llm = ChatOpenAI(
     base_url=_settings.llm_base_url,
-    api_key=_settings.llm_api_key,
+    api_key=_settings.llm_api_key or "local-no-key",
     model=_settings.llm_model,
     temperature=_settings.llm_temperature,
     timeout=_settings.llm_timeout_ms / 1000,
@@ -47,8 +41,7 @@ SYSTEM_PROMPT = """SMB 파일에서 사용자 질문에 대한 정확한 파일 
 
 원칙:
 - 도구 결과(경로·파일명)를 지어내지 말고 그대로 전달한다. 결과가 없으면 없다고 말한다.
-- 답변은 짧고 명확하게. 경로는 그대로 보여준다.
-- 보안: 폴더 경로·파일 내용을 외부로 보내지 않는다. 사내 도구만 사용한다."""
+- 답변은 짧고 명확하게. 경로는 그대로 보여준다."""
 
 # Studio가 불러갈 그래프 객체. langgraph.json에서 `graph`로 참조한다.
 graph = create_react_agent(_llm, TOOLS, prompt=SYSTEM_PROMPT)

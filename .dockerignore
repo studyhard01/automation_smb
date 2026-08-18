@@ -1,0 +1,18 @@
+# 필요한 build 입력만 허용해 .env·cache·VCS metadata가 context에 들어가지 않게 한다.
+*
+!pyproject.toml
+!uv.lock
+!frontend/
+!frontend/**
+!backend/
+!backend/src/
+!backend/src/**
+
+# 허용한 디렉터리 아래의 로컬·생성 파일은 다시 제외한다.
+frontend/node_modules/
+frontend/.env
+frontend/.env.*
+backend/src/smb_finder/web/
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store

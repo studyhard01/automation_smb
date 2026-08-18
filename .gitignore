@@ -6,14 +6,40 @@
 # 폴더 인덱스 캐시 (공유폴더 경로 정보 포함 — 외부 공유 금지)
 *.index.json
 .cache/
-data/
+# 데이터 디렉터리는 기본 제외하되 일반 합성 MLflow 평가 fixture만 버전 관리한다.
+data/*
+!data/evaluation/
+data/evaluation/*
+!data/evaluation/*.jsonl
 
 # Python
 __pycache__/
 *.py[cod]
 .venv/
+backend/.venv/
 .ruff_cache/
 .pytest_cache/
+.tmp/
+.runtime/
+# 로컬 XLSX·PNG 화면 QA 산출물
+outputs/
 *.egg-info/
 dist/
 build/
+
+# Vue Frontend 의존성·검증 산출물
+frontend/node_modules/
+frontend/coverage/
+frontend/*.tsbuildinfo
+frontend/tsconfig.*.tsbuildinfo
+
+# 제거된 Langflow 통합의 로컬 상태는 수동 정리 전까지 계속 Git에서 제외한다.
+integrations/langflow/docker-compose.override.yml
+integrations/langflow/.langflow-data/
+integrations/langgraph/.langgraph_api/
+
+# Local tool state
+.claude/settings.local.json
+
+# 머신별 Docker build 환경 (사내 SSL 검사 등)
+compose.override.yaml

@@ -1,0 +1,187 @@
+{
+  "rubric_id": "automation-smb-project-quality",
+  "version": "2.0.0",
+  "title": "automation_smb 프로젝트 품질 Rubric",
+  "target_score": 85,
+  "scoring_policy": {
+    "default_exit_policy": "hard_gates_only",
+    "strict_exit_policy": "hard_gates_and_target_score",
+    "advisory_evidence_never_blocks_default": true
+  },
+  "categories": [
+    {
+      "id": "security_data_boundary",
+      "title": "보안·데이터 경계",
+      "weight": 25,
+      "criteria": [
+        {"id": "tracked_artifact_hygiene", "title": "민감·로컬 산출물 비커밋", "points": 7, "hard_gate": true, "check": "tracked_artifacts"},
+        {"id": "sensitive_value_hygiene", "title": "자격증명·내부 주소 비노출", "points": 10, "hard_gate": true, "check": "sensitive_values"},
+        {"id": "storage_boundary", "title": "DB 읽기 전용·제한 SMB 쓰기", "points": 8, "hard_gate": true, "check": "read_only_architecture"}
+      ]
+    },
+    {
+      "id": "functionality_regression",
+      "title": "기능·회귀",
+      "weight": 20,
+      "criteria": [
+        {"id": "pytest_non_integration", "title": "활성 Backend pytest", "points": 20, "hard_gate": true, "check": "pytest"}
+      ]
+    },
+    {
+      "id": "latency_performance",
+      "title": "지연·성능",
+      "weight": 20,
+      "criteria": [
+        {"id": "index_first_fast_path", "title": "DB 검색 fast path", "points": 4, "hard_gate": true, "check": "index_first_architecture"},
+        {"id": "timeout_elapsed_contract", "title": "timeout·elapsed_ms 계약", "points": 4, "hard_gate": true, "check": "timeout_elapsed_architecture"},
+        {"id": "evidence_provenance_freshness", "title": "현재 수직 흐름 실측 freshness", "points": 2, "hard_gate": false, "check": "evidence_freshness"},
+        {"id": "measured_retrieval_latency", "title": "retrieval p95", "points": 3, "hard_gate": false, "check": "retrieval_latency_evidence"},
+        {"id": "measured_end_to_end_latency", "title": "end-to-end p95", "points": 7, "hard_gate": false, "check": "end_to_end_latency_evidence"}
+      ]
+    },
+    {
+      "id": "code_contracts",
+      "title": "코드·계약",
+      "weight": 15,
+      "criteria": [
+        {"id": "ruff", "title": "Ruff 정적 검사", "points": 5, "hard_gate": true, "check": "ruff"},
+        {"id": "python_runtime_conventions", "title": "Python·uv·src 규약", "points": 3, "hard_gate": true, "check": "runtime_conventions"},
+        {"id": "api_contracts", "title": "Pydantic 문서 API 계약", "points": 4, "hard_gate": true, "check": "api_tool_contracts"},
+        {"id": "measured_rag_quality", "title": "Hit@5·no-answer·groundedness", "points": 3, "hard_gate": false, "check": "rag_quality_evidence"}
+      ]
+    },
+    {
+      "id": "docs_context",
+      "title": "문서·맥락",
+      "weight": 10,
+      "criteria": [
+        {"id": "markdown_relative_links", "title": "Markdown 링크 무결성", "points": 4, "hard_gate": true, "check": "markdown_links"},
+        {"id": "canonical_context_alignment", "title": "목표·현황 문서 정합성", "points": 6, "hard_gate": true, "check": "docs_alignment"}
+      ]
+    },
+    {
+      "id": "operations_observability",
+      "title": "운영·관측성",
+      "weight": 10,
+      "criteria": [
+        {"id": "quality_automation_wiring", "title": "CI·hook 품질 검사 연결", "points": 4, "hard_gate": true, "check": "automation_wiring"},
+        {"id": "development_lessons_contract", "title": "개발 교훈 검사", "points": 2, "hard_gate": true, "check": "development_lessons"},
+        {"id": "safe_observability_contract", "title": "지연·오류 안전 관측", "points": 4, "hard_gate": true, "check": "observability_architecture"}
+      ]
+    }
+  ],
+  "policy": {
+    "forbidden_tracked_globs": [
+      ".env", ".env.*", "**/__pycache__/**", "**/*.pyc", "**/*.pyo", ".venv/**", "venv/**",
+      ".cache/**", ".tmp/**", ".pytest_cache/**", ".ruff_cache/**", "**/*.db", "**/*.sqlite", "**/*.sqlite3",
+      "frontend/node_modules/**", ".claude/settings.local.json"
+    ],
+    "allowed_tracked_paths": [".env.example"],
+    "text_scan_extensions": [".py", ".ts", ".vue", ".js", ".html", ".css", ".md", ".toml", ".yaml", ".yml", ".json", ".ps1", ".sh", ".txt", ".example"],
+    "safe_private_ip_literals": ["10.20.30.40", "10.0.0.5"],
+    "safe_unc_hosts": ["host", "internal-host", "synthetic-server"],
+    "fixture_contracts": [],
+    "runtime": {
+      "project_name": "automation-smb",
+      "python_requirement": ">=3.11",
+      "python_ci_version": "3.11",
+      "ruff_line_length": 120,
+      "ruff_src": ["backend/src", "backend/tests"],
+      "pytest_marker": "integration",
+      "required_dependencies": ["pydantic", "httpx", "psycopg", "boto3", "neo4j", "python-multipart", "smbprotocol"],
+      "lock_file": "uv.lock"
+    },
+    "architecture_markers": {
+      "index_first": {
+        "backend/src/smb_finder/llmops_search.py": ["WITH candidates AS", "document_chunks", "elapsed_ms"],
+        "backend/src/smb_finder/llmops_retrieval.py": ["WITH selected(doc_id", "rrf_score", "candidate_count"]
+      },
+      "timeout_elapsed": {
+        "backend/src/smb_finder/llmops_search.py": ["statement_timeout", "time.perf_counter", "elapsed_ms"],
+        "backend/src/smb_finder/llmops_multistore_search.py": ["llmops_file_search_budget_ms", "time.perf_counter", "elapsed_ms"],
+        "backend/src/smb_finder/llmops_retrieval.py": ["llmops_embedding_timeout_ms", "statement_timeout", "elapsed_ms"],
+        "backend/src/smb_finder/playground/document_chat.py": ["llm_timeout_ms", "playground_agent_budget_ms", "elapsed_ms"]
+      },
+      "read_only": {
+        "backend/src/smb_finder/llmops_search.py": ["default_transaction_read_only=on", "application_name"],
+        "backend/src/smb_finder/llmops_retrieval.py": ["default_transaction_read_only=on", "statement_timeout"],
+        "backend/src/smb_finder/llmops_artifacts.py": ["default_transaction_read_only=on", "head_object", "get_object"],
+        "backend/src/smb_finder/llmops_graph.py": ["MATCH (d:Document", "default_access_mode=READ_ACCESS"],
+        "backend/src/smb_finder/playground/upload_service.py": ["smb_upload_enabled", "normalize_relative_directory", "mode=\"xb\"", "file_already_exists", "smb_upload_max_size_bytes", "indexed=False"]
+      },
+      "api_tool_contracts": {
+        "backend/src/smb_finder/playground/document_models.py": ["class ChatRequest(BaseModel)", "selected_files", "class ChatResponse(BaseModel)"],
+        "backend/src/smb_finder/playground/document_api.py": ["response_model=DocumentSearchResponse", "validate_active_selections", "response_model=ChatResponse"],
+        "backend/src/smb_finder/playground/document_chat.py": ["selections =", "rag_insufficient_evidence", "citations"],
+        "backend/src/smb_finder/playground/upload_api.py": ["response_model=PlaygroundSettingsResponse", "response_model=FileUploadResponse", "run_in_threadpool"],
+        "backend/src/smb_finder/playground/upload_models.py": ["class UploadSettingsPatch", "class FileUploadResponse", "indexed: bool = False"]
+      },
+      "observability": {
+        "backend/src/smb_finder/api.py": ["ApiErrorResponse", "internal_error", "type(exc).__name__"],
+        "backend/src/smb_finder/llmops_search.py": ["time.perf_counter", "over_budget", "_logger.warning"],
+        "backend/src/smb_finder/llmops_multistore_search.py": ["llm_query_expansion", "queried_stores", "over_budget"],
+        "backend/src/smb_finder/playground/document_api.py": ["Document chat completed", "elapsed_ms", "error_code"]
+      }
+    },
+    "forbidden_smb_mutation_patterns": [
+      "smbclient.remove(", "smbclient.rename(", "smbclient.mkdir(", "smbclient.rmdir(", "smbclient.link(",
+      "smbclient.symlink(", "mode=\"wb\"", "mode=\"ab\"", "mode=\"w\"", "mode=\"a\""
+    ],
+    "canonical_documents": {
+      "README.md": {
+        "required_tokens": ["자연어로 파일 검색", "PostgreSQL", "MinIO", "Neo4j", "read-only", "backend/src/smb_finder/playground/document_chat.py", "scripts/evaluate_quality.py"],
+        "forbidden_tokens": ["Langflow endpoint", "ToolCatalog"]
+      },
+      "AGENTS.md": {
+        "required_tokens": ["합성 데이터", "Python 3.11", "p50 < 300ms", "p95 < 1s", "docs/DEVELOPMENT_LESSONS.md", "docs/PRODUCTION_ARCHITECTURE.md"],
+        "forbidden_tokens": []
+      },
+      "docs/PRODUCT_DEVELOPMENT_PLAN.md": {
+        "required_tokens": ["왼쪽 파일 찾기", "PostgreSQL", "Hybrid/RRF", "온프레미스 Ollama", "현재 제외", "승인 Gate"],
+        "forbidden_tokens": ["Langflow를 사용"]
+      },
+      "docs/IMPLEMENTATION_STATUS.md": {
+        "required_tokens": ["기준일: 2026-08-14", "자연어 파일 검색", "선택 문서 검증", "기안 초안", "로그인·회원가입·사용자 관리", "Playground 권한 강제", "제거 대상 판정", "Docker 패키징", "파일 첨부"],
+        "forbidden_tokens": []
+      },
+      "docs/DATASET_DB_INTEGRATION_PLAN.md": {
+        "required_tokens": ["read-only adapter", "llmops.document_chunks", "doc_id", "revision_id", "chunk_id", "Langflow"],
+        "forbidden_tokens": []
+      },
+      "docs/DEVELOPMENT_LESSONS.md": {
+        "required_tokens": ["현재 교훈", "최대 12개", "다음 적용"],
+        "forbidden_tokens": []
+      }
+    },
+    "automation_contract": {
+      "workflow": ".github/workflows/project-quality.yml",
+      "hook": ".githooks/pre-commit",
+      "hook_enabler": "scripts/enable_quality_hook.ps1",
+      "gitattributes": ".gitattributes",
+      "required_command": "python scripts/evaluate_quality.py",
+      "lessons_document": "docs/DEVELOPMENT_LESSONS.md",
+      "lessons_checker": "scripts/check_development_lessons.py",
+      "push_skill": ".codex/skills/push/SKILL.md",
+      "agent_guide": "AGENTS.md",
+      "lessons_staged_command": "python scripts/check_development_lessons.py --staged",
+      "lessons_push_command": "python scripts/check_development_lessons.py --diff-range"
+    }
+  },
+  "measured_evidence": {
+    "enabled": false,
+    "kind": "current_vertical_slice_baseline",
+    "advisory": true,
+    "recorded_on": "2026-08-04",
+    "max_age_days": 30,
+    "source": "docs/IMPLEMENTATION_STATUS.md",
+    "run_fingerprint": "pending-current-baseline",
+    "dataset_fingerprint": "0000000000000000",
+    "metrics": {
+      "retrieval_hit_at_5_pct": {"value": 0.0, "target": 90.0, "direction": "higher"},
+      "no_answer_accuracy_pct": {"value": 0.0, "target": 95.0, "direction": "higher"},
+      "groundedness_pct": {"value": 0.0, "target": 90.0, "direction": "higher"},
+      "retrieval_p95_ms": {"value": 0.0, "target": 1000.0, "direction": "lower"},
+      "end_to_end_p95_ms": {"value": 0.0, "target": 1000.0, "direction": "lower"}
+    }
+  }
+}

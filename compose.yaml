@@ -1,0 +1,44 @@
+services:
+  automation-smb:
+    image: automation-smb:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 기본은 TLS 검증을 유지한다. 사내 SSL 검사 환경에서만 공개 package host를 명시적으로 허용한다.
+        UV_INSECURE_HOST: "${AUTOMATION_SMB_BUILD_UV_INSECURE_HOST:-}"
+    env_file:
+      - path: .env
+        required: true
+      # 기존 .env는 수정하지 않고, 컨테이너에서 달라지는 endpoint만 선택적으로 뒤에서 덮어쓴다.
+      - path: .env.docker
+        required: false
+    ports:
+      - "${AUTOMATION_SMB_PORT:-8011}:8011"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid
+    volumes:
+      # 비밀이 아닌 상대 업로드 폴더 설정만 read-only root filesystem 밖에 유지한다.
+      - ./.runtime:/app/.runtime
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8011/health', timeout=2).read(1)
+      interval: 30s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+    stop_grace_period: 15s

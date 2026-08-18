@@ -1,106 +1,235 @@
-# automation_smb — 공유 폴더 찾기 서비스
+# automation_smb
 
-텍스트(이후 음성) 명령으로 **온프레미스 SMB 공유폴더를 즉시 찾아주는** 서비스.
-노코딩 자동화 툴(→ [`OS.md`](./OS.md))의 첫 성공 케이스이자 L4 도구다.
-작업 규칙·보안·지연 요구는 [`CLAUDE.md`](./CLAUDE.md) 참고.
+LLMOps 데이터셋을 읽기 전용으로 조회하고, 명시적으로 허용된 SMB 하위 폴더에만 파일을 첨부하는 공유 문서
+검색·대화 서비스입니다. 현재 단계는 실제 의료 환경과 무관한
+합성 데이터 기능 검증이며, 제품의 성공 기준은 다음 한 줄입니다.
 
-## 핵심 설계 — 지연 최소화
+> 왼쪽 패널에서 자연어로 파일 검색(멀티스토어) → 후보 선택 → 선택한 Revision 범위만 검색 → 중앙 채팅에서 근거와 함께 답변
 
-매 요청마다 SMB를 도는 대신, **폴더 트리를 미리 인덱싱(메모리+JSON 캐시)** 하고 **인메모리로 검색**한다.
-자연어는 규칙 기반 fast-path로 키워드를 뽑고, 모호할 때만 로컬 LLM을 태운다(timeout 강제).
+## 현재 제품 경계
 
-```
-텍스트 질의 → intent.normalize(규칙/LLM) → FolderIndex.search(인메모리) → 결과(+소요 ms)
-                                              ▲ 미리 빌드된 인덱스 (SMB 순회는 시작/갱신 시에만)
-```
+- Frontend: Vue 3 + TypeScript + Vite
+- Backend: FastAPI + Pydantic, `backend/src/` 패키지
+- 검색: 온프레미스 Ollama 질의 확장 + PostgreSQL·MinIO·Neo4j read-only 통합 조회
+- 문서 근거: 선택한 `(doc_id, revision_id)` 범위를 강제한 Hybrid/RRF Chunk 검색
+- 답변: 온프레미스 Ollama만 사용, Citation과 검색 지연 반환
+- 문서 보기: MinIO Preview/Canonical read-only 조회
+- 버전 관계: Neo4j Document/Revision 관계 read-only 조회
+- MCP metadata: 기본 비활성 exact `/mcp`에서 UUID 기반 문서/Revision 상태 1개만 loopback·token 보호로 조회
+- 기안 초안: 선택 문서 근거와 사용자 설명으로 strict V2 초안을 만든 뒤 유형별 품질 편집·주장 검증·결정론적 안전망을 적용하고, 기존 3필드/기안 템플릿과 호환 투영해 SMB 신규 저장한 뒤 대화창 다운로드 제공
+- 기안 평가: 외부 dataset을 읽기 전용으로 받아 근거 25·온프레미스 LLM Judge 내용 45·XLSX 20·도구 흐름 10점으로 채점하고, runtime/model 컨텍스트 초과를 원문 없이 집계
+- 파일 첨부: `[업로드] 문서명_YYYYMMDD_v1.0.확장자` 저장 규칙으로 SMB share 내부 상대 경로에 비덮어쓰기 저장하고, 업로드 직후 대화 참고 파일에 자동 추가해 원본을 즉시 근거로 사용
+- 환경 설정: 왼쪽 하단 설정에서 업로드·기안 상대 경로와 연결 상태만 관리하며 주소·계정·비밀번호는 노출하지 않음
 
-## 두 가지 검색
-
-| 검색 | 무엇으로 찾나 | 엔드포인트 | 저장소 |
-|---|---|---|---|
-| **폴더 찾기** | 폴더 이름·경로 | `POST /find` | 인메모리 인덱스 + JSON 캐시 |
-| **내용 찾기** | 파일 **본문** 키워드 | `POST /search-content` | SQLite **FTS5(trigram)** |
-
-내용 검색은 trigram 토크나이저라 **한국어·영문·검사코드 모두 부분일치**가 되고, 형태소 분석기 같은
-**외부 의존성이 없다**(온프레미스·SSL프록시 환경에 적합). 3글자 미만 질의는 `LIKE`로 폴백한다.
-`docx`/`xlsx`는 stdlib `zipfile`로, `pdf`는 선택 의존성(`pypdf`)으로 본문을 뽑는다.
-
-> ⚠️ **보안**: 내용 인덱스(`.cache/content.fts.db`)에는 환자/검사 **본문**이 들어간다. 원본 공유폴더와
-> 동급의 민감 데이터다 — 로컬에만 두고(`.cache/` 는 `.gitignore`), 외부 전송·커밋 금지.
+현재 제품 경계에서 제외한 항목은 Langflow, 운영용 remote MCP/OAuth·SSO, LangGraph Studio의 운영 관측 사용,
+로컬 SQLite/SMB 직접 인덱싱, 범용 Tool/Skill 편집기, QC·유전검사 데모, 외부 LLM provider입니다. 로컬 read-only
+MCP와 최소 LangGraph Flow는 Bot Main Core 계약 복구 P0로 편입했습니다. DB가 연결되지 않았을 때 규칙 기반 가짜
+결과나 fixture로 대체하지 않고 명시적인 오류를 반환합니다.
 
 ## 구조
 
-| 파일 | 역할 |
+```text
+automation_smb/
+├─ frontend/                         # Vue 원본과 UI 테스트
+├─ backend/
+│  ├─ src/smb_finder/
+│  │  ├─ api.py                      # FastAPI 진입점
+│  │  ├─ llmops_search.py            # 자연어 파일 후보 검색
+│  │  ├─ llmops_multistore_search.py # LLM·PostgreSQL·MinIO·Neo4j 검색 통합
+│  │  ├─ llmops_retrieval.py         # 선택 Revision Hybrid/RRF 검색
+│  │  ├─ llmops_artifacts.py         # MinIO 문서 보기
+│  │  ├─ llmops_graph.py             # Neo4j 버전 관계
+│  │  ├─ auth/                        # 별도 PostgreSQL 로그인·사용자·서비스 권한
+│  │  ├─ bot_core/                    # LangGraph·Router·합성 fake·공통 JSON Model Gateway
+│  │  ├─ mcp_server.py, tooling/       # 공식 MCP v2 단일 metadata tool·bounded timeout
+│  │  ├─ playground/document_*.py    # 선택 문서 채팅 API·서비스·계약
+│  │  ├─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
+│  │  ├─ playground/proposal_*.py    # 선택 문서 기반 구조화 기안·XLSX 생성·다운로드 API
+│  │  └─ evaluation/proposal_*.py    # 기안 dataset preflight·gold 비노출 live 생성·온프레미스 Judge·100점 평가
+│  └─ tests/                         # Backend 단위·계약 테스트
+├─ docs/                             # 목표·현황·설계·운영 문서
+├─ scripts/                          # 실행·품질 검사·기안 평가 CLI
+├─ Dockerfile                        # Vue build + FastAPI non-root image
+├─ compose.yaml                      # runtime env·LAN port·healthcheck
+├─ docker.env.example                # container endpoint override 예시
+├─ pyproject.toml
+└─ uv.lock
+```
+
+핵심 답변 구현은 `backend/src/smb_finder/playground/document_chat.py`에 있다.
+
+`backend/src/smb_finder/web/`은 Vite production 산출물입니다. 직접 수정하지 않고 `npm run build`로 갱신합니다.
+
+## API
+
+| 목적 | Endpoint |
 |---|---|
-| `src/smb_finder/config.py` | `.env` 설정 로더 (SMB·인덱스·LLM·시간예산·내용검색) |
-| `src/smb_finder/models.py` | 입출력 Pydantic 모델 (`Find*`/`ContentSearch*`) |
-| `src/smb_finder/smb_client.py` | SMB 세션 + 트리 순회 (폴더 `walk_folders`, 파일 `walk_files`) |
-| `src/smb_finder/index.py` | 폴더 인메모리 인덱스 + 빠른 검색 + JSON 캐시 |
-| `src/smb_finder/indexer.py` | SMB 순회로 폴더 인덱스 빌드 (시작/백그라운드) |
-| `src/smb_finder/intent.py` | 자연어 → 키워드 (규칙 우선, LLM 선택) |
-| `src/smb_finder/finder.py` | 폴더 검색 오케스트레이터 (정규화→검색→응답, 시간 측정) |
-| `src/smb_finder/extract.py` | 파일 본문 추출 (텍스트/`docx`/`xlsx`/`pdf`, cp949 폴백) |
-| `src/smb_finder/content_index.py` | 내용 FTS5(trigram) 저장 + 검색 (bm25·snippet) |
-| `src/smb_finder/content_indexer.py` | SMB 파일 순회→추출→FTS5 적재 (관리/백그라운드) |
-| `src/smb_finder/content_search.py` | 내용 검색 오케스트레이터 (토큰화→검색, 시간 측정) |
-| `src/smb_finder/api.py` | FastAPI 앱 — `POST /find`·`/search-content`·`/refresh*` (OpenAPI 도구) |
-| `integrations/langflow/` | 노코드 외피 — 이 서비스를 Langflow 커스텀 컴포넌트로 감싼다 ([README](integrations/langflow/README.md)) |
-| `integrations/langgraph/` | LangGraph 외피 — 같은 HTTP 호출을 LangGraph Studio(로컬)로 관리·디버깅 ([README](integrations/langgraph/README.md)) |
+| 멀티스토어 자연어 파일 검색 | `POST /api/playground/files/search` |
+| 선택 문서 근거 대화 | `POST /api/playground/chat` |
+| Preview/Canonical | `GET /api/playground/files/{doc_id}/revisions/{revision_id}/artifacts/{artifact_type}` |
+| 버전 관계 | `GET /api/playground/files/{doc_id}/graph` |
+| 저장소 연결 상태 | `GET /api/playground/stores/status` |
+| 공개 설정 조회 | `GET /api/playground/settings` |
+| 업로드 상대 경로 변경 | `PATCH /api/playground/settings/upload` |
+| 기안 상대 경로 변경 | `PATCH /api/playground/settings/proposal-draft` |
+| LLM 기안 XLSX 생성·SMB 저장 | `POST /api/playground/drafts/proposal` |
+| 기안 필수정보 답변·완성 | `POST /api/playground/drafts/proposal/{draft_id}/clarifications` |
+| 기안 피드백 수정본 XLSX 생성·SMB 저장 | `POST /api/playground/drafts/proposal/{draft_id}/revisions` |
+| 생성 기안 XLSX 다운로드 | `GET /api/playground/drafts/proposal/{draft_id}` |
+| 빈 기안 템플릿 다운로드 | `GET /api/playground/drafts/proposal` |
+| 공유폴더 파일 첨부 | `POST /api/playground/files/upload` |
+| 회원가입 / 로컬·SeeLIS 로그인 / 현재 사용자 / 로그아웃 | `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/seelis-login`, `GET /api/auth/me`, `POST /api/auth/logout` |
+| 관리자 사용자 목록·권한 변경 | `GET /api/users`, `PATCH /api/users/{user_id}` |
+| 서비스 상태 | `GET /health` |
+| Vue 화면 | `GET /playground`, `GET /login`, `GET /register`, `GET /user` |
+| 문서 metadata MCP | `/mcp` (기본 비활성, OpenAPI 비노출, loopback+token) |
 
-## 노코드 외피 (Langflow)
+파일 선택은 화면 상태만 믿지 않습니다. 채팅 요청 직전에 Backend가 선택한 UUID pair가 현재 활성 Revision인지 다시
+검증하며, 변경됐으면 `409 selected_file_stale`을 반환합니다. 업로드 파일도 서버 runtime registry의 UUID pair를 다시
+검증하며, 클라이언트가 보낸 파일명이나 경로를 원본 조회 경로로 신뢰하지 않습니다.
 
-코딩 없이 워크플로를 짜는 외피로 [Langflow](https://github.com/langflow-ai/langflow)를 쓴다.
-`smb_finder` 코드는 그대로 두고, `integrations/langflow/`의 커스텀 컴포넌트가 `POST /find`를
-**사내 localhost로** 호출해 캔버스에 끌어다 쓸 수 있게 감싼다(외부 전송 없음). 자세한 실행은
-[`integrations/langflow/README.md`](integrations/langflow/README.md).
+## 설치와 실행
 
-## 설치 · 실행
+### Backend·Frontend 로컬 분리 실행
 
-```bash
-uv venv --python 3.11 --native-tls          # 사내망 SSL: --native-tls
-uv pip install --native-tls -e ".[dev]"
-cp .env.example .env                         # SMB 자격증명 입력 (실제 값은 ../automation/.env)
+Docker 방식은 그대로 유지한다. 개발 중에는 Backend와 Frontend를 두 터미널에서 직접 실행한다.
+Backend는 `backend/.venv`의 Python 3.11 환경을 사용하고, Frontend는 프로젝트별 `frontend/node_modules`를 사용한다.
+Node.js/npm은 자체적으로 프로젝트 의존성을 격리하므로 Frontend용 Python 가상환경은 만들지 않는다.
+Backend package는 `backend/src`와 연결되는 editable 형태로 가상환경에 설치되므로 소스 수정이 reload에 바로 반영된다.
 
-# 서버 실행
-.venv/Scripts/uvicorn smb_finder.api:app --port 8010 --reload
+최초 한 번 `.env`를 준비하고 의존성을 설치한다. `UV_PROJECT_ENVIRONMENT`는 설치 위치만
+`backend/.venv`로 지정하며, 설치가 끝나면 현재 터미널에서 제거한다. 기존 `.env`가 있으면 복사하지 않는다.
 
-# 폴더 찾기 요청 (이름·경로)
-curl -s -X POST http://localhost:8010/find \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "OO검사 결과 폴더 찾아줘"}'
-
-# 내용 찾기 요청 (파일 본문)
-curl -s -X POST http://localhost:8010/search-content \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "BRCA1 변이 보고서"}'
-
-# 폴더 인덱스 갱신 (이름 검색용)
-curl -s -X POST http://localhost:8010/refresh
-
-# 내용 DB화 — 원하는 폴더만 인덱싱 (path 지정)
-curl -s -X POST http://localhost:8010/refresh-content \
-  -H 'Content-Type: application/json' \
-  -d '{"path": "검사결과/2026/OO검사"}'
+```powershell
+cd C:\VSCodeWorkSpace\automation_smb
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+$env:UV_PROJECT_ENVIRONMENT = "$PWD\backend\.venv"
+uv sync --python 3.11 --native-tls --frozen --extra dev
+Remove-Item Env:UV_PROJECT_ENVIRONMENT
+npm.cmd --prefix .\frontend ci
 ```
 
-> 내용 인덱스는 추출이 무거워 **시작 시 자동 빌드하지 않는다.** 공유 전체를 한 번에 돌지 않고,
-> `/refresh-content`에 **폴더 경로(path)**를 줘서 원하는 폴더만 DB화한다(여러 폴더는 누적, 같은 폴더는
-> 갱신, `path` 생략 시 전체). 이후 `/search-content`는 떠 있는 인덱스에서 즉시 검색한다.
-> (`PDF` 본문까지 쓰려면 `uv pip install -e ".[pdf]"`).
+사내 SSL 검사 때문에 `invalid peer certificate: UnknownIssuer`가 발생한 경우에만 공개 Python index와 wheel host를
+설치 명령 한 번에 한정해 허용한 후 다시 실행한다.
 
-## 테스트 · 린트
-
-```bash
-.venv/Scripts/python -m pytest tests/ -m "not integration"   # 라이브 SMB 불필요
-.venv/Scripts/python -m ruff check src tests
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = "$PWD\backend\.venv"
+uv sync --python 3.11 --native-tls --frozen --extra dev `
+  --allow-insecure-host pypi.org `
+  --allow-insecure-host files.pythonhosted.org
+Remove-Item Env:UV_PROJECT_ENVIRONMENT
 ```
 
-## 다음 단계
+첫 번째 터미널에서 Backend 가상환경을 활성화하고, Docker 기본 포트 `8011`과 충돌하지 않는 `8010`에서
+reload 개발 서버를 직접 실행한다.
 
-- **의미 검색(벡터) — 같은 SQLite에 추가**: 현재 키워드(FTS5) 위에, 표현이 달라도 의미가 가까운
-  검색을 위해 **로컬 임베딩 + 벡터**를 얹어 하이브리드(RRF)로 융합. 외부 전송 금지 원칙상 임베딩은
-  온프레미스 로컬 모델로. 실제 필요성 확인 후 진행.
-- `hwp`/`hwpx` 본문 추출 추가 (진단검사실에 흔함 — OLE/zip 파서, 선택 의존성)
-- 내용 인덱스 **증분 갱신**(mtime 비교) — 현재는 전체 재색인
-- 음성(STT) 입력 추가 — L1, 로컬 모델 (`OS.md` 8장 미확정 항목)
-- 실측으로 시간 예산(`FIND_BUDGET_MS`/`CONTENT_SEARCH_BUDGET_MS`) 조정
+```powershell
+cd C:\VSCodeWorkSpace\automation_smb
+cd .\backend
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --reload --host 127.0.0.1 --port 8010
+```
+
+두 번째 터미널에서 Vite 개발 서버를 직접 시작한다. `/api`와 `/health` 요청은 기본적으로 Backend `8010`으로 전달된다.
+
+```powershell
+cd C:\VSCodeWorkSpace\automation_smb
+cd .\frontend
+npm run dev
+```
+
+- Frontend: `http://127.0.0.1:5173/playground/`
+- Backend OpenAPI: `http://127.0.0.1:8010/docs`
+- Backend health: `http://127.0.0.1:8010/health`
+- Backend·Frontend 중지: 각 실행 터미널에서 `Ctrl+C`
+- Backend 가상환경 종료: Backend 터미널에서 `deactivate`
+
+`backend/.venv`와 `frontend/node_modules`는 Git에서 제외된다. Backend 포트를 변경하려면 Frontend 실행 전에
+`$env:VITE_BACKEND_URL = "http://127.0.0.1:<변경한 포트>"`를 설정한다. Frontend `5173`이 이미 사용 중이면 Vite는
+`5174`처럼 다음 사용 가능한 포트로 자동 시작하므로, 터미널에 표시된 `Local` 주소로 접속한다.
+
+인증 저장소는 기존 LLMOps read-only 계정과 분리한다. `.env`의 `AUTH_DB_USER`·`AUTH_DB_PASSWORD`에 `AUTH_DB_SCHEMA`을
+생성하고 쓸 수 있는 별도 계정을 넣으면 Backend 시작 시 `users`, `services`, `user_service_permissions`, `sessions`를
+idempotent하게 만든다. 최초 관리자 생성 시에만 `AUTH_INITIAL_ADMIN_PASSWORD`를 넣고, 생성 확인 뒤 즉시 값을 지운다.
+가입 사용자는 기본적으로 `user`, 서비스 접근 없음이며 관리자가 `/user` 화면에서 권한을 명시적으로 부여한다.
+합성 데이터 전용 로컬 DB의 기존 계정에 인증 schema 쓰기 권한을 따로 확인한 경우에만
+`AUTH_DB_USE_LLMOPS_CREDENTIALS=true`로 명시적 재사용할 수 있으며, 운영에서는 별도 최소 권한 계정을 사용한다.
+
+### 기존 단일 서비스 로컬 실행
+
+```powershell
+cd C:\VSCodeWorkSpace\automation_smb
+npm.cmd --prefix .\frontend run build
+cd .\backend
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --reload --host 127.0.0.1 --port 8011
+```
+
+화면은 `http://127.0.0.1:8011/playground`, OpenAPI는 `http://127.0.0.1:8011/docs`에서 확인합니다. `.env`에는
+PostgreSQL·MinIO·Neo4j의 read-only 계정, 온프레미스 Ollama 주소와 필요할 때 SMB 접속 정보를 넣습니다. SMB 첨부와
+기안 자동 저장은 `SMB_UPLOAD_ENABLED=true`로 명시적으로 켜야 하며, 실제 값·내부 주소·파일 목록은 코드·문서·로그에
+기록하지 않습니다.
+
+MCP는 환경에서 `MCP_ENABLED=true`와 별도 `MCP_API_TOKEN`을 함께 주입한 경우에만 활성화됩니다. 기본값은 404이며,
+remote MCP/OAuth·MCP UI·write/admin/index/download tool은 현재 범위에 포함하지 않습니다. `.env*` 값은 승인 없이
+수정하지 않습니다.
+
+### Docker와 LAN 실행
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\docker\prepare_env.ps1
+docker compose build
+docker compose up -d
+```
+
+로컬 주소는 `http://127.0.0.1:8011/playground`, 같은 LAN의 다른 PC에서는
+`http://<Docker-host-LAN-IPv4>:8011/playground`를 사용합니다. 포트 충돌, 사내 SSL 검사, Windows 방화벽과
+컨테이너 endpoint 설정은 [Docker 배포 문서](docs/DOCKER_DEPLOYMENT.md)를 따릅니다. `8013`은 기본값이 아니라
+필요할 때 현재 셸에서 `$env:AUTOMATION_SMB_PORT = "8013"`으로 지정하는 host port override입니다.
+
+## 테스트
+
+```powershell
+$env:UV_PROJECT_ENVIRONMENT = "$PWD\backend\.venv"
+try {
+  uv run --no-sync python scripts/evaluate_quality.py
+  uv run --no-sync pytest -m "not integration" backend/tests
+} finally {
+  Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue
+}
+npm.cmd --prefix .\frontend run typecheck
+npm.cmd --prefix .\frontend run test
+npm.cmd --prefix .\frontend run build
+```
+
+영구 삭제 승인 전까지 `backend/tests/`에는 실행 경로에서 분리된 레거시 테스트가 물리적으로 남아 있습니다. exact list
+8개만 수집하지 않으므로 위와 같이 `UV_PROJECT_ENVIRONMENT=backend/.venv`를 지정한 뒤 활성 비통합 전체 suite를
+실행할 수 있습니다.
+
+실제 연결 smoke는 합성 데이터가 들어 있는 read-only DB 저장소에서 수행합니다. SMB 쓰기 smoke는 승인된 합성 파일과
+설정된 업로드 하위 폴더에서만 별도로 수행합니다.
+
+```powershell
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8011/api/playground/files/search `
+  -ContentType 'application/json' -Body '{"query":"합성 WBS 찾아줘","limit":5}'
+
+Invoke-RestMethod -Uri http://127.0.0.1:8011/api/playground/stores/status
+```
+
+## 문서
+
+- [현재 개발 목표와 계획](docs/PRODUCT_DEVELOPMENT_PLAN.md)
+- [Bot Main Core WBS 감사와 구현 계획](docs/BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md)
+- [구현 현황](docs/IMPLEMENTATION_STATUS.md)
+- [정리 인벤토리](docs/CLEANUP_INVENTORY.md)
+- [DB 연동 계약](docs/DATASET_DB_INTEGRATION_PLAN.md)
+- [Frontend 구조](docs/FRONTEND_ARCHITECTURE.md)
+- [로그인·회원가입·사용자 권한 관리](docs/AUTHENTICATION_AND_USER_MANAGEMENT.md)
+- [개발 환경](docs/DEVELOPMENT_SETUP.md)
+- [Docker 배포와 LAN 접속](docs/DOCKER_DEPLOYMENT.md)
+- [파일 첨부와 설정](docs/FILE_UPLOAD_AND_SETTINGS.md)
+- [기안 초안 작성](docs/PROPOSAL_DRAFT.md)
+- [기안 생성 도구 평가](docs/PROPOSAL_EVALUATION.md)
+- [운영 아키텍처](docs/PRODUCTION_ARCHITECTURE.md)
+- [품질 기준](docs/PROJECT_QUALITY_RUBRIC.md)
+- [개발 교훈](docs/DEVELOPMENT_LESSONS.md)
