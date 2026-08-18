@@ -1,10 +1,11 @@
 # automation-smb 코드 우선 도구·LangChain·MCP 아키텍처
 
-> 상태: 검색 2개의 공통 계약·executor·catalog 기반 `/mcp` 등록 완료, 나머지 업무 tool 이관 대기 — 이 문서는
-> 현재 구조와 단계적 목표를 함께 정의한다. 상세 구현 순서와 검증 결과는
-> [MCP_IMPLEMENTATION_PLAN.md](MCP_IMPLEMENTATION_PLAN.md)를 따른다.
+> 상태: 과거 검색 2개 prototype 구조와 단계적 목표를 정의한 설계 자산이다. 활성 FastAPI에는 `/mcp`가 연결되지
+> 않았고 레거시 catalog 테스트도 현재 모델 계약과 맞지 않으므로, 활성 제품 완료 상태로 사용하지 않는다. 최우선 구현
+> 순서와 인수 기준은 [Bot Main Core 구현 계획](BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md), MCP 세부 이관 설계는
+> [MCP 구현 계획](MCP_IMPLEMENTATION_PLAN.md)을 따른다.
 >
-> 기준일: 2026-07-24
+> 기준일: 2026-08-14
 
 ## 1. 결론
 

@@ -18,9 +18,9 @@ class ChatMessage(BaseModel):
 
 
 class SelectedFileContext(BaseModel):
-    """DB 검색 결과에서 사용자가 명시적으로 선택한 활성 Revision."""
+    """DB 검색 결과 또는 방금 업로드한 파일의 서버 발급 참조."""
 
-    source: Literal["llmops"] = "llmops"
+    source: Literal["llmops", "upload"] = "llmops"
     doc_id: UUID
     revision_id: UUID
     file_name: str = Field(min_length=1, max_length=512)

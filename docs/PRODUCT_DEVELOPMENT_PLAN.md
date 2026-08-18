@@ -10,7 +10,7 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 3. 검색 후보의 `버전 확인`으로 선택 전에도 Neo4j 버전 관계를 바로 조회한다.
 4. 사용자가 후보를 선택하면 `(doc_id, revision_id)`가 중앙 대화 범위에 들어간다.
 5. 중앙 질문은 선택 Revision의 Chunk만 Hybrid/RRF로 검색하고 온프레미스 Ollama가 Citation과 함께 답한다.
-6. 오른쪽 기능은 선택 문서의 `문서 요약`, `보고서 초안`만 제공한다.
+6. 오른쪽 `기안 초안 작성`은 선택 문서를 근거로 사용자 설명을 받은 뒤 LLM의 제목·결재 요청·본문 JSON을 XLSX로 생성한다.
 7. 필요할 때 MinIO 미리보기를 조회한다.
 8. 사용자가 파일을 첨부하면 승인된 SMB share의 설정된 상대 경로에 비덮어쓰기 저장하고 `indexed=false`를 알린다.
 
@@ -28,15 +28,26 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 - 온프레미스 Ollama 근거 답변
 - Citation, 저장소 상태, 지연 측정
 - 검색 결과별 Neo4j 버전 관계 read-only 조회
-- 중앙 선택 문서 대화와 별도 실행 기능 `문서 요약`, `보고서 초안`
+- 중앙 선택 문서 대화와 별도 실행 기능 `문서 요약`, `기안 초안 작성`
+- 원본 서식을 보존한 LLM 제목·결재 요청·본문 기안 XLSX 생성·SMB 신규 저장·대화창 다운로드와 상대 경로 설정
 - MinIO Preview/Canonical read-only 조회
 - 명시적으로 활성화한 SMB 파일 첨부와 비밀 없는 상대 경로 설정
 - 로그인·회원가입·관리자 사용자 관리와 PostgreSQL `auth` schema 권한 저장
 - 관리자·최고 관리자 분리와 전체 또는 서비스별 접근 권한 모델
 
+### P0로 편입
+
+- 활성 `DocumentRuntime` 계약을 사용하는 FastAPI·LangGraph 최소 Flow와 결정론적 Router
+- 외부 DB·LLM 없이 실행되는 Mock Retriever/Model 프로필
+- 공통 Model Gateway와 Citation·Policy·오류 계약
+- 활성 FastAPI lifespan에 연결되는 read-only MCP Metadata Tool
+- 서버 소유 다중 턴 상태가 생길 때만 재개하는 Session Cache 보류 기준
+- 위 항목의 상세 순서와 완료 기준은 [Bot Main Core 구현 계획](BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md)을 따른다.
+
 ### 현재 제외
 
-- Langflow, LangGraph Studio, MCP
+- Langflow와 운영용 remote MCP/OAuth·SSO
+- LangGraph Studio의 운영 관측·평가 저장소 사용
 - 로컬 SQLite/SMB 직접 인덱싱과 `/find`, `/search-content`
 - 범용 Tool Lab, Skill CRUD
 - 첨부 파일 자동 변환·DB 인덱싱·버전 관계 생성
@@ -50,7 +61,17 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 
 ## 3. 현재 우선순위
 
-### P0 — 수직 흐름 안정화
+### P0-A — Bot Main Core 계약 복구
+
+- 현재 FastAPI와 레거시 MCP·LangGraph 실험의 실행 경계를 먼저 고정
+- FastAPI + 최소 graph + Mock Retriever/Model 수직 슬라이스
+- 공통 Model Gateway로 검색어 확장·근거 답변의 timeout·오류 계약 통합
+- read-only `get_document_metadata` 한 개와 bounded timeout/concurrency를 활성 FastAPI lifespan에 연결
+- Session Cache는 서버가 복원할 상태·authenticated principal·허용 schema·worker miss 의미가 확정될 때까지 보류
+- 추가 metadata tool은 실제 소비 흐름이 승인된 뒤 별도 수직 슬라이스로 검토
+- 삭제된 `FolderIndex`·SQLite 계약을 되살려 레거시 테스트만 통과시키는 방식은 사용하지 않음
+
+### P0-B — 수직 흐름 안정화
 
 - 실제 저장소 연결에서 검색 → 선택 → 채팅 회귀 테스트
 - 검색 결과 정확도와 활성 Revision 검증

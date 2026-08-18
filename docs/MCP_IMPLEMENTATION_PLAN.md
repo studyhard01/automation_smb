@@ -1,566 +1,110 @@
-# automation-smb 코드 우선 MCP 구현 계획
+# MCP 문서 메타데이터 도구 구현 계획
 
-> 상태: M0–M2 로컬 MVP 구현 완료, 검색 2개의 catalog 기반 직접 등록 완료 — 공통 catalog 확장, 사내 다중 사용자 공개,
-> OAuth/SSO와 LangGraph client 전환은 후속 단계다.
+> 상태: **첫 수직 슬라이스 구현 완료**
 >
-> 기준일: 2026-07-24
+> 기준일: 2026-08-14
 >
-> 상위 설계: [TOOL_MCP_LANGCHAIN_ARCHITECTURE.md](TOOL_MCP_LANGCHAIN_ARCHITECTURE.md)
-
-> **2026-07-24 구조 결정:** 업무 tool은 Python 도메인 코드와 Pydantic 계약으로 먼저 구현한다. Playground는
-> 공통 executor를 in-process로 사용하고, 외부 client만 `/mcp`에서 명시적으로 승인된 tool을 호출한다. QC 도구의
-> catalog 이관과 MCP 공개 여부는 실제 SOP 계약과 운영 경계가 확정된 뒤 각각 별도 결정한다.
-
-## 1. 구현 결정 요약
-
-MCP MVP는 기존 FastAPI 프로세스에 `/mcp` Streamable HTTP 앱을 마운트한다. 별도 `stdio` 프로세스를 먼저
-만들지 않는다. 현재 `Finder`, `ContentSearcher`, 메모리 인덱스, SQLite FTS5 연결이 FastAPI lifespan의
-`_state`에서 관리되기 때문에 같은 프로세스를 사용해야 초기화 중복과 불필요한 HTTP 우회를 피할 수 있다.
-
-MVP 공개 도구는 다음 두 개로 고정한다.
-
-- `find_folder`
-- `search_content`
-
-다음 기능은 MVP MCP 범위에서 제외한다.
-
-- `refresh_content`와 모든 관리자 API
-- SMB 쓰기·이동·삭제
-- `cytogenetics_report`, `ngs_report`
-- `cytogenetics_karyotype_summary`
-- MCP Resources, Prompts, Sampling
-- LangGraph Agent의 즉시 교체
-- 사내망 전체 공개와 사용자별 SSO
-
-기존 REST와 Playground 계약은 그대로 유지한다. MCP는 feature flag로 독립 활성화하며 문제가 생기면 설정 하나로
-비활성화할 수 있어야 한다.
-
-## 2. 재검토에서 바뀐 내용
-
-상위 설계 문서의 방향은 유지하되 실제 착수 순서를 다음처럼 수정한다.
-
-| 항목 | 이전 초안 | 확정 계획 |
-|---|---|---|
-| 첫 전송 방식 | 로컬 `stdio` 우선 | 기존 FastAPI에 Streamable HTTP `/mcp` 마운트 |
-| 공통 도구 전환 | 모든 도구를 한 번에 이관 가능 | 검색 두 개만 공통 계약으로 먼저 이관 |
-| LangGraph | MCP와 함께 전환 가능 | MCP MVP 이후 별도 호환성 업그레이드로 분리 |
-| 핵형요약 | 초기 공개 후보 | 로컬 LLM 정책 검증 후 마지막 단계 |
-| 관리자 도구 | catalog 등록 후 숨김 가능 | MCP catalog 자체에 등록하지 않음 |
-| timeout | 정의값 중심 | soft timeout과 동시 실행 제한을 실제 executor에서 집행 |
-
-현재 `integrations/langgraph/smb_agent/tools.py`에는 `find_folder`, `search_content`, `refresh_content`의 LangChain
-`@tool` HTTP 래퍼가 별도로 있다. 이 래퍼는 MCP MVP가 안정화될 때까지 rollback 경로로 남겨두고, 이후
-`langchain-mcp-adapters`로 교체한다.
-
-## 3. MVP 목표 구조
-
-```mermaid
-flowchart TB
-    client["승인된 로컬 MCP Client"] -->|"Streamable HTTP"| endpoint["FastAPI /mcp"]
-    rest["기존 REST·Playground"] --> runtime["공유 FastAPI Runtime"]
-    endpoint --> mcp["FastMCP Adapter"]
-    mcp --> executor["ToolExecutor"]
-    runtime --> executor
-    catalog["ToolCatalog<br/>검색 도구 2개"] --> executor
-    executor --> finder["Finder"]
-    executor --> content["ContentSearcher"]
-    finder --> memory["메모리 폴더 인덱스"]
-    content --> fts["SQLite FTS5"]
-    admin["관리자 API"] --> jobs["백그라운드 인덱싱 Job"]
-    jobs -->|"읽기 전용"| smb["SMB 공유폴더"]
-    jobs --> memory
-    jobs --> fts
-```
-
-MCP 요청은 SMB를 실시간 순회하지 않는다. 인덱스가 준비되지 않았으면 제한된 실시간 fallback을 새로 만들지 않고
-안전한 `runtime_not_ready` 오류를 즉시 반환한다.
-
-## 4. 기술 기준
-
-### 4.1 MCP SDK
-
-- 공식 Python SDK `mcp>=1.28.1,<2`
-- 2026-07-14 기준 v1.28.1이 최신 안정 버전
-- v2 프리릴리스는 이번 구현에 사용하지 않음
-- 실제 해석 버전은 `uv.lock`으로 고정
-- 런타임에는 `mcp[cli]`를 넣지 않음
-- MCP Inspector는 선택적 개발 도구로만 사용
-
-### 4.2 전송과 ASGI 수명주기
-
-FastMCP 설정은 다음을 기준으로 한다.
-
-```python
-FastMCP(
-    "automation-smb-search",
-    stateless_http=True,
-    json_response=True,
-    streamable_http_path="/mcp",
-)
-```
-
-Starlette의 일반 sub-app mount가 `/mcp`를 `/mcp/`로 redirect하는 동작을 피하기 위해 exact ASGI route를
-사용한다. FastMCP 내부 경로와 최종 endpoint를 모두 `/mcp`로 유지하며, 기존 REST route의 404/405 계약에는
-영향을 주지 않는다. FastAPI lifespan에서 기존 검색 runtime과 `mcp.session_manager.run()`을 함께 시작하고
-함께 종료한다.
-
-SSE 전용 endpoint는 만들지 않는다. `stdio`는 데스크톱 MCP Host가 반드시 요구할 때 `/mcp`를 호출하는 로컬
-브리지로 별도 검토한다.
-
-### 4.3 설정
-
-`.env.example`에는 값이 비어 있거나 안전한 기본값만 들어간다.
-
-| 환경변수 | 기본값 | 의미 |
-|---|---|---|
-| `MCP_ENABLED` | `false` | `/mcp` 마운트 여부 |
-| `MCP_ALLOW_REMOTE` | `false` | loopback 외 클라이언트 허용 여부 |
-| `MCP_API_TOKEN` | 빈 값 | MCP 전용 bearer token; 활성화할 때 필수 |
-| `MCP_ALLOWED_HOSTS` | `127.0.0.1,localhost,[::1]` | 허용할 Host 목록 |
-| `MCP_ALLOWED_ORIGINS` | 빈 값 | 허용할 Origin 목록; wildcard 금지 |
-| `MCP_MAX_BODY_BYTES` | `65536` | MCP 요청 본문 크기 상한 |
+> 상위 계획: [Bot Main Core 구현 계획](BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md)
 
-`ADMIN_API_TOKEN`은 MCP 인증에 재사용하지 않는다. `MCP_ALLOW_REMOTE=true`인데 `MCP_API_TOKEN`이 비어 있으면
-안 되는 것뿐 아니라, `MCP_ENABLED=true`이면 remote 여부와 관계없이 `MCP_API_TOKEN`을 요구한다. 값이 비어 있으면
-서버 시작을 실패시키거나 MCP를 비활성화해야 한다. 토큰은 constant-time으로 비교하며 요청·오류·trace·로그에
-남기지 않는다. 기본 CORS는 비활성화하고 64KiB 초과 요청은 본문을 반사하지 않는 413 오류로 거부한다.
-
-## 5. 공통 도구 계약
-
-### 5.1 ToolSpec
-
-프레임워크 중립적인 `ToolSpec`을 `@dataclass(frozen=True)`로 정의한다. Pydantic은 도구 입출력 계약에만 사용한다.
-
-```python
-@dataclass(frozen=True)
-class ToolSpec:
-    id: str
-    description: str
-    input_model: type[BaseModel]
-    output_model: type[BaseModel]
-    handler: ToolHandler
-    timeout_resolver: TimeoutResolver
-    allowed_surfaces: frozenset[ToolSurface]
-    permission: Literal["read", "admin"]
-    read_only: bool
-    destructive: bool
-    idempotent: bool
-    open_world: bool
-```
+## 1. 목적과 현재 결정
 
-MVP에서는 검색 두 개만 공통 `ToolCatalog`로 옮긴다. 기존 보고서·관리자 도구는 현재 registry에 남기되,
-`playground/tools.py`가 공통 검색 spec과 기존 spec을 합치는 호환 shim 역할을 한다. `ToolExecutor`는 tool ID
-조건문이 아니라 spec의 handler와 timeout resolver를 실행하며 MCP adapter는 `allowed_surfaces`를 순회해 등록한다.
-
-### 5.2 입력 계약
+현재 MCP의 목적은 챗봇이 선택한 문서의 식별자와 revision 상태를 안전하고 빠르게 확인하는 것이다. 공개 도구는
+`get_document_metadata` 하나로 제한한다. 사용되지 않는 범용 catalog, REST 대응 endpoint, 원격 인증 체계 또는
+미래 도구용 추상화는 만들지 않는다.
 
-| 도구 | 입력 | 제한 |
-|---|---|---|
-| `find_folder` | `query: str`, `limit: int | None` | 빈 문자열 거부, 상위 N건, 서버 기본 limit 우선 |
-| `search_content` | `query: str`, `limit: int | None` | 빈 문자열 거부, 상위 N건, 서버 기본 limit 우선 |
-
-검색어와 limit의 정확한 상한은 현재 REST의 정상 요청을 깨지 않는 값으로 정하고 characterization test로 고정한다.
-MCP 입력에서는 host, share, 경로 override, provider, model, API key를 받지 않는다.
+Session Cache는 구현하지 않는다. 현재 대화 이력은 프런트엔드가 요청마다 전달하고, 서버 graph에는 복원할 상태와
+인증된 사용자 주체가 없기 때문이다. 지금 cache를 추가하면 사용되지 않는 코드이거나 이력의 이중 진실 원천이 된다.
 
-### 5.3 출력 계약
+## 2. 구현 범위
 
-MCP 구조화 결과는 필요한 최소 필드만 반환한다.
+- 공식 MCP Python SDK v2의 Streamable HTTP를 기존 FastAPI lifespan에 연결한다.
+- `MCP_ENABLED=false`가 기본이며 이때 `/mcp`는 404다.
+- 활성화할 때는 별도 bearer token이 필요하고 loopback 요청만 허용한다.
+- `get_document_metadata(doc_id, revision_id?)`는 PostgreSQL의 현재 `documents`와 `document_revisions`를 한 번의
+  read-only query로 조회한다.
+- `revision_id`를 생략하면 active revision을 해석하고, 지정하면 해당 revision의 존재와 active 여부를 반환한다.
+- bounded executor가 timeout과 최대 동시 실행 수를 집행한다.
+- `/mcp`만 정확히 노출하며 `/mcp/` redirect와 다른 하위 경로는 허용하지 않는다.
 
-| 도구 | 허용 필드 |
-|---|---|
-| `find_folder` | 결과 이름, 공유 루트 기준 상대경로, 점수, 깊이, 결과 수, `elapsed_ms`, `over_budget` |
-| `search_content` | 결과 이름, 공유 루트 기준 상대경로, 확장자, 점수, 결과 수, `elapsed_ms`, `over_budget` |
+범위 밖:
 
-다음은 MVP MCP 결과에서 제외한다.
+- 삭제된 `FolderHit`, `ContentSearchRequest`, SQLite/직접 SMB 검색 계약 복원
+- `find_folder`, `search_content`, write/admin/index/download 도구
+- REST parity endpoint와 프런트엔드 MCP 관리 화면
+- remote MCP, OAuth/SSO, 사용자별 ACL
+- 범용 provider/도구 registry, retry framework, feature flag 계층
 
-- SMB host와 share 이름
-- 자격증명과 내부 IP
-- UNC·로컬 절대경로
-- 원본 query 복제
-- 문서 본문과 snippet
-- 인덱스 DB의 실제 로컬 경로
+## 3. 공개 계약
 
-MCP 도구에는 다음 annotation을 사용한다.
+입력:
 
-- `readOnlyHint=true`
-- `destructiveHint=false`
-- `idempotentHint=true`
-- `openWorldHint=false`
+- `doc_id`: UUID, 필수
+- `revision_id`: UUID, 선택
 
-## 6. ToolExecutor 책임 경계
+출력은 다음 필드만 허용한다.
 
-`ToolExecutor`가 담당하는 것:
+- `source`
+- `doc_id`
+- `revision_id`
+- `is_active`
+- `revision_status`
+- `extension`
+- `size_bytes`
+- `modified_at`
+- `elapsed_ms`
+- `over_budget`
+- `degraded_dependencies`
 
-1. 도구 존재와 활성화 여부
-2. 호출 surface별 allowlist
-3. `permission`과 MCP 공개 여부
-4. Pydantic 입력·출력 검증
-5. 도구 timeout과 동시 실행 제한
-6. 결과 건수 제한과 redaction
-7. `elapsed_ms`, `over_budget`, 안전한 `error_code`
-8. 민감 본문 없는 감사 이벤트
+filename, title, path, URI, object key, 본문, snippet, excerpt, 원본 query, credential은 SQL SELECT와 출력에서 모두
+제외한다. 오류는 `isError=true`와 안전한 메시지, namespaced `_meta`의 `code`, `retryable`, `elapsed_ms`로 반환하며
+내부 예외 상세는 노출하지 않는다.
 
-`ToolExecutor`가 담당하지 않는 것:
+## 4. 설정과 lifecycle
 
-- Agent 최대 step
-- Agent의 중복·재귀 tool call 차단
-- LLM plan과 최종 답변 생성
-- 대화 history 관리
+| 설정 | 기본값 | 역할 |
+|---|---:|---|
+| `MCP_ENABLED` | `false` | `/mcp` 활성화 여부 |
+| `MCP_API_TOKEN` | 빈 값 | 활성화 시 필수인 전용 bearer token |
+| `MCP_METADATA_TIMEOUT_MS` | `1500` | metadata 전체 실행 예산 |
+| `MCP_METADATA_MAX_CONCURRENCY` | `2` | 동시 metadata worker 상한 |
 
-이 항목들은 현재 `PlaygroundAgent` 또는 이후 LangGraph 오케스트레이션이 담당한다. 정책 경계를 분리해 단순 MCP
-호출에 Agent 상태가 섞이지 않게 한다.
+`.env`와 `.env.*`는 이 구현에서 수정하지 않는다. 활성화 시 FastAPI lifespan이 MCP session manager와 bounded
+executor를 소유하며, 종료 시 새 작업을 막고 실행 중 작업을 정리한 뒤 PostgreSQL adapter를 닫는다.
 
-현재 도구 함수는 동기식이므로 timeout이 발생해도 실행 중인 worker thread를 안전하게 강제 종료할 수 없다.
-읽기 전용·멱등 도구에 한해 soft timeout을 사용하고, 취소된 호출의 thread를 버릴 수 있게 하며, semaphore로 동시
-실행 수를 제한한다. 이 제한은 인덱스 검색이 장시간 점유될 때 thread가 누적되는 것을 막기 위한 필수 조건이다.
+## 5. Session Cache 보류 조건
 
-## 7. 보안 경계
+다음 조건이 모두 확정될 때 별도 수직 슬라이스로 다시 설계한다.
 
-### 7.1 로컬 MVP
+1. 다음 요청에서 서버가 복원해야 하는 실제 multi-turn 상태가 생긴다.
+2. 안정적인 authenticated principal 계약이 생긴다.
+3. 저장을 허용할 state schema가 확정된다.
+4. single/multi-worker cache miss 의미가 정해진다.
 
-- `MCP_ENABLED=false`가 기본값
-- 활성화 후에도 loopback 요청만 허용
-- 활성화하려면 별도 `MCP_API_TOKEN`이 반드시 필요
-- Host를 `127.0.0.1`, `localhost`, `[::1]`로 제한
-- 요청의 `Origin`이 존재하면 명시적 allowlist로 검증
-- CORS `*` 사용 금지
-- 요청 본문을 64KiB로 제한
-- 실제 SMB와 환자 데이터 대신 합성·비식별 fixture로 검증
+그전까지 `session_id`는 correlation ID이며 프로세스 재시작, worker 변경, cache miss가 응답 정확성에 영향을 주지
+않아야 한다. cache 설정, metric, 관리 API와 UI도 추가하지 않는다.
 
-### 7.2 remote 전환 조건
+## 6. 검증 기준
 
-다음 조건이 모두 갖춰지기 전에는 `MCP_ALLOW_REMOTE=true`를 사용하지 않는다.
+- 기본 `/mcp` 404, 활성화된 정확한 `/mcp`는 redirect 없이 initialize 성공
+- `tools/list`에 `get_document_metadata` 정확히 하나
+- UUID 입력 검증, active resolve, 지정 revision의 active/stale 상태, not-found 오류
+- read-only SQL과 금지 필드 비선택·비노출
+- loopback/Host/bearer 거절과 안전한 MCP 오류 직렬화
+- timeout 후 worker 슬롯 누적 방지, 최대 동시 실행 수와 shutdown 정리
+- 공개 REST/OpenAPI와 프런트엔드 계약 변화 없음
+- legacy MCP/tooling 테스트를 현재 계약으로 교체하고 quarantine을 10개에서 8개로 축소
 
-- 별도 `MCP_API_TOKEN` 또는 사용자별 OAuth/SSO
-- 사내망 방화벽·reverse proxy 접근제어
-- Origin·Host 검증
-- TLS 종단 위치 확정
-- 사용자별 도구 allowlist
-- 감사 로그 보존·접근 정책
-- 승인된 MCP Host 목록
-
-MCP 서버는 연결한 Host가 도구 결과를 외부 모델이나 자체 trace에 전달하는 것을 기술적으로 완전히 통제할 수 없다.
-따라서 운영 연결 대상은 로컬·온프레미스 Host로 한정하고 외부 provider를 쓰는 클라이언트에는 연결하지 않는다.
-
-### 7.3 감사 로그
-
-기록 가능한 필드:
-
-- correlation ID
-- client 구분값 또는 비식별 hash
-- tool ID
-- 허용·차단·성공·실패 판정
-- `elapsed_ms`, `over_budget`, result count
-- 안전한 `error_code`
-
-기록 금지 필드:
-
-- query와 tool arguments 원문
-- 결과 이름·경로·본문
-- 자격증명·token·내부 주소
-- 원본 ISCN
-
-## 8. 단계별 작업 계획
-
-### M0 — 회귀 기준 고정
-
-목표: 구조 변경 전에 현재 동작을 테스트로 고정한다.
-
-- 현재 Playground 도구 목록과 권한 metadata 확인
-- `/find`, `/search-content` 결과 정렬·건수·오류 확인
-- 관리자 도구 자동 실행 차단 확인
-- 외부 provider 차단과 redaction 확인
-- REST operation ID 유지 확인
-- 테스트는 fake runtime과 임시 SQLite를 사용하고 실제 SMB·외부 LLM을 호출하지 않음
-
-완료 gate:
-
-- 관련 기존 테스트 통과
-- 추가 characterization test 통과
-- 작업 전후 REST 응답 계약 diff 없음
-
-### M1 — 공통 검색 ToolCatalog와 ToolExecutor
-
-목표: 검색 두 개만 공통 계약과 executor를 사용한다.
-
-신규 파일 후보:
-
-```text
-backend/src/smb_finder/tooling/__init__.py
-backend/src/smb_finder/tooling/contracts.py
-backend/src/smb_finder/tooling/catalog.py
-backend/src/smb_finder/tooling/executor.py
-backend/tests/test_tooling.py
-```
-
-수정 파일 후보:
-
-```text
-backend/src/smb_finder/playground/tools.py
-backend/src/smb_finder/playground/agent.py
-backend/tests/test_playground.py
-```
-
-완료 gate:
-
-- 기존 `build_tool_registry()` import와 반환 계약 유지
-- 검색 결과·오류·지연 필드 parity 통과
-- 관리자·보고서 tool 동작 변화 없음
-- executor가 MCP surface에서 admin tool을 실행하지 못함
-
-### M2 — FastAPI `/mcp` MVP
-
-목표: 기존 runtime을 공유하는 읽기 전용 MCP endpoint를 제공한다.
-
-신규 파일 후보:
-
-```text
-backend/src/smb_finder/mcp_server.py
-backend/src/smb_finder/tooling/adapters/__init__.py
-backend/src/smb_finder/tooling/adapters/mcp.py
-backend/tests/test_mcp_server.py
-```
-
-수정 파일 후보:
-
-```text
-backend/src/smb_finder/api.py
-backend/src/smb_finder/config.py
-.env.example
-pyproject.toml
-uv.lock
-README.md
-docs/TOOL_MCP_LANGCHAIN_ARCHITECTURE.md
-```
-
-완료 gate:
-
-- `MCP_ENABLED=false`이면 `/mcp`가 404
-- 활성화하면 `tools/list`가 정확히 검색 도구 두 개만 반환
-- `tools/call`이 기존 Finder·ContentSearcher를 한 번만 실행
-- MCP와 REST 결과의 건수·정렬 parity 통과
-- runtime 미준비, 빈 query, timeout이 안전한 MCP 오류로 반환
-- 관리자·보고서·핵형요약 도구가 목록에 없음
-- 결과와 로그에 금지 필드가 없음
-
-### M3 — 공통 catalog 확장과 adapter 일반화
-
-상태: **검색 2개 adapter 일반화 완료, 업무 tool 단계적 이관 대기**.
-
-목표: Playground registry에 남은 업무 tool을 계약·회귀 테스트와 함께 하나씩 공통 catalog로 옮긴다. catalog
-등록이 MCP 공개를 뜻하지 않으며, 각 `allowed_surfaces`는 데이터·권한·지연 검토 후 별도로 결정한다.
-
-권장 이관 순서:
-
-1. `search_rag_chunks`
-2. `audit_qc_report`
-3. `draft_qc_report`
-4. 보고서 후보·체크리스트 tool
-5. 핵형 요약은 local LLM·입력 제한을 별도 검증한 뒤 이관
-
-관리자·인덱싱·skill 쓰기·첨부 관리 tool은 catalog에 등록하더라도 MCP surface를 허용하지 않는다.
-
-LangGraph Studio는 선택적 코드 디버깅 client로 유지한다. 수동 HTTP `@tool` 래퍼를 MCP client로 교체할 때는
-`langchain-mcp-adapters` 호환성을 별도 변경에서 검증한다.
-
-`langchain-mcp-adapters==0.3.0`은 `langchain-core>=1,<2`를 요구한다. 현재 integration은
-`langchain-core>=0.3` 전제이므로 M2와 같은 변경에 섞지 않는다.
-
-작업:
-
-- `SMB_AGENT_TOOL_TRANSPORT=rest|mcp` 설정 추가
-- 초기 기본값 `rest`
-- MCP client에 `/mcp`와 인증 header 연결
-- `find_folder`, `search_content` parity·Agent 회귀 테스트
-- 검증 후 기본값을 `mcp`로 전환
-- `refresh_content`는 MCP Agent 도구에서 제거하고 관리자 API로만 유지
-- 충분한 안정화 후 수동 REST wrapper 삭제
-
-rollback:
-
-- `SMB_AGENT_TOOL_TRANSPORT=rest`로 즉시 복귀
-
-### M4 — 보고서 도구 확장
-
-상태: 기존 세포유전/NGS MCP 확장은 **후순위 동결**이다. 현재 우선 구현인 QC 감사는 Playground 내부 로컬 tool로
-먼저 검증하고 MCP catalog에는 아직 공개하지 않는다.
-
-M2와 M3가 안정화된 뒤 아래 순서로 추가한다.
-
-1. `cytogenetics_report`
-2. `ngs_report`
-
-조건:
-
-- 후보 문서·체크리스트만 반환
-- 실제 검사값·판정 자동 생성 금지
-- snippet 제외
-- 기존 보고서 Pydantic 모델을 출력 schema로 재사용
-- read-only annotation과 기존 시간 예산 유지
-
-### M5 — 핵형요약 보안 검토와 확장
-
-별도 승인 조건:
-
-- MCP 입력은 `iscn`만 허용
-- provider, model, URL, API key 입력 금지
-- 서버 설정의 로컬 LLM만 사용
-- 외부 provider 경로 비활성
-- 원본 ISCN을 로그·오류·감사 이벤트에 남기지 않음
-- 진단·예후·치료 판단을 생성하지 않음
-- LLM timeout과 도구 timeout 일치
-
-## 9. 테스트 계획
-
-### 9.1 필수 자동 테스트
-
-| 범주 | 확인 내용 |
-|---|---|
-| catalog | 검색 도구 두 개의 schema·permission·exposure flag |
-| executor | 입력 오류, disabled, admin 차단, timeout, 안전한 오류 |
-| MCP 목록 | 정확히 `find_folder`, `search_content` |
-| MCP 호출 | 구조화 출력 schema, 결과 parity, 한 번만 실행 |
-| 보안 | token·remote·Host·Origin·요청 크기 차단, 금지 필드·로그 누출 없음 |
-| lifecycle | FastAPI와 MCP session manager 시작·종료 |
-| 회귀 | REST operation ID, Playground 도구·Agent·trace |
-| 실패 | runtime 미준비, 비어 있는 인덱스, SQLite 오류 |
-
-테스트는 fake Finder, fake ContentSearcher, 임시 SQLite fixture를 사용한다. 실제 SMB 세션과 외부 LLM은 사용하지 않는다.
-
-### 9.2 지연 검증
-
-- 인메모리 폴더 검색 50ms 미만 목표 유지
-- 검색 요청 p50 300ms 미만, p95 1초 미만 유지
-- 로컬 MCP adapter 오버헤드 p95 50ms 이하를 잠정 목표로 측정
-- CI의 불안정한 단일 시간 assertion 대신 반복 local smoke 결과를 기록
-- 예산 초과 시 `over_budget`와 안전한 부분 결과 또는 오류를 즉시 반환
-
-### 9.3 실행 명령
-
-구현 후 기본 검증 명령은 다음으로 고정한다.
+재현 명령:
 
 ```powershell
-uv sync --python 3.11 --native-tls --extra dev
-uv run --no-sync ruff check .
-uv run --no-sync pytest -m "not integration"
-uv run --no-sync pytest backend/tests/test_tooling.py backend/tests/test_mcp_server.py backend/tests/test_playground.py backend/tests/test_api_contracts.py
+uv run --no-sync ruff check backend/src/smb_finder/mcp_server.py backend/src/smb_finder/tooling backend/src/smb_finder/llmops_search.py backend/tests/test_mcp_server.py backend/tests/test_tooling.py backend/tests/test_llmops_search.py
+uv run --no-sync pytest backend/tests/test_mcp_server.py backend/tests/test_tooling.py backend/tests/test_llmops_search.py backend/tests/test_api_contracts.py
+uv run --no-sync pytest -m "not integration" backend/tests
+uv run --no-sync python scripts/evaluate_quality.py
 ```
 
-MCP Inspector는 선택 검증이다. 사내 SSL 프록시에서 `npx`가 실패하면 필수 검증으로 취급하지 않고 Python SDK
-client 테스트를 기준으로 삼는다.
+## 7. 후속 확장 원칙
 
-### 9.4 M0–M2 로컬 검증 결과 (2026-07-14)
-
-- `uv run --no-sync ruff check .`: 통과
-- `uv run --no-sync pytest -m "not integration"`: 115개 통과
-- fake runtime 기반 `FastMCP.call_tool` 100회: p50 0.208ms, p95 0.278ms, max 0.505ms
-- `MCP_ENABLED=false` 기본 상태의 `POST /mcp`: 404 확인
-- 실제 SMB 세션, 환자/검사 파일, 로컬·외부 LLM은 검증에 사용하지 않음
-
-### 9.5 catalog 기반 직접 등록 검증 (2026-07-24)
-
-- `ToolSpec` handler·timeout resolver 기반 dispatch 적용
-- MCP `tools/list`가 catalog의 `mcp` surface와 동일한 검색 2개만 반환
-- Pydantic 입력 제약과 구조화 출력 schema, read-only annotation 일치
-- 관리자·쓰기 spec은 `mcp` surface가 선언돼도 catalog 방어 계층에서 제외
-- Playground는 MCP HTTP 우회 없이 같은 executor를 직접 사용
-- fake runtime 200회: direct executor p50 0.224ms/p95 0.291ms, MCP call p50 0.273ms/p95 0.338ms,
-  adapter p95 증가 0.047ms
-
-## 10. 로컬 실행과 smoke 시나리오
-
-구현 후 `.env`에서 다음처럼 로컬 전용으로 활성화한다.
-
-```dotenv
-MCP_ENABLED=true
-MCP_ALLOW_REMOTE=false
-MCP_API_TOKEN=<로컬에서 생성한 임의의 긴 값>
-MCP_ALLOWED_HOSTS=127.0.0.1,localhost,[::1]
-MCP_ALLOWED_ORIGINS=
-MCP_MAX_BODY_BYTES=65536
-```
-
-실행:
-
-```powershell
-uv run --no-sync uvicorn smb_finder.api:app --host 127.0.0.1 --port 8010
-```
-
-예상 endpoint:
-
-```text
-FastAPI: http://127.0.0.1:8010
-MCP:     http://127.0.0.1:8010/mcp
-```
-
-안전한 smoke 순서:
-
-1. 합성·비식별 인덱스 fixture 사용
-2. MCP initialize
-3. `tools/list`가 검색 도구 두 개만 반환하는지 확인
-4. `find_folder` 합성 키워드 호출
-5. `search_content` 합성 키워드 호출
-6. 빈 query·잘못된 limit·runtime 미준비 오류 확인
-7. token 누락·오류, remote 주소, 잘못된 Host·Origin, 64KiB 초과 요청 차단 확인
-8. 로그에 query·경로·token이 없는지 확인
-
-## 11. 롤백 계획
-
-- `MCP_ENABLED=false`로 endpoint 즉시 비활성화
-- 기존 `/find`, `/search-content`, `/api/playground/*` 계속 유지
-- 기존 `playground.tools` import 경로를 호환 shim으로 유지
-- LangGraph는 `rest|mcp` 전환 설정으로 독립 rollback
-- MCP parity와 지연·보안 검증 전에는 REST wrapper를 삭제하지 않음
-- DB schema, 폴더 인덱스 JSON, SQLite FTS5 형식은 MVP에서 변경하지 않음
-
-따라서 M0~M2의 rollback은 설정과 코드 배포 rollback만 필요하며 데이터 migration rollback은 필요하지 않다.
-
-## 12. 역할별 개발 전달사항
-
-### Backend
-
-- M0~M2만 우선 구현
-- 기존 Finder·ContentSearcher 알고리즘 수정 금지
-- FastAPI `_state`와 MCP session manager 공유를 첫 integration test로 확인
-- 관리자 도구를 임시로라도 MCP에 등록하지 않음
-- 검색 timeout과 동시 실행 제한을 명시적으로 구현
-- 기존 사용자 변경을 되돌리거나 덮어쓰지 않음
-
-### Frontend
-
-- MVP 변경 없음
-- Playground 도구 목록·trace UI의 기존 동작만 회귀 확인
-- MCP 연결상태 UI는 별도 요청 전까지 만들지 않음
-
-### Shared·통합
-
-- Pydantic 계약을 REST·Playground·MCP에서 재사용
-- LangGraph 의존성 업그레이드는 M3으로 분리
-- M2 완료 보고에 MCP endpoint, 도구 목록, 보안·지연 측정값 포함
-
-## 13. 사용자 결정이 필요한 시점
-
-M0~M2 로컬 MVP는 아래 보수적 기본값으로 추가 결정 없이 진행할 수 있다.
-
-- MCP 기본 비활성
-- loopback 전용
-- 활성화 시 전용 bearer token 필수
-- 검색 도구 두 개
-- snippet과 관리자 도구 비공개
-- 외부 LLM 미사용
-
-사내 여러 사용자가 `/mcp`를 공유해야 하는 시점에는 다음을 사용자가 결정해야 한다.
-
-- 단일 서비스 token 또는 사용자별 OAuth/SSO
-- 허용할 MCP Host와 네트워크 대역
-- 상대경로를 모델에게 보여줄 수 있는 업무 범위
-- 감사 로그 보존 기간과 접근 권한
-
-## 14. 공식 근거
-
-- [MCP Python SDK v1.x](https://github.com/modelcontextprotocol/python-sdk/tree/v1.x)
-- [MCP Python SDK v1.28.1](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v1.28.1)
-- [MCP Streamable HTTP 전송 명세](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
-- [MCP Tools 명세](https://modelcontextprotocol.io/specification/2025-06-18/server/tools)
-- [LangChain MCP 연동](https://docs.langchain.com/oss/python/langchain/mcp)
-- [langchain-mcp-adapters 0.3.0](https://pypi.org/project/langchain-mcp-adapters/0.3.0/)
+새 MCP 도구는 실제 소비자와 승인된 사용자 흐름이 생긴 뒤 하나씩 추가한다. 추가할 때마다 현재 목적에 필요한지,
+기존 query/service를 재사용하는지, 민감 필드를 넓히지 않는지, 별도 설정·추상화·UI가 정말 필요한지를 code-reviewer가
+확정 전 검토한다. Session Cache와 remote MCP는 위 조건이 충족되기 전에는 완료 항목으로 세지 않는다.

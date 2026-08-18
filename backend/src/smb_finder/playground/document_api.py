@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 from smb_finder.config import Settings
@@ -29,6 +29,10 @@ from smb_finder.models import (
 
 from .document_chat import DocumentChatService
 from .document_models import ChatRequest, ChatResponse
+from .upload_service import UploadError
+
+if TYPE_CHECKING:
+    from smb_finder.bot_core import BotCoreRunner, JsonModelGateway
 
 _logger = logging.getLogger(__name__)
 
@@ -42,21 +46,16 @@ class DocumentRuntime:
     scoped_retriever: Any | None = None
     artifact_reader: Any | None = None
     graph_reader: Any | None = None
+    upload_manager: Any | None = None
+    model_gateway: JsonModelGateway | None = None
+    bot_core_runner: BotCoreRunner | None = None
 
 
 def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> APIRouter:
     """현재 제품 목표에 포함된 문서 API만 생성한다."""
 
     chat_service = DocumentChatService(runtime_getter().settings)
-
-    @asynccontextmanager
-    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
-        try:
-            yield
-        finally:
-            chat_service.close()
-
-    router = APIRouter(tags=["document-playground"], lifespan=lifespan)
+    router = APIRouter(tags=["document-playground"])
 
     @router.post(
         "/api/playground/files/search",
@@ -173,35 +172,88 @@ def create_document_router(runtime_getter: Callable[[], DocumentRuntime]) -> API
     )
     async def run_chat(request: ChatRequest) -> ChatResponse:
         runtime = runtime_getter()
-        selections = [(str(item.doc_id), str(item.revision_id)) for item in request.selected_files]
+        deadline = time.monotonic() + runtime.settings.playground_agent_budget_ms / 1000
+        selections = [
+            (str(item.doc_id), str(item.revision_id)) for item in request.selected_files if item.source == "llmops"
+        ]
         if selections:
             if runtime.file_searcher is None:
                 raise HTTPException(
                     status_code=503,
-                    detail={"code": "selected_file_validation_unavailable", "message": "선택 문서를 확인할 수 없습니다."},
+                    detail={
+                        "code": "selected_file_validation_unavailable",
+                        "message": "선택 문서를 확인할 수 없습니다.",
+                    },
                 )
             try:
-                valid = await run_in_threadpool(runtime.file_searcher.validate_active_selections, selections)
+                valid = await run_in_threadpool(
+                    runtime.file_searcher.validate_active_selections,
+                    selections,
+                    deadline=deadline,
+                )
             except LlmopsSearchError as exc:
                 raise HTTPException(status_code=503, detail={"code": exc.code, "message": exc.message}) from exc
             if set(selections) != valid:
                 raise HTTPException(
                     status_code=409,
-                    detail={"code": "selected_file_stale", "message": "선택한 파일의 활성 버전이 변경되었습니다. 다시 검색해 주세요."},
+                    detail={
+                        "code": "selected_file_stale",
+                        "message": "선택한 파일의 활성 버전이 변경되었습니다. 다시 검색해 주세요.",
+                    },
+                )
+
+        upload_selections = [
+            (item.doc_id, item.revision_id) for item in request.selected_files if item.source == "upload"
+        ]
+        if upload_selections:
+            if runtime.upload_manager is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={"code": "upload_context_unavailable", "message": "첨부 파일을 확인할 수 없습니다."},
+                )
+            try:
+                valid_uploads = await run_in_threadpool(
+                    runtime.upload_manager.validate_selections,
+                    upload_selections,
+                    deadline=deadline,
+                )
+            except UploadError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={"code": exc.code, "message": exc.message},
+                ) from exc
+            if not valid_uploads:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "uploaded_file_stale",
+                        "message": "첨부 파일 참조가 만료됐습니다. 다시 첨부해 주세요.",
+                    },
                 )
 
         request_id = str(uuid.uuid4())
         try:
-            response = await run_in_threadpool(
-                chat_service.run,
-                request,
-                runtime.scoped_retriever,
-                request_id=request_id,
-            )
+            if runtime.bot_core_runner is not None:
+                response = await run_in_threadpool(runtime.bot_core_runner, request, request_id=request_id)
+            else:
+                response = await run_in_threadpool(
+                    chat_service.run,
+                    request,
+                    runtime.scoped_retriever,
+                    request_id=request_id,
+                    upload_manager=runtime.upload_manager,
+                    model_gateway=runtime.model_gateway,
+                    deadline=deadline,
+                )
         except LlmopsSearchError as exc:
             raise HTTPException(
                 status_code=503,
                 detail={"code": exc.code, "message": exc.message, "elapsed_ms": exc.elapsed_ms},
+            ) from exc
+        except UploadError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": exc.message},
             ) from exc
         log = _logger.warning if response.over_budget else _logger.info
         log(

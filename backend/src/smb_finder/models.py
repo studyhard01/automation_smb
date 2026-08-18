@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class ApiErrorResponse(BaseModel):
@@ -41,6 +41,32 @@ class DocumentSearchHit(BaseModel):
     matched_stores: list[Literal["postgresql", "minio", "neo4j"]] = Field(
         default_factory=lambda: ["postgresql"]
     )
+    _physical_identity: tuple[str, ...] | None = PrivateAttr(default=None)
+
+    def set_physical_identity(
+        self,
+        *,
+        source_uri: str = "",
+        source_path: str = "",
+        source_item_id: str = "",
+    ) -> None:
+        """API에 노출하지 않을 물리 파일 식별자를 검색 adapter 내부에만 보관한다."""
+
+        normalized_uri = source_uri.strip().replace("\\", "/").casefold()
+        normalized_path = source_path.strip().replace("\\", "/").rstrip("/").casefold()
+        normalized_item_id = source_item_id.strip().replace("\\", "/").casefold()
+        if normalized_uri:
+            self._physical_identity = ("source_uri", normalized_uri)
+        elif normalized_path:
+            self._physical_identity = ("source_path", normalized_path, self.file_name.casefold())
+        elif normalized_item_id:
+            self._physical_identity = ("source_item_id", normalized_item_id)
+
+    @property
+    def physical_identity(self) -> tuple[str, ...] | None:
+        """직렬화 계약 밖에서만 사용하는 물리 파일 식별자를 반환한다."""
+
+        return self._physical_identity
 
 
 class DocumentSearchResponse(BaseModel):

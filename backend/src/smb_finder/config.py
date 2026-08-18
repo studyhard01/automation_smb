@@ -51,11 +51,11 @@ class Settings(BaseSettings):
     llmops_db_query_timeout_ms: int = Field(default=1500, ge=100)
     llmops_file_search_limit: int = Field(default=10, ge=1, le=25)
     llmops_file_search_max_limit: int = Field(default=20, ge=1, le=50)
-    llmops_file_search_budget_ms: int = Field(default=8000, ge=500, le=30_000)
+    llmops_file_search_budget_ms: int = Field(default=1000, ge=500, le=30_000)
     llmops_file_search_source_limit: int = Field(default=30, ge=5, le=100)
     llmops_file_search_llm_enabled: bool = True
     llmops_file_search_llm_model: str = ""
-    llmops_file_search_llm_timeout_ms: int = Field(default=6000, ge=200, le=10_000)
+    llmops_file_search_llm_timeout_ms: int = Field(default=300, ge=200, le=10_000)
     llmops_file_search_llm_max_terms: int = Field(default=8, ge=2, le=20)
 
     llmops_retrieval_top_k: int = Field(default=6, ge=1, le=20)
@@ -69,10 +69,22 @@ class Settings(BaseSettings):
     embedding_query_prefix: str = "search_query: "
     llmops_chat_model: str = "qwen3:30b-a3b"
     llm_timeout_ms: int = Field(default=10_000, ge=100)
+    proposal_llm_timeout_ms: int = Field(default=120_000, ge=1000, le=600_000)
+    proposal_llm_num_ctx: int = Field(default=24_576, ge=4096, le=262_144)
+    proposal_llm_max_tokens: int = Field(default=4096, ge=512, le=16_384)
+    proposal_context_max_chars: int = Field(default=30_000, ge=2000, le=200_000)
+    proposal_context_per_document_chars: int = Field(default=10_000, ge=500, le=100_000)
+    proposal_context_max_citations: int = Field(default=30, ge=1, le=100)
     rag_synthesis_evidence_chars: int = Field(default=1800, ge=500, le=10_000)
     rag_synthesis_max_tokens: int = Field(default=500, ge=64, le=500)
     playground_agent_budget_ms: int = Field(default=10_000, ge=100)
     playground_agent_context_messages: int = Field(default=6, ge=0, le=20)
+
+    # MCP는 현재 문서 metadata 1개만 loopback에서 별도 token으로 공개한다.
+    mcp_enabled: bool = False
+    mcp_api_token: str = ""
+    mcp_metadata_timeout_ms: int = Field(default=1500, ge=1100, le=10_000)
+    mcp_metadata_max_concurrency: int = Field(default=2, ge=1, le=8)
 
     minio_endpoint: str = ""
     minio_secure: bool = False
@@ -104,7 +116,9 @@ class Settings(BaseSettings):
     nas_user: str = ""
     nas_pw: str = ""
     smb_upload_default_relative_directory: str = ""
+    proposal_draft_default_relative_directory: str = ""
     smb_upload_runtime_settings_path: str = ".runtime/playground_settings.json"
+    smb_upload_registry_path: str = ".runtime/upload_registry.json"
     smb_upload_max_size_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     smb_upload_allowed_extensions: str = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv"
     smb_upload_timeout_ms: int = Field(default=15_000, ge=1000, le=120_000)
@@ -149,10 +163,7 @@ class Settings(BaseSettings):
         """Neo4j 읽기 adapter 준비 여부를 반환한다."""
 
         return bool(
-            self.llmops_graph_enabled
-            and self.neo4j_uri.strip()
-            and self.neo4j_user.strip()
-            and self.neo4j_password
+            self.llmops_graph_enabled and self.neo4j_uri.strip() and self.neo4j_user.strip() and self.neo4j_password
         )
 
     @property

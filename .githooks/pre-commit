@@ -3,7 +3,9 @@ set -eu
 
 # Windows 공용 uv cache의 권한·잔여 상태가 commit을 막지 않도록 clone별 cache를 기본 사용한다.
 UV_CACHE_DIR="${UV_CACHE_DIR:-.tmp/uv-cache}"
+UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-backend/.venv}"
 export UV_CACHE_DIR
+export UV_PROJECT_ENVIRONMENT
 
 uv run --no-sync python scripts/check_development_lessons.py --staged
 uv run --no-sync python scripts/evaluate_quality.py

@@ -9,6 +9,7 @@ const props = defineProps<{
   selectedFileCount: number;
   functionPending: boolean;
   conversationStatus: ConversationStatus;
+  functionFeedback: string;
   stores: StoresStatusResponse | null;
 }>();
 
@@ -24,12 +25,23 @@ function stateLabel(connected: boolean, degraded: boolean): string {
 const activeFunction = computed(
   () => props.functions.find((item) => item.id === props.selectedFunction) ?? props.functions[0],
 );
+const activeFunctionReady = computed(() => Boolean(
+  activeFunction.value && (!activeFunction.value.requiresFiles || props.selectedFileCount),
+));
 
 const resultTitle = computed(() => {
-  if (props.functionPending || props.conversationStatus === "loading") return "선택 문서에서 근거를 찾고 있어요";
-  if (props.conversationStatus === "success") return "실행 결과가 대화에 표시됐어요";
+  if (props.functionFeedback) return props.functionFeedback;
+  if (props.functionPending || props.conversationStatus === "loading") return "기능을 실행하고 있어요";
+  if (props.conversationStatus === "success") return "기능 실행을 완료했어요";
   if (props.conversationStatus === "error") return "실행 상태를 확인해 주세요";
   return "아직 실행된 기능이 없어요";
+});
+
+const resultStatusLabel = computed(() => {
+  if (props.conversationStatus === "loading") return "진행 중";
+  if (props.conversationStatus === "success") return "완료";
+  if (props.conversationStatus === "error") return "확인 필요";
+  return "대기";
 });
 </script>
 
@@ -38,7 +50,7 @@ const resultTitle = computed(() => {
     <section class="functions-section">
       <div class="section-heading">
         <strong>기능</strong>
-        <small>{{ selectedFileCount ? `${selectedFileCount}개 파일 준비됨` : "파일 선택 필요" }}</small>
+        <small>{{ selectedFileCount ? `${selectedFileCount}개 파일 준비됨` : "왼쪽에서 참고 파일을 선택해 주세요" }}</small>
       </div>
       <div class="function-list">
         <button
@@ -47,7 +59,7 @@ const resultTitle = computed(() => {
           class="function-card"
           :class="{ active: selectedFunction === item.id }"
           type="button"
-          :disabled="functionPending || !selectedFileCount"
+          :disabled="functionPending || (item.requiresFiles && !selectedFileCount)"
           @click="emit('runFunction', item.id)"
         >
           <span class="function-icon" aria-hidden="true">{{ item.icon }}</span>
@@ -60,20 +72,22 @@ const resultTitle = computed(() => {
       </div>
     </section>
 
-    <section class="function-guide" :class="{ ready: selectedFileCount }">
+    <section class="function-guide" :class="{ ready: activeFunctionReady }">
       <strong>{{ activeFunction?.label }}</strong>
       <p>{{ activeFunction?.description }}</p>
-      <span>{{ selectedFileCount ? `● 선택 파일 ${selectedFileCount}개에 적용` : "파일을 선택하면 바로 실행할 수 있어요" }}</span>
+      <span v-if="activeFunction?.requiresFiles">
+        {{ selectedFileCount ? `● 선택 파일 ${selectedFileCount}개에 적용` : "왼쪽 검색 결과에서 참고 파일을 먼저 선택해 주세요" }}
+      </span>
     </section>
 
     <section class="conversation-output-section">
       <div class="section-heading">
         <strong>실행 결과</strong>
-        <small>{{ conversationStatus === "success" ? "완료" : "대기" }}</small>
+        <small>{{ resultStatusLabel }}</small>
       </div>
       <div class="conversation-output-card" :class="conversationStatus">
         <strong>{{ resultTitle }}</strong>
-        <p>답변과 근거 문서는 중앙 대화 영역에서 확인할 수 있습니다.</p>
+        <p>{{ activeFunction?.resultDescription }}</p>
       </div>
     </section>
 

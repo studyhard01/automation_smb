@@ -1,94 +1,225 @@
-"""읽기 전용 MCP Streamable HTTP endpoint 계약·보안 테스트."""
+"""MCP v2 단일 document metadata tool과 mount 보안 계약 테스트."""
 
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from mcp.server import MCPServer
 from starlette.applications import Starlette
 
-from smb_finder import api
-from smb_finder.config import Settings
-from smb_finder.index import FolderIndex
-from smb_finder.mcp_server import McpExactRoute, create_mcp_bundle, validate_mcp_settings
-from smb_finder.tooling import ToolCatalog, ToolExecutor
+from smb_finder.llmops_search import LlmopsSearchError
+from smb_finder.mcp_server import McpExactRoute, create_mcp_bundle
 
 
-TOKEN = "local-mcp-test-token-0123456789"
-
-
-class FakeFinder:
+class RecordingMetadataReader:
     def __init__(self) -> None:
-        self.calls = 0
+        self.calls: list[tuple[UUID, UUID | None, float]] = []
 
-    def find(self, request):  # noqa: ANN001
-        self.calls += 1
-        return SimpleNamespace(
-            query=request.query,
-            normalized_query=request.query,
-            hits=[SimpleNamespace(name="A", path="root/A", score=0.9, depth=2)],
-            result_count=1,
-            elapsed_ms=2.0,
-            over_budget=False,
-            source="index",
-        )
-
-
-class FakeSearcher:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def search(self, request):  # noqa: ANN001
-        self.calls += 1
-        return SimpleNamespace(
-            query=request.query,
-            terms=[request.query],
-            hits=[
-                SimpleNamespace(
-                    name="result.txt",
-                    path="root/result.txt",
-                    ext=".txt",
-                    score=1.1,
-                    snippet="민감한 본문 snippet",
-                    size=123,
-                    mtime=1.0,
-                )
-            ],
-            result_count=1,
-            elapsed_ms=3.0,
-            over_budget=False,
-            indexed_files=10,
-        )
+    def get_document_metadata(
+        self,
+        doc_id: UUID,
+        revision_id: UUID | None = None,
+        *,
+        deadline: float,
+    ) -> dict[str, object]:
+        self.calls.append((doc_id, revision_id, deadline))
+        return {
+            "source": "llmops",
+            "doc_id": doc_id,
+            "revision_id": revision_id or uuid4(),
+            "is_active": revision_id is None,
+            "revision_status": "active" if revision_id is None else "superseded",
+            "extension": ".pdf",
+            "size_bytes": 1024,
+            "modified_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+            "elapsed_ms": 3.0,
+            "over_budget": False,
+            "degraded_dependencies": [],
+        }
 
 
-def _bundle(**settings_kwargs):
-    settings = Settings(
-        _env_file=None,
-        mcp_enabled=True,
-        mcp_api_token=TOKEN,
-        **settings_kwargs,
-    )
-    finder = FakeFinder()
-    searcher = FakeSearcher()
-    runtime = SimpleNamespace(settings=settings, finder=finder, content_searcher=searcher)
-    return create_mcp_bundle(runtime, settings), finder, searcher
+def _mcp_credential() -> str:
+    return "-".join(("test", "only", "placeholder"))
 
 
-def _headers(**overrides: str) -> dict[str, str]:
-    headers = {
-        "authorization": f"Bearer {TOKEN}",
-        "host": "127.0.0.1:8010",
-        "accept": "application/json, text/event-stream",
-        "content-type": "application/json",
+def _bundle():  # noqa: ANN202
+    reader = RecordingMetadataReader()
+    bundle = create_mcp_bundle(reader, bearer_token=_mcp_credential())
+    return bundle, reader
+
+
+def _mounted_app(bundle) -> Starlette:  # noqa: ANN001
+    return Starlette(routes=[McpExactRoute("/mcp", bundle.app)])
+
+
+def test_server_uses_official_v2_mcpserver_and_exposes_exactly_one_read_only_tool():
+    bundle, _ = _bundle()
+    try:
+        tools = asyncio.run(bundle.server.list_tools())
+    finally:
+        bundle.close()
+
+    assert isinstance(bundle.server, MCPServer)
+    assert [tool.name for tool in tools] == ["get_document_metadata"]
+    tool = tools[0]
+    assert tool.annotations is not None
+    assert tool.annotations.read_only_hint is True
+    assert tool.annotations.destructive_hint is False
+    assert tool.annotations.idempotent_hint is True
+    assert tool.annotations.open_world_hint is False
+    assert set(tool.input_schema["properties"]) == {"doc_id", "revision_id"}
+    assert set(tool.output_schema["properties"]) == {
+        "source",
+        "doc_id",
+        "revision_id",
+        "is_active",
+        "revision_status",
+        "extension",
+        "size_bytes",
+        "modified_at",
+        "elapsed_ms",
+        "over_budget",
+        "degraded_dependencies",
     }
-    headers.update(overrides)
-    return headers
+    assert "find_folder" not in repr(tools)
+    assert "search_content" not in repr(tools)
 
 
-def _initialize_payload() -> dict[str, object]:
-    return {
+def test_mcp_tool_returns_structured_metadata_without_forbidden_fields():
+    bundle, reader = _bundle()
+    doc_id = uuid4()
+    revision_id = uuid4()
+    try:
+        result = asyncio.run(
+            bundle.server.call_tool(
+                "get_document_metadata",
+                {"doc_id": str(doc_id), "revision_id": str(revision_id)},
+            )
+        )
+    finally:
+        bundle.close()
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["doc_id"] == str(doc_id)
+    assert result.structured_content["revision_id"] == str(revision_id)
+    assert result.structured_content["is_active"] is False
+    serialized = str(result.model_dump(mode="json", by_alias=True)).lower()
+    for forbidden in ("filename", "title", "path", "uri", "key", "body", "snippet", "query"):
+        assert forbidden not in serialized
+    assert reader.calls[0][:2] == (doc_id, revision_id)
+
+
+def test_invalid_uuid_is_not_reflected_by_mcpserver():
+    bundle, reader = _bundle()
+    private_input = "invalid-id-not-for-response"
+    try:
+        result = asyncio.run(bundle.server.call_tool("get_document_metadata", {"doc_id": private_input}))
+    finally:
+        bundle.close()
+
+    assert result.is_error is True
+    assert result.meta == {
+        "com.automation-smb/tool-error": {"code": "invalid_arguments", "retryable": False, "elapsed_ms": 0.0}
+    }
+    assert private_input not in str(result)
+    assert reader.calls == []
+
+
+def test_unknown_tool_name_is_not_reflected_by_mcpserver():
+    bundle, reader = _bundle()
+    private_name = "unknown-private-tool-name"
+    try:
+        result = asyncio.run(bundle.server.call_tool(private_name, {}))
+    finally:
+        bundle.close()
+
+    assert result.is_error is True
+    assert result.meta["com.automation-smb/tool-error"]["code"] == "invalid_arguments"
+    assert private_name not in str(result)
+    assert reader.calls == []
+
+
+def test_bundle_requires_nonempty_token():
+    reader = RecordingMetadataReader()
+    with pytest.raises(RuntimeError, match="bearer token"):
+        create_mcp_bundle(reader, bearer_token="")
+
+
+def test_default_host_app_keeps_mcp_unmounted_and_returns_404():
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=Starlette())
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8010") as client:
+            return await client.post("/mcp")
+
+    response = asyncio.run(request())
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("client_address", "authorization", "status_code", "error_code"),
+    [
+        (("10.0.0.5", 1000), f"Bearer {_mcp_credential()}", 403, "remote_client_forbidden"),
+        (("127.0.0.1", 1000), "", 401, "authentication_required"),
+        (("127.0.0.1", 1000), "Bearer wrong-placeholder", 401, "authentication_required"),
+    ],
+)
+def test_mcp_mount_rejects_remote_or_unauthenticated_requests(
+    client_address,
+    authorization,
+    status_code,
+    error_code,
+):  # noqa: ANN001
+    bundle, _ = _bundle()
+
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=bundle.app, client=client_address)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+            return await client.post("/mcp", headers={"authorization": authorization})
+
+    try:
+        response = asyncio.run(request())
+    finally:
+        bundle.close()
+
+    assert response.status_code == status_code
+    assert response.json() == {"error": error_code}
+    assert _mcp_credential() not in response.text
+
+
+def test_mcp_mount_rejects_untrusted_host_with_valid_loopback_credentials():
+    bundle, _ = _bundle()
+
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=_mounted_app(bundle), client=("127.0.0.1", 1000))
+        async with bundle.server.session_manager.run():
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
+                return await client.post(
+                    "/mcp",
+                    headers={
+                        "authorization": f"Bearer {_mcp_credential()}",
+                        "content-type": "application/json",
+                        "host": "untrusted.invalid",
+                    },
+                )
+
+    try:
+        response = asyncio.run(request())
+    finally:
+        bundle.close()
+
+    assert response.status_code == 421
+    assert _mcp_credential() not in response.text
+
+
+def test_authorized_loopback_mount_serves_mcp_v2_initialize():
+    bundle, _ = _bundle()
+    payload = {
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -99,214 +230,100 @@ def _initialize_payload() -> dict[str, object]:
         },
     }
 
-
-async def _post(bundle, payload, *, headers=None, client=("127.0.0.1", 1234)):  # noqa: ANN001
-    test_app = Starlette(routes=[McpExactRoute("/mcp", bundle.app)])
-    transport = httpx.ASGITransport(app=test_app, client=client)
-    async with bundle.server.session_manager.run():
-        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8010") as http:
-            return await http.post("/mcp", headers=headers or _headers(), json=payload)
-
-
-def test_enabled_mcp_requires_separate_token():
-    with pytest.raises(RuntimeError, match="MCP_API_TOKEN"):
-        validate_mcp_settings(Settings(_env_file=None, mcp_enabled=True, mcp_api_token=""))
-
-    with pytest.raises(RuntimeError, match="다른 값"):
-        validate_mcp_settings(
-            Settings(
-                _env_file=None,
-                mcp_enabled=True,
-                mcp_api_token=TOKEN,
-                admin_api_token=TOKEN,
-            )
-        )
-
-
-def test_tools_list_is_exactly_two_read_only_tools():
-    bundle, _, _ = _bundle()
-
-    tools = asyncio.run(bundle.server.list_tools())
-    specs = ToolCatalog().list("mcp")
-
-    assert [tool.name for tool in tools] == [spec.id for spec in specs] == ["find_folder", "search_content"]
-    assert all(tool.annotations.readOnlyHint is True for tool in tools)
-    assert all(tool.annotations.destructiveHint is False for tool in tools)
-    assert all(tool.annotations.idempotentHint is True for tool in tools)
-    assert all(tool.annotations.openWorldHint is False for tool in tools)
-    assert all(tool.outputSchema is not None for tool in tools)
-    for tool, spec in zip(tools, specs, strict=True):
-        expected_input = spec.input_model.model_json_schema()
-        assert tool.inputSchema["properties"] == expected_input["properties"]
-        assert tool.inputSchema["required"] == expected_input["required"]
-        assert tool.outputSchema["title"] == spec.output_model.model_json_schema()["title"]
-    assert "indexed_files" not in tools[1].outputSchema["properties"]
-
-
-def test_call_tool_executes_existing_search_once_and_redacts_payload():
-    bundle, finder, searcher = _bundle()
-
-    async def call_tools():
-        folder_result = await bundle.server.call_tool("find_folder", {"query": "folder"})
-        content_result = await bundle.server.call_tool("search_content", {"query": "민감 검색어"})
-        return folder_result, content_result
-
-    folder_result, content_result = asyncio.run(call_tools())
-    serialized = repr((folder_result, content_result))
-
-    assert finder.calls == 1
-    assert searcher.calls == 1
-    assert "root/A" in serialized
-    assert "root/result.txt" in serialized
-    assert "민감 검색어" not in serialized
-    assert "민감한 본문 snippet" not in serialized
-    assert "snippet" not in serialized
-    assert "refresh_content" not in serialized
-
-
-def test_direct_executor_and_mcp_adapter_return_the_same_structured_results():
-    settings = Settings(_env_file=None, mcp_enabled=True, mcp_api_token=TOKEN)
-    runtime = SimpleNamespace(settings=settings, finder=FakeFinder(), content_searcher=FakeSearcher())
-    executor = ToolExecutor(runtime)
-    bundle = create_mcp_bundle(runtime, settings)
-
-    direct_folder = executor.execute("find_folder", {"query": "folder"}, surface="mcp").model_dump()
-    direct_content = executor.execute("search_content", {"query": "document"}, surface="mcp").model_dump()
-
-    async def call_tools():
-        folder_result = await bundle.server.call_tool("find_folder", {"query": "folder"})
-        content_result = await bundle.server.call_tool("search_content", {"query": "document"})
-        return folder_result[1], content_result[1]
-
-    mcp_folder, mcp_content = asyncio.run(call_tools())
-
-    assert mcp_folder == direct_folder
-    assert mcp_content == direct_content
-
-
-def test_invalid_tool_arguments_are_not_reflected_by_fastmcp():
-    bundle, _, _ = _bundle()
-    secret = "SECRET-PATIENT-IDENTIFIER"
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": {
-            "name": "find_folder",
-            "arguments": {"query": {"patient": secret}},
-        },
-    }
-
-    response = asyncio.run(_post(bundle, payload))
-
-    assert response.status_code == 200
-    assert "invalid_arguments" in response.text
-    assert secret not in response.text
-
-
-def test_streamable_http_tools_list_uses_exact_mcp_path_without_redirect():
-    bundle, _, _ = _bundle()
-
-    async def request_tools():
-        test_app = Starlette(routes=[McpExactRoute("/mcp", bundle.app)])
-        transport = httpx.ASGITransport(app=test_app, client=("127.0.0.1", 1234))
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=_mounted_app(bundle), client=("127.0.0.1", 1000))
         async with bundle.server.session_manager.run():
-            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8010") as http:
-                initialized = await http.post("/mcp", headers=_headers(), json=_initialize_payload())
-                assert initialized.status_code == 200
-                return await http.post(
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8010") as client:
+                return await client.post(
                     "/mcp",
-                    headers=_headers(),
-                    json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                    headers={
+                        "authorization": f"Bearer {_mcp_credential()}",
+                        "accept": "application/json, text/event-stream",
+                        "content-type": "application/json",
+                    },
+                    json=payload,
                 )
 
-    response = asyncio.run(request_tools())
-    names = [tool["name"] for tool in response.json()["result"]["tools"]]
+    try:
+        response = asyncio.run(request())
+    finally:
+        bundle.close()
 
     assert response.status_code == 200
     assert response.history == []
-    assert names == ["find_folder", "search_content"]
+    assert response.json()["result"]["serverInfo"]["name"] == "automation-smb-metadata"
 
 
-@pytest.mark.parametrize(
-    ("headers", "client", "status_code", "error_code"),
-    [
-        ({"authorization": ""}, ("127.0.0.1", 1), 401, "authentication_required"),
-        ({"authorization": "Bearer wrong-token"}, ("127.0.0.1", 1), 401, "authentication_required"),
-        ({"host": "evil.example"}, ("127.0.0.1", 1), 403, "host_forbidden"),
-        ({"origin": "https://evil.example"}, ("127.0.0.1", 1), 403, "origin_forbidden"),
-        ({}, ("10.20.30.40", 1), 403, "remote_client_forbidden"),
-        ({"content-length": "70000"}, ("127.0.0.1", 1), 413, "request_too_large"),
-    ],
-)
-def test_mcp_http_security_rejects_unsafe_requests(headers, client, status_code, error_code):
-    bundle, _, _ = _bundle()
-    request_headers = _headers(**headers)
+def test_mounted_boundary_handles_trailing_slash_and_keeps_unknown_path_404():
+    bundle, _ = _bundle()
 
-    response = asyncio.run(_post(bundle, _initialize_payload(), headers=request_headers, client=client))
+    async def request(path: str) -> httpx.Response:
+        transport = httpx.ASGITransport(app=_mounted_app(bundle), client=("127.0.0.1", 1000))
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:8010",
+            follow_redirects=False,
+        ) as client:
+            return await client.post(path, headers={"authorization": f"Bearer {_mcp_credential()}"})
 
-    assert response.status_code == status_code
-    assert response.json() == {"error": error_code}
-    assert TOKEN not in response.text
+    try:
+        trailing = asyncio.run(request("/mcp/"))
+        unknown = asyncio.run(request("/unknown"))
+    finally:
+        bundle.close()
 
-
-def test_chunked_body_over_64_kib_is_rejected():
-    bundle, _, _ = _bundle()
-
-    async def request_large_body():
-        test_app = Starlette(routes=[McpExactRoute("/mcp", bundle.app)])
-        transport = httpx.ASGITransport(app=test_app, client=("127.0.0.1", 1234))
-
-        async def chunks():
-            yield b"x" * 40_000
-            yield b"y" * 40_000
-
-        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8010") as http:
-            return await http.post("/mcp", headers=_headers(), content=chunks())
-
-    response = asyncio.run(request_large_body())
-
-    assert response.status_code == 413
-    assert response.json() == {"error": "request_too_large"}
+    assert trailing.status_code == 404
+    assert unknown.status_code == 404
 
 
-def test_fastapi_lifespan_starts_mcp_session_and_closes_shared_runtime(monkeypatch):
-    settings = Settings(_env_file=None, mcp_enabled=True, mcp_api_token=TOKEN)
-    bundle = create_mcp_bundle(api._playground_runtime, settings)
+def test_http_tools_call_returns_machine_readable_safe_error_meta():
+    private_detail = "upstream-private-detail"
 
-    class FakeContentIndex:
-        def __init__(self) -> None:
-            self.closed = False
+    class BudgetMetadataReader(RecordingMetadataReader):
+        def get_document_metadata(self, doc_id, revision_id=None, *, deadline):  # noqa: ANN001, ANN201
+            raise LlmopsSearchError("metadata_budget_exhausted", private_detail, 37.0)
 
-        def count(self) -> int:
-            return 0
+    bundle = create_mcp_bundle(BudgetMetadataReader(), bearer_token=_mcp_credential())
+    headers = {
+        "authorization": f"Bearer {_mcp_credential()}",
+        "accept": "application/json, text/event-stream",
+        "content-type": "application/json",
+    }
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "pytest", "version": "1"},
+        },
+    }
+    call = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "get_document_metadata", "arguments": {"doc_id": str(uuid4())}},
+    }
 
-        def close(self) -> None:
-            self.closed = True
+    async def request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=_mounted_app(bundle), client=("127.0.0.1", 1000))
+        async with bundle.server.session_manager.run():
+            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8010") as client:
+                initialized = await client.post("/mcp", headers=headers, json=initialize)
+                assert initialized.status_code == 200
+                return await client.post("/mcp", headers=headers, json=call)
 
-    content_index = FakeContentIndex()
+    try:
+        response = asyncio.run(request())
+    finally:
+        bundle.close()
 
-    async def fake_threadpool(function, *args):  # noqa: ANN001, ARG001
-        if function is api.load_or_build:
-            return FolderIndex([])
-        if function is api.open_index:
-            return content_index
-        raise AssertionError("예상하지 않은 startup 함수")
-
-    monkeypatch.setattr(api, "run_in_threadpool", fake_threadpool)
-    monkeypatch.setattr(api, "_mcp_bundle", bundle)
-
-    async def exercise_lifespan():
-        async with api.lifespan(api.app):
-            assert api._state["finder"] is not None
-            assert api._state["content_searcher"] is not None
-            test_app = Starlette(routes=[McpExactRoute("/mcp", bundle.app)])
-            transport = httpx.ASGITransport(app=test_app, client=("127.0.0.1", 1234))
-            async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8010") as http:
-                response = await http.post("/mcp", headers=_headers(), json=_initialize_payload())
-                assert response.status_code == 200
-
-    asyncio.run(exercise_lifespan())
-
-    assert api._state == {}
-    assert content_index.closed is True
+    payload = response.json()["result"]
+    assert response.status_code == 200
+    assert payload["isError"] is True
+    assert payload["_meta"] == {
+        "com.automation-smb/tool-error": {"code": "tool_timeout", "retryable": True, "elapsed_ms": 37.0}
+    }
+    assert "tool_timeout" in payload["content"][0]["text"]
+    assert private_detail not in response.text

@@ -1,213 +1,170 @@
-"""검색 도구의 검증·시간 제한·동시 실행·안전한 감사 로그를 담당한다."""
+"""단일 MCP metadata 도구의 bounded 실행기."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from threading import BoundedSemaphore
-from typing import Any
+from threading import BoundedSemaphore, Lock
+from typing import Any, Protocol
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
-from .catalog import ToolCatalog, ToolSpec, ToolSurface
+from smb_finder.llmops_search import LlmopsSearchError
+
+from .contracts import DocumentMetadataOutput, GetDocumentMetadataInput
 from .errors import ToolExecutionError
 
-_logger = logging.getLogger(__name__)
-_DEFAULT_MAX_CONCURRENCY = 4
-_SHARED_POOL = ThreadPoolExecutor(max_workers=_DEFAULT_MAX_CONCURRENCY, thread_name_prefix="smb-tool")
-_SHARED_SLOTS = BoundedSemaphore(_DEFAULT_MAX_CONCURRENCY)
+
+class MetadataReader(Protocol):
+    """PostgreSQL metadata adapter의 필요한 표면만 정의한다."""
+
+    def get_document_metadata(
+        self,
+        doc_id: Any,
+        revision_id: Any | None = None,
+        *,
+        deadline: float,
+    ) -> dict[str, Any]: ...
 
 
 class ToolExecutor:
-    """동일한 검색 구현을 여러 도구 surface에서 안전하게 실행한다.
-
-    동기 검색은 timeout 뒤에도 실행 중인 스레드를 강제로 종료할 수 없다. 따라서 읽기·멱등 도구만
-    등록하며, semaphore는 실제 작업이 끝날 때 해제해 timeout 요청이 누적되어도 스레드가 무한히
-    늘어나지 않게 한다.
-    """
+    """고정된 metadata 도구를 제한된 worker와 하나의 deadline으로 실행한다."""
 
     def __init__(
         self,
-        runtime: Any | Callable[[], Any],
+        metadata_reader: MetadataReader,
         *,
-        catalog: ToolCatalog | None = None,
-        max_concurrency: int = 4,
+        timeout_ms: int = 1500,
+        max_concurrency: int = 2,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._runtime = runtime
-        self.catalog = ToolCatalog() if catalog is None else catalog
         workers = max(1, max_concurrency)
-        if workers == _DEFAULT_MAX_CONCURRENCY:
-            self._pool = _SHARED_POOL
-            self._slots = _SHARED_SLOTS
-        else:
-            self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="smb-tool-isolated")
-            self._slots = BoundedSemaphore(workers)
+        self._metadata_reader = metadata_reader
+        self._timeout_seconds = max(0.1, timeout_ms / 1000)
+        self._clock = clock
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mcp-metadata")
+        self._slots = BoundedSemaphore(workers)
+        self._state_lock = Lock()
+        self._closed = False
 
-    def execute(self, tool_id: str, arguments: dict[str, Any], *, surface: ToolSurface) -> BaseModel:
-        """도구를 동기 실행한다. Playground의 기존 동기 계약을 유지하기 위한 진입점이다."""
+    def execute(self, arguments: dict[str, Any]) -> DocumentMetadataOutput:
+        """동기 호출자가 사용할 metadata 실행 진입점."""
 
-        started = time.perf_counter()
-        spec, validated, timeout_ms = self._prepare(tool_id, arguments, surface)
-        deadline = started + timeout_ms / 1000
-        future = self._submit(spec, validated, surface, deadline, started)
+        prepared, deadline = self._prepare(arguments)
+        future = self._submit(prepared, deadline)
         try:
-            remaining = max(0.0, deadline - time.perf_counter())
-            if remaining == 0.0 and not future.done():
-                raise FutureTimeoutError
-            result = future.result(timeout=remaining)
+            return self._finish(future, deadline)
         except FutureTimeoutError as exc:
-            elapsed_ms = self._elapsed_ms(started)
-            self._audit(tool_id, surface, "error", elapsed_ms, 0, "tool_timeout")
-            raise ToolExecutionError(
-                "tool_timeout",
-                "도구 실행 시간이 제한을 초과했습니다.",
-                retryable=True,
-                elapsed_ms=elapsed_ms,
-            ) from exc
-        except ToolExecutionError as exc:
-            self._audit(tool_id, surface, "error", self._elapsed_ms(started), 0, exc.code)
-            raise
-        except Exception as exc:
-            elapsed_ms = self._elapsed_ms(started)
-            self._audit(tool_id, surface, "error", elapsed_ms, 0, "tool_internal_error")
-            raise ToolExecutionError(
-                "tool_internal_error",
-                "도구 실행 중 내부 오류가 발생했습니다.",
-                retryable=True,
-                elapsed_ms=elapsed_ms,
-            ) from exc
-        return self._finish(spec, result, surface, started)
+            raise self._timeout_error() from exc
 
-    async def execute_async(self, tool_id: str, arguments: dict[str, Any], *, surface: ToolSurface) -> BaseModel:
-        """동일한 실행기를 MCP 비동기 handler에서 사용한다."""
+    async def execute_async(self, arguments: dict[str, Any]) -> DocumentMetadataOutput:
+        """MCP handler가 event loop를 막지 않고 결과를 기다린다."""
 
-        started = time.perf_counter()
-        spec, validated, timeout_ms = self._prepare(tool_id, arguments, surface)
-        deadline = started + timeout_ms / 1000
-        future = await asyncio.to_thread(self._submit, spec, validated, surface, deadline, started)
+        prepared, deadline = self._prepare(arguments)
+        future = self._submit(prepared, deadline)
+        remaining = deadline - self._clock()
+        if remaining <= 0:
+            raise self._timeout_error()
         try:
-            remaining = max(0.0, deadline - time.perf_counter())
-            if remaining == 0.0 and not future.done():
-                raise TimeoutError
-            if future.done():
-                result = future.result()
-            else:
-                result = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=remaining)
+            raw = await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout=remaining)
         except TimeoutError as exc:
-            elapsed_ms = self._elapsed_ms(started)
-            self._audit(tool_id, surface, "error", elapsed_ms, 0, "tool_timeout")
-            raise ToolExecutionError(
-                "tool_timeout",
-                "도구 실행 시간이 제한을 초과했습니다.",
-                retryable=True,
-                elapsed_ms=elapsed_ms,
-            ) from exc
-        except ToolExecutionError as exc:
-            self._audit(tool_id, surface, "error", self._elapsed_ms(started), 0, exc.code)
-            raise
+            raise self._timeout_error() from exc
+        except LlmopsSearchError as exc:
+            raise self._map_search_error(exc) from exc
         except Exception as exc:
-            elapsed_ms = self._elapsed_ms(started)
-            self._audit(tool_id, surface, "error", elapsed_ms, 0, "tool_internal_error")
-            raise ToolExecutionError(
-                "tool_internal_error",
-                "도구 실행 중 내부 오류가 발생했습니다.",
-                retryable=True,
-                elapsed_ms=elapsed_ms,
-            ) from exc
-        return self._finish(spec, result, surface, started)
+            raise self._internal_error() from exc
+        return self._validate_output(raw)
 
-    def _prepare(
-        self,
-        tool_id: str,
-        arguments: dict[str, Any],
-        surface: ToolSurface,
-    ) -> tuple[ToolSpec, BaseModel, int]:
-        spec = self.catalog.get(tool_id, surface)
-        if spec is None:
-            self._audit(tool_id, surface, "denied", 0.0, 0, "tool_not_allowed")
-            raise ToolExecutionError("tool_not_allowed", "이 surface에서 허용되지 않은 도구입니다.")
+    def close(self) -> None:
+        """DB hard timeout 안에서 worker를 모두 종료해 adapter close와의 경합을 막는다."""
+
+        with self._state_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._pool.shutdown(wait=True, cancel_futures=True)
+
+    def _prepare(self, arguments: dict[str, Any]) -> tuple[GetDocumentMetadataInput, float]:
+        started = self._clock()
+        deadline = started + self._timeout_seconds
         try:
-            validated = spec.input_model.model_validate(arguments)
+            prepared = GetDocumentMetadataInput.model_validate(arguments)
         except ValidationError as exc:
-            self._audit(tool_id, surface, "error", 0.0, 0, "invalid_arguments")
             raise ToolExecutionError("invalid_arguments", "도구 입력이 올바르지 않습니다.") from exc
+        return prepared, deadline
 
-        runtime = self._get_runtime()
-        timeout_ms = spec.timeout_resolver(runtime)
-        return spec, validated, max(100, int(timeout_ms))
-
-    def _submit(
-        self,
-        spec: ToolSpec,
-        validated: BaseModel,
-        surface: ToolSurface,
-        deadline: float,
-        started: float,
-    ) -> Future[Any]:
-        remaining = max(0.0, deadline - time.perf_counter())
-        if not self._slots.acquire(timeout=remaining):
-            elapsed_ms = self._elapsed_ms(started)
-            self._audit(spec.id, surface, "error", elapsed_ms, 0, "tool_busy")
-            raise ToolExecutionError(
-                "tool_busy",
-                "동시 실행 한도를 초과했습니다.",
-                retryable=True,
-                elapsed_ms=elapsed_ms,
-            )
+    def _submit(self, prepared: GetDocumentMetadataInput, deadline: float) -> Future[dict[str, Any]]:
+        with self._state_lock:
+            if self._closed:
+                raise ToolExecutionError("internal_error", "메타데이터 도구가 종료되었습니다.")
+        if not self._slots.acquire(blocking=False):
+            raise self._timeout_error()
         try:
-            future = self._pool.submit(self._run, spec, validated)
-        except Exception:
+            future = self._pool.submit(
+                self._metadata_reader.get_document_metadata,
+                prepared.doc_id,
+                prepared.revision_id,
+                deadline=deadline,
+            )
+        except Exception as exc:
             self._slots.release()
-            raise
+            raise self._internal_error() from exc
         future.add_done_callback(lambda _future: self._slots.release())
         return future
 
-    def _run(self, spec: ToolSpec, validated: BaseModel) -> dict[str, Any]:
-        runtime = self._get_runtime()
-        return spec.handler(runtime, validated)
-
-    def _finish(self, spec: ToolSpec, result: Any, surface: ToolSurface, started: float) -> BaseModel:
-        elapsed_ms = self._elapsed_ms(started)
+    def _finish(self, future: Future[dict[str, Any]], deadline: float) -> DocumentMetadataOutput:
+        remaining = deadline - self._clock()
+        if remaining <= 0 and not future.done():
+            raise FutureTimeoutError
         try:
-            validated = spec.output_model.model_validate(result)
+            raw = future.result(timeout=max(0.0, remaining))
+        except LlmopsSearchError as exc:
+            raise self._map_search_error(exc) from exc
+        except FutureTimeoutError:
+            raise
+        except Exception as exc:
+            raise self._internal_error() from exc
+        return self._validate_output(raw)
+
+    @staticmethod
+    def _validate_output(raw: Any) -> DocumentMetadataOutput:
+        try:
+            return DocumentMetadataOutput.model_validate(raw)
         except ValidationError as exc:
-            self._audit(spec.id, surface, "error", elapsed_ms, 0, "unsafe_tool_output")
-            raise ToolExecutionError("unsafe_tool_output", "도구 결과를 안전하게 반환할 수 없습니다.") from exc
-        set_indexed_files = getattr(validated, "set_indexed_files", None)
-        if callable(set_indexed_files) and isinstance(result, dict):
-            set_indexed_files(result.get("_indexed_files", 0))
-        result_count = int(getattr(validated, "result_count", 0))
-        self._audit(spec.id, surface, "ok", elapsed_ms, result_count, "")
-        return validated
-
-    def _get_runtime(self) -> Any:
-        runtime = self._runtime() if callable(self._runtime) else self._runtime
-        if runtime is None:
-            raise ToolExecutionError("runtime_not_ready", "검색 runtime이 아직 준비되지 않았습니다.", retryable=True)
-        return runtime
+            raise ToolExecutionError("internal_error", "메타데이터 결과를 반환할 수 없습니다.") from exc
 
     @staticmethod
-    def _elapsed_ms(started: float) -> float:
-        return round((time.perf_counter() - started) * 1000, 1)
+    def _map_search_error(exc: LlmopsSearchError) -> ToolExecutionError:
+        if exc.code in {"metadata_not_configured", "document_not_found", "revision_not_found"}:
+            return ToolExecutionError(exc.code, exc.message, elapsed_ms=exc.elapsed_ms)
+        if exc.code == "metadata_budget_exhausted":
+            return ToolExecutionError(
+                "tool_timeout",
+                "메타데이터 도구 실행 시간이 제한을 초과했습니다.",
+                retryable=True,
+                elapsed_ms=exc.elapsed_ms,
+            )
+        return ToolExecutionError(
+            "internal_error",
+            "메타데이터 도구를 실행할 수 없습니다.",
+            retryable=True,
+            elapsed_ms=exc.elapsed_ms,
+        )
+
+    def _timeout_error(self) -> ToolExecutionError:
+        return ToolExecutionError(
+            "tool_timeout",
+            "메타데이터 도구 실행 시간이 제한을 초과했습니다.",
+            retryable=True,
+            elapsed_ms=round(self._timeout_seconds * 1000, 1),
+        )
 
     @staticmethod
-    def _audit(
-        tool_id: str,
-        surface: ToolSurface,
-        outcome: str,
-        elapsed_ms: float,
-        result_count: int,
-        error_code: str,
-    ) -> None:
-        _logger.info(
-            "tool_audit tool=%s surface=%s outcome=%s elapsed_ms=%.1f result_count=%d error_code=%s",
-            tool_id,
-            surface,
-            outcome,
-            elapsed_ms,
-            result_count,
-            error_code,
+    def _internal_error() -> ToolExecutionError:
+        return ToolExecutionError(
+            "internal_error",
+            "메타데이터 도구를 실행할 수 없습니다.",
+            retryable=True,
         )

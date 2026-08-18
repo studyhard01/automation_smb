@@ -1,0 +1,19 @@
+{
+  "description": "환경 파일 쓰기를 사용자 승인 전까지 차단합니다.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|apply_patch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/protect_env_files.py\"",
+            "commandWindows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"py -3 (Join-Path (git rev-parse --show-toplevel) '.codex/hooks/protect_env_files.py')\"",
+            "timeout": 10,
+            "statusMessage": "환경 파일 수정 여부 확인 중"
+          }
+        ]
+      }
+    ]
+  }
+}

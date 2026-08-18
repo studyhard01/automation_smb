@@ -25,7 +25,7 @@ _logger = logging.getLogger(__name__)
 class QueryEmbeddingClient(Protocol):
     """테스트에서 교체 가능한 질의 embedding client."""
 
-    def embed_query(self, query: str) -> list[float]: ...
+    def embed_query(self, query: str, *, deadline: float | None = None) -> list[float]: ...
 
     def close(self) -> None: ...
 
@@ -33,23 +33,38 @@ class QueryEmbeddingClient(Protocol):
 class OllamaQueryEmbeddingClient:
     """구축 파이프라인과 같은 Ollama `/api/embed` 연결을 재사용한다."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        client: httpx.Client | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._model = settings.embedding_model.strip()
         self._dimension = settings.embedding_dim
         self._prefix = settings.embedding_query_prefix
-        self._client = httpx.Client(
-            base_url=f"{settings.ollama_base_url.strip().rstrip('/')}/",
-            timeout=max(0.1, settings.llmops_embedding_timeout_ms / 1000),
-        )
+        self._timeout_seconds = max(0.1, settings.llmops_embedding_timeout_ms / 1000)
+        self._client = client or httpx.Client(base_url=f"{settings.ollama_base_url.strip().rstrip('/')}/")
+        self._clock = clock
 
-    def embed_query(self, query: str) -> list[float]:
+    def embed_query(self, query: str, *, deadline: float | None = None) -> list[float]:
         """문서 적재와 동일한 query prefix를 사용해 1개 질의를 embedding한다."""
 
+        timeout_seconds = self._timeout_seconds
+        if deadline is not None:
+            remaining_seconds = deadline - self._clock()
+            if remaining_seconds <= 0:
+                raise LlmopsSearchError(
+                    "llmops_retrieval_budget_exhausted",
+                    "선택 문서 검색 시간 예산이 소진됐습니다.",
+                )
+            timeout_seconds = min(timeout_seconds, remaining_seconds)
         prefixed = query if query.startswith(self._prefix) else f"{self._prefix}{query}"
         try:
             response = self._client.post(
                 "api/embed",
                 json={"model": self._model, "input": prefixed, "truncate": True},
+                timeout=max(0.001, timeout_seconds),
             )
             response.raise_for_status()
             payload = response.json()
@@ -105,10 +120,12 @@ class LlmopsScopedRetriever:
         *,
         embedding_client: QueryEmbeddingClient | None = None,
         connect: Callable[..., Any] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._embedding_client = embedding_client or OllamaQueryEmbeddingClient(settings)
         self._connect = connect or psycopg.connect
+        self._clock = clock
         self._query = self._build_query(settings.llmops_postgres_schema)
 
     @staticmethod
@@ -218,10 +235,17 @@ class LlmopsScopedRetriever:
         *,
         top_k: int | None = None,
         candidate_k: int | None = None,
+        deadline: float | None = None,
     ) -> ScopedRetrievalResult:
         """선택한 활성 Revision 밖의 Chunk를 반환하지 않는 Hybrid 검색을 실행한다."""
 
-        started = time.perf_counter()
+        started = self._clock()
+        effective_deadline = (
+            deadline
+            if deadline is not None
+            else started
+            + (self._settings.llmops_embedding_timeout_ms + self._settings.llmops_db_query_timeout_ms) / 1000
+        )
         normalized_query = str(query or "").strip()
         if not normalized_query:
             raise LlmopsSearchError("empty_query", "선택 문서에서 검색할 질문을 입력하세요.")
@@ -234,18 +258,43 @@ class LlmopsScopedRetriever:
             max(result_limit, candidate_k or self._settings.llmops_retrieval_candidate_k),
             200,
         )
-        embedding_started = time.perf_counter()
-        embedding = self._embedding_client.embed_query(normalized_query)
-        embedding_ms = round((time.perf_counter() - embedding_started) * 1000, 1)
+        self._ensure_budget(effective_deadline, started)
+        embedding_started = self._clock()
+        embedding = self._embedding_client.embed_query(normalized_query, deadline=effective_deadline)
+        embedding_ms = round((self._clock() - embedding_started) * 1000, 1)
         vector_literal = "[" + ",".join(format(value, ".9g") for value in embedding) + "]"
         doc_ids = [pair[0] for pair in pairs]
         revision_ids = [pair[1] for pair in pairs]
 
-        db_started = time.perf_counter()
+        remaining_seconds = effective_deadline - self._clock()
+        if remaining_seconds <= 0:
+            raise self._budget_error(started)
+        if remaining_seconds < 1:
+            raise self._budget_error(started)
+        connect_timeout_sec = min(
+            max(1, math.ceil(self._settings.llmops_db_connect_timeout_ms / 1000)),
+            math.floor(remaining_seconds),
+        )
+        statement_timeout_ms = self._remaining_statement_timeout_ms(effective_deadline, started)
+        db_started = self._clock()
         try:
-            with self._connect(**self._connection_kwargs()) as connection:
+            with self._connect(
+                **self._connection_kwargs(
+                    connect_timeout_sec=connect_timeout_sec,
+                    statement_timeout_ms=statement_timeout_ms,
+                )
+            ) as connection:
+                self._ensure_budget(effective_deadline, started)
                 with connection.cursor(row_factory=dict_row) as cursor:
+                    self._ensure_budget(effective_deadline, started)
                     cursor.execute("SET LOCAL hnsw.iterative_scan = strict_order")
+                    self._ensure_budget(effective_deadline, started)
+                    statement_timeout_ms = self._remaining_statement_timeout_ms(effective_deadline, started)
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (f"{statement_timeout_ms}ms",),
+                    )
+                    self._ensure_budget(effective_deadline, started)
                     cursor.execute(
                         self._query,
                         (
@@ -267,14 +316,16 @@ class LlmopsScopedRetriever:
                         ),
                     )
                     rows = cursor.fetchall()
+        except LlmopsSearchError:
+            raise
         except Exception as exc:
-            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            elapsed_ms = round((self._clock() - started) * 1000, 1)
             raise LlmopsSearchError(
                 "llmops_retrieval_unavailable",
                 "선택 문서의 근거를 검색할 수 없습니다.",
                 elapsed_ms,
             ) from exc
-        db_ms = round((time.perf_counter() - db_started) * 1000, 1)
+        db_ms = round((self._clock() - db_started) * 1000, 1)
 
         allowed_pairs = set(pairs)
         for row in rows:
@@ -283,23 +334,19 @@ class LlmopsScopedRetriever:
                 raise LlmopsSearchError(
                     "llmops_scope_violation",
                     "선택 문서 범위를 벗어난 검색 결과가 감지되어 응답을 중단했습니다.",
-                    round((time.perf_counter() - started) * 1000, 1),
+                    round((self._clock() - started) * 1000, 1),
                 )
         accepted_rows = [
-            row
-            for row in rows
-            if float(row.get("rrf_score") or 0.0) >= self._settings.llmops_retrieval_score_cutoff
+            row for row in rows if float(row.get("rrf_score") or 0.0) >= self._settings.llmops_retrieval_score_cutoff
         ]
         citations = [self._row_to_citation(index, row) for index, row in enumerate(accepted_rows, start=1)]
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        elapsed_ms = round((self._clock() - started) * 1000, 1)
         candidate_count = int(rows[0].get("candidate_count") or 0) if rows else 0
-        budget_ms = self._settings.llmops_embedding_timeout_ms + self._settings.llmops_db_query_timeout_ms
         grounded = bool(citations)
-        over_budget = elapsed_ms > budget_ms
+        over_budget = self._clock() > effective_deadline
         log_completed = _logger.warning if over_budget else _logger.info
         log_completed(
-            "LLMOps scoped retrieval completed: scope_count=%d candidates=%d results=%d elapsed_ms=%.1f "
-            "over_budget=%s",
+            "LLMOps scoped retrieval completed: scope_count=%d candidates=%d results=%d elapsed_ms=%.1f over_budget=%s",
             len(pairs),
             candidate_count,
             len(citations),
@@ -321,21 +368,47 @@ class LlmopsScopedRetriever:
             ),
         )
 
-    def _connection_kwargs(self) -> dict[str, Any]:
-        connect_timeout_sec = max(1, math.ceil(self._settings.llmops_db_connect_timeout_ms / 1000))
+    def _connection_kwargs(
+        self,
+        *,
+        connect_timeout_sec: int | None = None,
+        statement_timeout_ms: int | None = None,
+    ) -> dict[str, Any]:
+        effective_connect_timeout_sec = connect_timeout_sec or max(
+            1,
+            math.ceil(self._settings.llmops_db_connect_timeout_ms / 1000),
+        )
+        effective_statement_timeout_ms = statement_timeout_ms or self._settings.llmops_db_query_timeout_ms
         return {
             "host": self._settings.effective_llmops_db_host,
             "port": self._settings.postgres_port,
             "dbname": self._settings.llmops_postgres_db,
             "user": self._settings.postgres_user,
             "password": self._settings.postgres_password,
-            "connect_timeout": connect_timeout_sec,
+            "connect_timeout": effective_connect_timeout_sec,
             "application_name": "automation_smb_scoped_retrieval",
-            "options": (
-                "-c default_transaction_read_only=on "
-                f"-c statement_timeout={self._settings.llmops_db_query_timeout_ms}"
-            ),
+            "options": (f"-c default_transaction_read_only=on -c statement_timeout={effective_statement_timeout_ms}"),
         }
+
+    def _ensure_budget(self, deadline: float, started: float) -> None:
+        if self._clock() >= deadline:
+            raise self._budget_error(started)
+
+    def _remaining_statement_timeout_ms(self, deadline: float, started: float) -> int:
+        now = self._clock()
+        if now >= deadline:
+            raise self._budget_error(started)
+        return min(
+            self._settings.llmops_db_query_timeout_ms,
+            max(1, math.floor((deadline - now) * 1000)),
+        )
+
+    def _budget_error(self, started: float) -> LlmopsSearchError:
+        return LlmopsSearchError(
+            "llmops_retrieval_budget_exhausted",
+            "선택 문서 검색 시간 예산이 소진됐습니다.",
+            round((self._clock() - started) * 1000, 1),
+        )
 
     def _row_to_citation(self, index: int, row: dict[str, Any]) -> DocumentCitation:
         content = str(row.get("content") or "").strip()

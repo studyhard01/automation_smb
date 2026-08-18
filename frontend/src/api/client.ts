@@ -6,6 +6,10 @@ import type {
   DocumentVersionGraphResponse,
   FileUploadResponse,
   PlaygroundSettingsResponse,
+  ProposalDraftGenerated,
+  ProposalDraftClarificationRequest,
+  ProposalDraftRequest,
+  ProposalDraftRevisionRequest,
   SelectedFilePayload,
   StoresStatusResponse,
 } from "@/types";
@@ -13,13 +17,25 @@ import type {
 export class ApiError extends Error {
   readonly status: number;
   readonly requestId: string;
+  readonly errorCode: string;
 
-  constructor(message: string, status = 0, requestId = "") {
+  constructor(message: string, status = 0, requestId = "", errorCode = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.requestId = requestId;
+    this.errorCode = errorCode;
   }
+}
+
+function errorCode(body: ApiErrorBody): string {
+  if (body.error_code) return body.error_code;
+  if (body.detail && typeof body.detail === "object" && !Array.isArray(body.detail)) {
+    const detail = body.detail as Record<string, unknown>;
+    const value = detail.error_code ?? detail.code;
+    return typeof value === "string" ? value : "";
+  }
+  return "";
 }
 
 function normalizeDetail(value: unknown): string {
@@ -40,6 +56,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
       normalizeDetail(body.detail) || body.message || body.error_code || `HTTP ${response.status}`,
       response.status,
       body.request_id,
+      errorCode(body),
     );
   }
   return body as T;
@@ -84,6 +101,52 @@ export const playgroundApi = {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ relative_directory: relativeDirectory }),
+      }),
+    );
+  },
+
+  async updateProposalDraftDirectory(relativeDirectory: string): Promise<PlaygroundSettingsResponse> {
+    return parseResponse<PlaygroundSettingsResponse>(
+      await fetch("/api/playground/settings/proposal-draft", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ relative_directory: relativeDirectory }),
+      }),
+    );
+  },
+
+  async generateProposalDraft(payload: ProposalDraftRequest): Promise<ProposalDraftGenerated> {
+    return parseResponse<ProposalDraftGenerated>(
+      await fetch("/api/playground/drafts/proposal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+    );
+  },
+
+  async reviseProposalDraft(
+    draftId: string,
+    payload: ProposalDraftRevisionRequest,
+  ): Promise<ProposalDraftGenerated> {
+    return parseResponse<ProposalDraftGenerated>(
+      await fetch(`/api/playground/drafts/proposal/${encodeURIComponent(draftId)}/revisions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+    );
+  },
+
+  async clarifyProposalDraft(
+    draftId: string,
+    payload: ProposalDraftClarificationRequest,
+  ): Promise<ProposalDraftGenerated> {
+    return parseResponse<ProposalDraftGenerated>(
+      await fetch(`/api/playground/drafts/proposal/${encodeURIComponent(draftId)}/clarifications`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       }),
     );
   },

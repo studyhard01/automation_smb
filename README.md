@@ -15,12 +15,16 @@ LLMOps 데이터셋을 읽기 전용으로 조회하고, 명시적으로 허용�
 - 답변: 온프레미스 Ollama만 사용, Citation과 검색 지연 반환
 - 문서 보기: MinIO Preview/Canonical read-only 조회
 - 버전 관계: Neo4j Document/Revision 관계 read-only 조회
-- 파일 첨부: 설정된 SMB share 내부 상대 경로에만 저장, 크기·확장자 제한과 기존 파일 비덮어쓰기 적용
-- 환경 설정: 왼쪽 하단 설정에서 업로드 상대 경로와 연결 상태만 관리하며 주소·계정·비밀번호는 노출하지 않음
+- MCP metadata: 기본 비활성 exact `/mcp`에서 UUID 기반 문서/Revision 상태 1개만 loopback·token 보호로 조회
+- 기안 초안: 선택 문서 근거와 사용자 설명으로 strict V2 초안을 만든 뒤 유형별 품질 편집·주장 검증·결정론적 안전망을 적용하고, 기존 3필드/기안 템플릿과 호환 투영해 SMB 신규 저장한 뒤 대화창 다운로드 제공
+- 기안 평가: 외부 dataset을 읽기 전용으로 받아 근거 25·온프레미스 LLM Judge 내용 45·XLSX 20·도구 흐름 10점으로 채점하고, runtime/model 컨텍스트 초과를 원문 없이 집계
+- 파일 첨부: `[업로드] 문서명_YYYYMMDD_v1.0.확장자` 저장 규칙으로 SMB share 내부 상대 경로에 비덮어쓰기 저장하고, 업로드 직후 대화 참고 파일에 자동 추가해 원본을 즉시 근거로 사용
+- 환경 설정: 왼쪽 하단 설정에서 업로드·기안 상대 경로와 연결 상태만 관리하며 주소·계정·비밀번호는 노출하지 않음
 
-현재 제품 경계에서 제외한 항목은 Langflow, MCP, LangGraph Studio, 로컬 SQLite/SMB 직접 인덱싱, 범용 Tool/Skill
-편집기, QC·유전검사 데모, 외부 LLM provider입니다. DB가 연결되지 않았을 때 규칙 기반 가짜 결과나 fixture로
-대체하지 않고 명시적인 오류를 반환합니다.
+현재 제품 경계에서 제외한 항목은 Langflow, 운영용 remote MCP/OAuth·SSO, LangGraph Studio의 운영 관측 사용,
+로컬 SQLite/SMB 직접 인덱싱, 범용 Tool/Skill 편집기, QC·유전검사 데모, 외부 LLM provider입니다. 로컬 read-only
+MCP와 최소 LangGraph Flow는 Bot Main Core 계약 복구 P0로 편입했습니다. DB가 연결되지 않았을 때 규칙 기반 가짜
+결과나 fixture로 대체하지 않고 명시적인 오류를 반환합니다.
 
 ## 구조
 
@@ -36,11 +40,15 @@ automation_smb/
 │  │  ├─ llmops_artifacts.py         # MinIO 문서 보기
 │  │  ├─ llmops_graph.py             # Neo4j 버전 관계
 │  │  ├─ auth/                        # 별도 PostgreSQL 로그인·사용자·서비스 권한
+│  │  ├─ bot_core/                    # LangGraph·Router·합성 fake·공통 JSON Model Gateway
+│  │  ├─ mcp_server.py, tooling/       # 공식 MCP v2 단일 metadata tool·bounded timeout
 │  │  ├─ playground/document_*.py    # 선택 문서 채팅 API·서비스·계약
-│  │  └─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
+│  │  ├─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
+│  │  ├─ playground/proposal_*.py    # 선택 문서 기반 구조화 기안·XLSX 생성·다운로드 API
+│  │  └─ evaluation/proposal_*.py    # 기안 dataset preflight·gold 비노출 live 생성·온프레미스 Judge·100점 평가
 │  └─ tests/                         # Backend 단위·계약 테스트
 ├─ docs/                             # 목표·현황·설계·운영 문서
-├─ scripts/                          # 실행·품질 검사 스크립트
+├─ scripts/                          # 실행·품질 검사·기안 평가 CLI
 ├─ Dockerfile                        # Vue build + FastAPI non-root image
 ├─ compose.yaml                      # runtime env·LAN port·healthcheck
 ├─ docker.env.example                # container endpoint override 예시
@@ -63,14 +71,22 @@ automation_smb/
 | 저장소 연결 상태 | `GET /api/playground/stores/status` |
 | 공개 설정 조회 | `GET /api/playground/settings` |
 | 업로드 상대 경로 변경 | `PATCH /api/playground/settings/upload` |
+| 기안 상대 경로 변경 | `PATCH /api/playground/settings/proposal-draft` |
+| LLM 기안 XLSX 생성·SMB 저장 | `POST /api/playground/drafts/proposal` |
+| 기안 필수정보 답변·완성 | `POST /api/playground/drafts/proposal/{draft_id}/clarifications` |
+| 기안 피드백 수정본 XLSX 생성·SMB 저장 | `POST /api/playground/drafts/proposal/{draft_id}/revisions` |
+| 생성 기안 XLSX 다운로드 | `GET /api/playground/drafts/proposal/{draft_id}` |
+| 빈 기안 템플릿 다운로드 | `GET /api/playground/drafts/proposal` |
 | 공유폴더 파일 첨부 | `POST /api/playground/files/upload` |
 | 회원가입 / 로컬·SeeLIS 로그인 / 현재 사용자 / 로그아웃 | `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/seelis-login`, `GET /api/auth/me`, `POST /api/auth/logout` |
 | 관리자 사용자 목록·권한 변경 | `GET /api/users`, `PATCH /api/users/{user_id}` |
 | 서비스 상태 | `GET /health` |
 | Vue 화면 | `GET /playground`, `GET /login`, `GET /register`, `GET /user` |
+| 문서 metadata MCP | `/mcp` (기본 비활성, OpenAPI 비노출, loopback+token) |
 
 파일 선택은 화면 상태만 믿지 않습니다. 채팅 요청 직전에 Backend가 선택한 UUID pair가 현재 활성 Revision인지 다시
-검증하며, 변경됐으면 `409 selected_file_stale`을 반환합니다.
+검증하며, 변경됐으면 `409 selected_file_stale`을 반환합니다. 업로드 파일도 서버 runtime registry의 UUID pair를 다시
+검증하며, 클라이언트가 보낸 파일명이나 경로를 원본 조회 경로로 신뢰하지 않습니다.
 
 ## 설치와 실행
 
@@ -150,8 +166,13 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8011
 ```
 
 화면은 `http://127.0.0.1:8011/playground`, OpenAPI는 `http://127.0.0.1:8011/docs`에서 확인합니다. `.env`에는
-PostgreSQL·MinIO·Neo4j의 read-only 계정, 온프레미스 Ollama 주소와 필요할 때 SMB 접속 정보를 넣습니다. SMB 첨부는
-`SMB_UPLOAD_ENABLED=true`로 명시적으로 켜야 하며, 실제 값·내부 주소·파일 목록은 코드·문서·로그에 기록하지 않습니다.
+PostgreSQL·MinIO·Neo4j의 read-only 계정, 온프레미스 Ollama 주소와 필요할 때 SMB 접속 정보를 넣습니다. SMB 첨부와
+기안 자동 저장은 `SMB_UPLOAD_ENABLED=true`로 명시적으로 켜야 하며, 실제 값·내부 주소·파일 목록은 코드·문서·로그에
+기록하지 않습니다.
+
+MCP는 환경에서 `MCP_ENABLED=true`와 별도 `MCP_API_TOKEN`을 함께 주입한 경우에만 활성화됩니다. 기본값은 404이며,
+remote MCP/OAuth·MCP UI·write/admin/index/download tool은 현재 범위에 포함하지 않습니다. `.env*` 값은 승인 없이
+수정하지 않습니다.
 
 ### Docker와 LAN 실행
 
@@ -163,20 +184,27 @@ docker compose up -d
 
 로컬 주소는 `http://127.0.0.1:8011/playground`, 같은 LAN의 다른 PC에서는
 `http://<Docker-host-LAN-IPv4>:8011/playground`를 사용합니다. 포트 충돌, 사내 SSL 검사, Windows 방화벽과
-컨테이너 endpoint 설정은 [Docker 배포 문서](docs/DOCKER_DEPLOYMENT.md)를 따릅니다.
+컨테이너 endpoint 설정은 [Docker 배포 문서](docs/DOCKER_DEPLOYMENT.md)를 따릅니다. `8013`은 기본값이 아니라
+필요할 때 현재 셸에서 `$env:AUTOMATION_SMB_PORT = "8013"`으로 지정하는 host port override입니다.
 
 ## 테스트
 
 ```powershell
-.\backend\.venv\Scripts\python.exe scripts\evaluate_quality.py
-.\backend\.venv\Scripts\python.exe -m pytest backend/tests/test_llmops_search.py backend/tests/test_llmops_retrieval.py backend/tests/test_llmops_stores.py backend/tests/test_llmops_api_contracts.py backend/tests/test_upload_api.py backend/tests/test_local_development.py
+$env:UV_PROJECT_ENVIRONMENT = "$PWD\backend\.venv"
+try {
+  uv run --no-sync python scripts/evaluate_quality.py
+  uv run --no-sync pytest -m "not integration" backend/tests
+} finally {
+  Remove-Item Env:UV_PROJECT_ENVIRONMENT -ErrorAction SilentlyContinue
+}
 npm.cmd --prefix .\frontend run typecheck
 npm.cmd --prefix .\frontend run test
 npm.cmd --prefix .\frontend run build
 ```
 
-영구 삭제 승인 전까지 `backend/tests/`에는 실행 경로에서 분리된 레거시 테스트가 물리적으로 남아 있으므로 전체 디렉터리
-수집 대신 위 현재 수직 흐름 명령이나 [품질 평가 script](scripts/evaluate_quality.py)를 사용합니다.
+영구 삭제 승인 전까지 `backend/tests/`에는 실행 경로에서 분리된 레거시 테스트가 물리적으로 남아 있습니다. exact list
+8개만 수집하지 않으므로 위와 같이 `UV_PROJECT_ENVIRONMENT=backend/.venv`를 지정한 뒤 활성 비통합 전체 suite를
+실행할 수 있습니다.
 
 실제 연결 smoke는 합성 데이터가 들어 있는 read-only DB 저장소에서 수행합니다. SMB 쓰기 smoke는 승인된 합성 파일과
 설정된 업로드 하위 폴더에서만 별도로 수행합니다.
@@ -191,6 +219,7 @@ Invoke-RestMethod -Uri http://127.0.0.1:8011/api/playground/stores/status
 ## 문서
 
 - [현재 개발 목표와 계획](docs/PRODUCT_DEVELOPMENT_PLAN.md)
+- [Bot Main Core WBS 감사와 구현 계획](docs/BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md)
 - [구현 현황](docs/IMPLEMENTATION_STATUS.md)
 - [정리 인벤토리](docs/CLEANUP_INVENTORY.md)
 - [DB 연동 계약](docs/DATASET_DB_INTEGRATION_PLAN.md)
@@ -199,6 +228,8 @@ Invoke-RestMethod -Uri http://127.0.0.1:8011/api/playground/stores/status
 - [개발 환경](docs/DEVELOPMENT_SETUP.md)
 - [Docker 배포와 LAN 접속](docs/DOCKER_DEPLOYMENT.md)
 - [파일 첨부와 설정](docs/FILE_UPLOAD_AND_SETTINGS.md)
+- [기안 초안 작성](docs/PROPOSAL_DRAFT.md)
+- [기안 생성 도구 평가](docs/PROPOSAL_EVALUATION.md)
 - [운영 아키텍처](docs/PRODUCTION_ARCHITECTURE.md)
 - [품질 기준](docs/PROJECT_QUALITY_RUBRIC.md)
 - [개발 교훈](docs/DEVELOPMENT_LESSONS.md)

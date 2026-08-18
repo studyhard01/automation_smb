@@ -43,7 +43,9 @@ def test_scoring_and_hard_gate_exit_policy(quality_module: ModuleType, rubric: d
     results = []
     for category in rubric["categories"]:
         for criterion in category["criteria"]:
-            results.append(quality_module._result_from_outcome(category, criterion, quality_module.CheckOutcome(True, "ok")))
+            results.append(
+                quality_module._result_from_outcome(category, criterion, quality_module.CheckOutcome(True, "ok"))
+            )
     report = quality_module.summarize_results(rubric, results)
     assert report["score"] == 100
     assert quality_module.determine_exit_code(report, strict_score=False) == 0
@@ -72,7 +74,19 @@ def test_command_orchestration_targets_active_backend(quality_module: ModuleType
     calls_by_tool = {command[2]: command for command, _cwd, _env in calls if len(command) > 2}
     assert set(calls_by_tool) == {"ruff", "pytest"}
     assert "backend/src/smb_finder/api.py" in calls_by_tool["ruff"]
+    assert "backend/src/smb_finder/playground/proposal_evidence.py" in calls_by_tool["ruff"]
+    assert "backend/src/smb_finder/evaluation/proposal_live_runner.py" in calls_by_tool["ruff"]
+    assert "backend/tests/test_proposal_live_runner.py" in calls_by_tool["ruff"]
     assert "backend/tests/test_llmops_search.py" in calls_by_tool["pytest"]
+    assert "backend/tests/test_proposal_live_runner.py" in calls_by_tool["pytest"]
+    pytest_call = next((command, env) for command, _cwd, env in calls if len(command) > 2 and command[2] == "pytest")
+    basetemp_argument = next(item for item in pytest_call[0] if item.startswith("--basetemp="))
+    basetemp = Path(basetemp_argument.split("=", maxsplit=1)[1]).resolve()
+    assert not basetemp.is_relative_to(REPO_ROOT.resolve())
+    assert Path(pytest_call[1]["TEMP"]).resolve() == basetemp.parent
+    assert Path(pytest_call[1]["TMP"]).resolve() == basetemp.parent
+    assert Path(pytest_call[1]["TMPDIR"]).resolve() == basetemp.parent
+    assert not basetemp.parent.exists()
     assert all(result.status != "failed" for result in results)
 
 
@@ -103,12 +117,12 @@ def test_json_report_contract_is_machine_readable(quality_module: ModuleType, ru
     assert "hard_gates_passed" in loaded
 
 
-def test_active_runtime_has_no_external_llm_or_legacy_route_imports() -> None:
+def test_active_runtime_has_no_external_llm_or_legacy_search_imports() -> None:
     api_source = (REPO_ROOT / "backend" / "src" / "smb_finder" / "api.py").read_text(encoding="utf-8")
-    chat_source = (
-        REPO_ROOT / "backend" / "src" / "smb_finder" / "playground" / "document_chat.py"
-    ).read_text(encoding="utf-8")
-    assert "mcp_server" not in api_source
+    chat_source = (REPO_ROOT / "backend" / "src" / "smb_finder" / "playground" / "document_chat.py").read_text(
+        encoding="utf-8"
+    )
+    assert "from .mcp_server import McpExactRoute, create_mcp_bundle" in api_source
     assert "content_index" not in api_source
     assert "openai.com" not in chat_source
     assert "selected_files" in chat_source
