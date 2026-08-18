@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 
 from smb_finder.bot_core import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
@@ -76,6 +77,14 @@ def _settings(tmp_path=None) -> Settings:  # noqa: ANN001
     if tmp_path is not None:
         payload["playground_skills_dir"] = str(tmp_path / "skills")
     return Settings(**payload)
+
+
+def test_default_local_model_budgets_cover_measured_cold_start() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.llmops_embedding_timeout_ms == 8000
+    assert settings.llm_timeout_ms == 30_000
+    assert settings.playground_agent_budget_ms == 30_000
 
 
 def _row(doc_id: UUID, revision_id: UUID, *, score: float = 0.02) -> dict:
@@ -469,6 +478,28 @@ def test_embedding_http_timeout_is_bounded_by_remaining_deadline():
 
     assert result == [0.1, 0.2, 0.3]
     assert http_client.timeout == pytest.approx(0.125)
+
+
+def test_embedding_timeout_has_distinct_code_and_elapsed_time():
+    now = [100.0]
+
+    class TimeoutHttpClient:
+        def post(self, _path: str, *, json: dict, timeout: float):  # noqa: ANN001, ANN201, ARG002
+            assert timeout == pytest.approx(8.0)
+            now[0] = 103.9
+            raise httpx.ReadTimeout("synthetic private provider detail")
+
+        def close(self) -> None:
+            return None
+
+    embedding = OllamaQueryEmbeddingClient(_settings(), client=TimeoutHttpClient(), clock=lambda: now[0])
+
+    with pytest.raises(LlmopsSearchError) as captured:
+        embedding.embed_query("synthetic overview", deadline=120.0)
+
+    assert captured.value.code == "llmops_embedding_timeout"
+    assert captured.value.elapsed_ms == pytest.approx(3900.0)
+    assert "private provider detail" not in captured.value.message
 
 
 def test_model_error_code_is_safe_and_preserves_server_citations(tmp_path):

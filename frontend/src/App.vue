@@ -140,6 +140,13 @@ function userFacingApiError(
 ): string {
   if (error instanceof ApiError) {
     const proposalMessages: Record<string, string> = {
+      llmops_embedding_timeout: "문서 분석용 로컬 모델을 준비하는 시간이 초과됐습니다. 잠시 후 다시 시도해 주세요.",
+      llmops_embedding_unavailable: "문서 분석용 로컬 모델을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+      llmops_embedding_dimension_mismatch: "문서 분석 모델과 검색 인덱스 설정이 맞지 않습니다. 관리자에게 문의해 주세요.",
+      llmops_retrieval_budget_exhausted: "선택 문서의 근거를 찾는 시간이 초과됐습니다. 잠시 후 다시 시도해 주세요.",
+      proposal_llm_unavailable: "기안 생성용 로컬 LLM을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+      proposal_verification_unavailable: "기안 근거 검증용 로컬 LLM을 사용할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+      local_llm_not_configured: "기안 생성용 로컬 LLM 설정이 필요합니다. 관리자에게 문의해 주세요.",
       proposal_relevant_evidence_unavailable: "첨부 문서에서 기안에 반영할 관련 근거를 찾지 못했습니다. 요청서나 행사 안내문처럼 목적과 직접 관련된 문서를 선택해 새 초안을 만들어 주세요.",
       proposal_evidence_unavailable: "기안 근거를 다시 확인할 수 없습니다. 참고 문서를 다시 선택해 새 초안을 만들어 주세요.",
       proposal_context_limit_exceeded: "선택 문서가 기안 처리 범위를 넘었습니다. 참고 문서 수나 내용을 줄여 다시 시도해 주세요.",
@@ -188,6 +195,16 @@ function userFacingApiError(
   }
   if (error instanceof ApiError && error.status === 404) return "선택한 문서를 찾지 못했습니다. 다시 검색해 주세요.";
   return errorMessage(error);
+}
+
+function proposalRetryGuidance(error: unknown): string {
+  if (error instanceof ApiError && error.status === 422) {
+    return "위 안내에 따라 설명을 보완하거나 참고 문서를 바꿔 다시 전송해 주세요.";
+  }
+  if (error instanceof ApiError && error.status === 409) {
+    return "위 안내에 따라 파일 또는 문서 선택을 갱신한 뒤 다시 전송해 주세요.";
+  }
+  return "설명 부족으로 발생한 오류가 아닙니다. 잠시 후 다시 전송해 주세요.";
 }
 
 function fileKey(file: DocumentSearchHit): string {
@@ -540,14 +557,15 @@ async function generateProposalDraft(description: string): Promise<void> {
   } catch (error) {
     conversationStatus.value = "error";
     const failureMessage = `기안 초안 생성 실패: ${userFacingApiError(error, "proposal_draft")}`;
+    const retryGuidance = proposalRetryGuidance(error);
     const index = messages.value.findIndex((item) => item.id === pendingId);
     messages.value.splice(index, 1, {
       id: pendingId,
       role: "assistant",
-      content: `${failureMessage}\n설명을 보완해 다시 전송해 주세요.`,
+      content: `${failureMessage}\n${retryGuidance}`,
       error: true,
     });
-    functionFeedback.value = `${failureMessage} 설명을 수정해 다시 시도할 수 있습니다.`;
+    functionFeedback.value = `${failureMessage} ${retryGuidance}`;
   } finally {
     proposalDraftPending.value = false;
   }

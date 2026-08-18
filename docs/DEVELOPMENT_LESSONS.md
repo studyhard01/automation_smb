@@ -13,6 +13,11 @@
 
 ## 현재 교훈
 
+### 2026-08-18 — 로컬 모델 timeout은 설치와 메모리 상주 상태를 분리해 정한다
+- 상황: Ollama 서버와 모델 목록은 정상이었지만 한 번에 한 모델만 상주해 임베딩과 생성 모델이 번갈아 cold start했고, 짧은 임베딩 제한이 이를 DB 503처럼 보이게 했다.
+- 교훈: 연결·설치 확인만으로 준비 상태를 판단하지 말고 `api/ps`의 상주 여부와 cold/warm 지연을 각각 측정해 단계별 timeout을 정하며, provider timeout은 저장소 장애·입력 검증과 다른 오류 코드로 반환해야 한다.
+- 다음 적용: 합성 입력으로 모델별 cold/warm 지연과 동시 상주 가능 수를 먼저 재고, UI는 422 입력 문제와 503 의존성 문제에 서로 다른 재시도 안내를 표시한다.
+
 ### 2026-08-14 — 절대 deadline은 모든 단계와 되돌릴 수 없는 commit 경계를 함께 다룬다
 - 상황: 상위 요청은 timeout을 반환했지만 선택 검증·DB 연결·SMB 읽기·worker가 계속됐고, 반대로 SMB exclusive write가 성공한 뒤 deadline을 검사해 504로 바꾸면 삭제할 수 없는 파일과 registry 상태가 어긋났다.
 - 교훈: 하나의 monotonic deadline을 admission·connect·query·read·model·render·write 시작 전까지 전달하고, timeout된 worker의 slot과 종료도 추적해야 한다. 다만 되돌릴 수 없는 create-only commit이 성공한 뒤에는 실패로 뒤집지 말고 bookkeeping을 마쳐야 한다.
@@ -67,11 +72,6 @@
 - 상황: thinking token 절단과 모델별 schema 지원 차이뿐 아니라, 검증 schema의 `\d` 정규식이 Ollama grammar parser에서 즉시 400으로 거절됐지만 일반 연결 오류로 표시됐다.
 - 교훈: provider의 구조화 출력은 endpoint·모델뿐 아니라 JSON Schema 방언까지 확인하고, provider 호환 schema 뒤 애플리케이션 Pydantic 검증으로 필드 계약을 닫아야 한다.
 - 다음 적용: `think=false`와 실제 schema를 모델에 smoke하고, ASCII 문자 클래스처럼 동등한 호환 표현을 우선한다. grammar 생성 오류는 연결 장애와 구분하고 필수·추가 필드·길이·invalid JSON 회귀를 유지한다.
-
-### 2026-08-03 — Frontend 원본·스타일 계약·build 산출물을 함께 검사한다
-- 상황: 남은 설정 JavaScript가 Vite 설정을 가로챌 수 있었고, Vue class를 바꾼 뒤 레거시 CSS selector가 남아 중앙 화면 높이와 배치가 무너졌다.
-- 교훈: 원본은 `noEmit`으로 검사하고 production 산출물은 Vite만 생성하게 하며, 컴포넌트 class와 CSS selector의 계약은 기준 viewport에서 확인한다.
-- 다음 적용: typecheck·test·build 뒤 중복 설정과 stale asset을 검사하고, Figma 기준/현재 viewport의 열 너비·높이·overflow·browser 오류를 smoke 검증한다.
 
 ## 새 항목 템플릿
 

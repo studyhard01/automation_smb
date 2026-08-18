@@ -600,12 +600,30 @@ describe("App DB document flow", () => {
     await flushPromises();
 
     expect(wrapper.findComponent(ChatWorkspace).props("inputMode")).toBe("proposal_description");
-    expect(wrapper.text()).toContain("설명을 보완해 다시 전송해 주세요");
+    expect(wrapper.text()).toContain("설명 부족으로 발생한 오류가 아닙니다");
 
     await wrapper.findComponent(ChatWorkspace).vm.$emit("send", "보완한 기안 설명");
     await flushPromises();
     expect(playgroundApi.generateProposalDraft).toHaveBeenCalledTimes(2);
     expect(wrapper.findComponent(ChatWorkspace).props("inputMode")).toBe("chat");
+  });
+
+  it("기안 임베딩 503은 설명 보완 문제가 아니라 로컬 모델 준비 오류로 안내한다", async () => {
+    vi.mocked(playgroundApi.generateProposalDraft).mockRejectedValueOnce(
+      new ApiError("embedding timeout", 503, "request-draft", "llmops_embedding_timeout"),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+    const workspace = wrapper.findComponent(ChatWorkspace);
+
+    await wrapper.findComponent(FileSidebar).vm.$emit("toggleFile", selectedFile);
+    await wrapper.findComponent(FeatureSidebar).vm.$emit("runFunction", "proposal_draft");
+    await workspace.vm.$emit("send", "합성 구매 기안을 작성해 줘");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("문서 분석용 로컬 모델을 준비하는 시간이 초과됐습니다");
+    expect(wrapper.text()).toContain("설명 부족으로 발생한 오류가 아닙니다");
+    expect(wrapper.text()).not.toContain("설명을 보완해 다시 전송해 주세요");
   });
 
   it("문서 요약은 파일이 없으면 실행하지 않는다", async () => {

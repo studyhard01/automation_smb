@@ -50,6 +50,7 @@ class OllamaQueryEmbeddingClient:
     def embed_query(self, query: str, *, deadline: float | None = None) -> list[float]:
         """문서 적재와 동일한 query prefix를 사용해 1개 질의를 embedding한다."""
 
+        started = self._clock()
         timeout_seconds = self._timeout_seconds
         if deadline is not None:
             remaining_seconds = deadline - self._clock()
@@ -69,15 +70,32 @@ class OllamaQueryEmbeddingClient:
             response.raise_for_status()
             payload = response.json()
             embedding = [float(value) for value in payload["embeddings"][0]]
+        except httpx.TimeoutException as exc:
+            elapsed_ms = round(max(0.0, (self._clock() - started) * 1000), 1)
+            _logger.warning("로컬 embedding 준비 시간 초과: elapsed_ms=%.1f", elapsed_ms)
+            raise LlmopsSearchError(
+                "llmops_embedding_timeout",
+                "선택 문서 검색용 로컬 embedding 준비 시간이 초과됐습니다.",
+                elapsed_ms,
+            ) from exc
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            elapsed_ms = round(max(0.0, (self._clock() - started) * 1000), 1)
+            _logger.warning(
+                "로컬 embedding 생성 실패: error_type=%s elapsed_ms=%.1f",
+                type(exc).__name__,
+                elapsed_ms,
+            )
             raise LlmopsSearchError(
                 "llmops_embedding_unavailable",
                 "선택 문서 검색용 로컬 embedding을 만들 수 없습니다.",
+                elapsed_ms,
             ) from exc
         if len(embedding) != self._dimension:
+            elapsed_ms = round(max(0.0, (self._clock() - started) * 1000), 1)
             raise LlmopsSearchError(
                 "llmops_embedding_dimension_mismatch",
                 "선택 문서 검색용 embedding 차원이 데이터셋 계약과 다릅니다.",
+                elapsed_ms,
             )
         if not all(math.isfinite(value) for value in embedding):
             raise LlmopsSearchError("llmops_embedding_invalid", "질의 embedding에 유효하지 않은 값이 있습니다.")

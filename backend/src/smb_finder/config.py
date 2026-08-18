@@ -62,13 +62,13 @@ class Settings(BaseSettings):
     llmops_retrieval_candidate_k: int = Field(default=40, ge=3, le=200)
     llmops_retrieval_score_cutoff: float = Field(default=0.01, ge=0.0, le=1.0)
     llmops_chunk_max_chars: int = Field(default=1600, ge=200, le=10_000)
-    llmops_embedding_timeout_ms: int = Field(default=2000, ge=100, le=10_000)
+    llmops_embedding_timeout_ms: int = Field(default=8000, ge=100, le=10_000)
     ollama_base_url: str = ""
     embedding_model: str = "nomic-embed-text-v2-moe"
     embedding_dim: int = Field(default=768, ge=1)
     embedding_query_prefix: str = "search_query: "
     llmops_chat_model: str = "qwen3:30b-a3b"
-    llm_timeout_ms: int = Field(default=10_000, ge=100)
+    llm_timeout_ms: int = Field(default=30_000, ge=100)
     proposal_llm_timeout_ms: int = Field(default=120_000, ge=1000, le=600_000)
     proposal_llm_num_ctx: int = Field(default=24_576, ge=4096, le=262_144)
     proposal_llm_max_tokens: int = Field(default=4096, ge=512, le=16_384)
@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     proposal_context_max_citations: int = Field(default=30, ge=1, le=100)
     rag_synthesis_evidence_chars: int = Field(default=1800, ge=500, le=10_000)
     rag_synthesis_max_tokens: int = Field(default=500, ge=64, le=500)
-    playground_agent_budget_ms: int = Field(default=10_000, ge=100)
+    playground_agent_budget_ms: int = Field(default=30_000, ge=100)
     playground_agent_context_messages: int = Field(default=6, ge=0, le=20)
 
     # MCP는 현재 문서 metadata 1개만 loopback에서 별도 token으로 공개한다.
