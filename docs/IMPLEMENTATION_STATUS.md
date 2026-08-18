@@ -1,6 +1,6 @@
 # 구현 현황
 
-기준일: 2026-08-12
+기준일: 2026-08-14
 
 Bot Main Core WBS 재감사: 2026-08-14
 
@@ -24,13 +24,13 @@ Bot Main Core WBS 재감사: 2026-08-14
 | 저장소 상태 | 완료 | PostgreSQL·MinIO·Neo4j 연결/degraded 상태 표시 |
 | 파일 첨부 | 완료 | `[업로드] 문서명_YYYYMMDD_v1.0.확장자`를 최종 이름으로 exclusive 신규 생성 후 대화 참고 파일 자동 추가 |
 | 환경 설정 | 완료 | 왼쪽 하단 설정에서 업로드·기안 상대 경로와 저장소·로컬 LLM 상태 관리, 비밀·내부 주소 미노출 |
-| Main Core 기본 Flow | P0-1 완료 / P0-2 scaffold 완료 | 활성 `DocumentRuntime`에 optional runner를 추가하고 주입형 LangGraph·결정론 Router·Mock Retriever/Model 회귀를 연결. 실제 provider 활성화는 P0-3 대기 |
-| Main Core Gateway·Policy | 부분 구현 | Citation·선택 Revision scope·안전한 오류는 활성이나 공통 Model Gateway와 단일 오류 Flow가 없음 |
-| MCP Metadata·Session | 미구현 | 레거시 MCP/tooling은 활성 app에 연결되지 않고 전용 metadata tool·애플리케이션 Session Cache가 없음 |
-| MCP Metadata 확장 | 미구현 | 레거시 catalog의 검색 2개 외 활성 문서 metadata 기반 신규 tool이 없음 |
+| Main Core 기본 Flow | P0-1 완료 / P0-2 scaffold 완료 | 활성 `DocumentRuntime`에 optional runner를 추가하고 주입형 LangGraph·결정론 Router·Mock Retriever/Model 회귀를 연결 |
+| Main Core Gateway·Policy | P0-3a·P0-3b·P0-3c 완료 | 공통 JSON Gateway, 파일 검색, 선택 활성 Revision 검증, scoped/업로드 근거 검색, 문서 답변과 proposal 생성·검증이 단일 absolute deadline과 strict schema·서버 citation 정책을 공유 |
+| MCP Metadata·Session | metadata 완료 / Session Cache 보류 | 공식 MCP SDK v2의 loopback·token 보호 `/mcp`, read-only `get_document_metadata`, 1.5초 deadline·2 worker 상한을 lifespan에 연결. Session Cache는 서버 소유 다중 턴 상태·authenticated principal이 없어 추가하지 않음 |
+| MCP Metadata 확장 | 첫 tool 완료 | 공개 tool은 UUID 기반 `get_document_metadata` 정확히 1개이며 filename/title/path/URI/body는 제외. 추가 tool은 현재 consumer 승인 전 보류 |
 | Docker 패키징 | 완료 | Vue/FastAPI 단일 non-root image, Compose runtime env·healthcheck·LAN port |
 | LAN 접속 | 부분 완료 | host LAN 주소 HTTP 200 확인, 다른 물리 PC와 Windows 방화벽 규칙은 관리자 확인 필요 |
-| 지연 목표 | 미달 | 검색은 목표권, LLM 포함 채팅은 추가 개선 필요 |
+| 지연 목표 | 부분 달성 / 채팅 미달 | 검색 확장 hard timeout과 전체 1초 예산을 적용. 실제 Docker 검색 재측정과 LLM 포함 채팅 개선 필요 |
 | 인증·ACL·감사 | 미구현 | 운영 전 별도 설계·승인 필요 |
 | LLM 기안 셀 렌더 | 완료 | 제목 `C8`, 재가 문구 `A10`, 일반 본문은 비병합·기본 높이의 독립 행, 2~6열 실제 표만 병합·wrap, 넓거나 공간 초과 표의 `세부내용` 시트 |
 
@@ -43,6 +43,7 @@ Bot Main Core WBS 재감사: 2026-08-14
 - `llmops_artifacts.py`: PostgreSQL ACL/Revision 확인 후 MinIO 조회
 - `llmops_graph.py`: Neo4j 버전 관계 조회
 - `bot_core/`: import 부작용 없는 LangGraph factory, 결정론적 Router, Retriever/Model/Metadata Protocol과 합성 fake
+- `mcp_server.py`, `tooling/`: exact `/mcp`, 공식 MCP v2 단일 metadata tool, bounded executor와 안전한 오류 계약
 - `playground/document_api.py`: 현재 공개 API
 - `playground/document_chat.py`: 근거 검색과 로컬 LLM 합성
 - `playground/document_models.py`: 채팅 API 계약
@@ -72,6 +73,7 @@ Bot Main Core WBS 재감사: 2026-08-14
 - `POST /api/playground/files/upload`
 - `GET /health`
 - `GET /playground`
+- `POST|GET|DELETE /mcp` (기본 비활성, OpenAPI 비노출, loopback+token)
 
 ## 제거 대상 판정
 
@@ -79,7 +81,7 @@ Bot Main Core WBS 재감사: 2026-08-14
 
 - 직접 SMB/SQLite: `content_*`, `finder.py`, `index*.py`, `smb_client.py`, `jobs.py`
 - 예전 RAG·평가: `rag_search.py`, `evaluation/`의 비활성 legacy 모듈, MLflow 평가 script/data. 활성 `evaluation/proposal_*.py`는 제외
-- 범용 확장 실험: `mcp_server.py`, `tooling/`, `integrations/langgraph/`
+- 범용 확장 실험: `integrations/langgraph/` (활성 `bot_core/`와 별개인 레거시)
 - 별도 데모: `qc_audit/`, `reports/`, Playground Tool/Skill/attachment 코드
 - 관련 테스트·문서·생성 잔여물
 
@@ -88,12 +90,28 @@ Bot Main Core WBS 재감사: 2026-08-14
 
 ## 최근 검증
 
+- 2026-08-14 P0-4: MCP/tooling/LLMOps/API 집중 Ruff 통과, 공식 SDK v2 wire·exact route·structured error·기본
+  비활성 gate를 포함한 50개 통과. `test_mcp_server.py`·`test_tooling.py`를 현재 계약으로 이관해 레거시 미수집
+  목록을 10개에서 8개로 축소했다.
+- PostgreSQL fake-connect와 persistent executor를 포함한 metadata 100회 측정은 p50 0.060ms·p95 0.233ms·최대
+  2.044ms로 adapter p95 50ms 기준을 통과했다. 비허용 Host의 421 거절도 wire 회귀로 고정했다.
+- Session Cache는 현재 UI가 history를 소유하고 graph checkpointer와 사용자 principal이 없어서 구현하지 않았다.
+  서버 소유 다중 턴 상태, authenticated principal, 저장 schema, multi-worker miss semantics 확정이 재개 조건이다.
 - 2026-08-14 Bot Core D1: focused 33개와 활성 비통합 192개 통과, 레거시 제거 후보 10개 모듈은 exact list로 미수집
 - 합성 fake graph 200회는 p50 0.972ms, p95 1.294ms, 최대 1.577ms였고 공개 ChatResponse 15필드·`/mcp` 404 유지
 - D1 로컬 Docker 재빌드·교체 후 health/UI 200, ChatResponse 15필드, 내부 graph 필드 0개, `/mcp` 404,
   합성 read-only 검색 3건 반환을 확인했다.
 - 같은 검색은 6,157.3ms였고 이 중 선택적 LLM 검색어 확장 실패 fallback이 6,007.9ms를 소비했다. 응답의
   `over_budget=false`도 목표 예산과 불일치하므로 P0-3에서 absolute deadline·즉시 rule fallback·예산 판정을 우선 수정한다.
+- 2026-08-14 P0-3a: 공통 Gateway·검색 hard deadline/fallback·단순 키워드 zero-model fast path 회귀와
+  활성 비통합 202개 통과, 프런트 typecheck와 7 files/48 tests 통과
+- 최종 Docker 합성 read-only 단순 검색 5회는 모두 3건을 반환했고 p50 142.3ms·p95 146.3ms, LLM 호출 0회,
+  `over_budget=false`였다. 모호 영어 질의의 Gateway timeout은 304.6ms에 규칙 fallback되어 전체 492.0ms였고
+  최근 컨테이너 오류 표식은 0건이었다.
+- 2026-08-14 P0-3b: 선택 검증·scoped retrieval·업로드 원본 읽기/추출·문서 답변에 단일 deadline을 전달하고,
+  deadline 소진·1초 미만 연결 차단·연결 후 query timeout 재계산을 포함한 focused 68개가 통과했다.
+- 2026-08-14 P0-3c: proposal 생성·수정·검증을 공통 Gateway로 이관하고 typed context window, context 절반 축소
+  1회, 선택 검증부터 workbook·SMB 신규 생성까지의 단일 deadline 회귀를 추가했다.
 - 2026-08-12 품질 우선 경로: strict JSON 오류 1회 복구, 유형별 2차 편집, 검증 citation 재구성, 행사 핵심 사실·명시 기대효과 보존, 비근거 구매 배경 제거를 적용
 - 완전 합성 구매·행사·일반 기안 3종을 실제 로컬 LLM으로 생성하고 Excel artifact 렌더에서 `기안지!A1:AE29`, 수식 오류 0, 내용 잘림·표 구조 오류 0 확인
 - 완전 합성 formal live 1건은 평균 90.598·1/1 통과, context/runtime budget 실패 0, SMB 호출 0. 다만 `candidate/unassigned`라 제품 품질 점수에는 부적격

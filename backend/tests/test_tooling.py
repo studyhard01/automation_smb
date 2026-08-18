@@ -1,281 +1,295 @@
-"""공통 검색 도구 계약과 실행기 테스트."""
+"""단일 MCP metadata 도구 계약과 bounded 실행기 테스트."""
 
 from __future__ import annotations
 
-import logging
+import threading
 import time
-from types import SimpleNamespace
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
 
 import pytest
-from pydantic import BaseModel
 
 from smb_finder.config import Settings
-from smb_finder.tooling import ToolCatalog, ToolExecutionError, ToolExecutor, ToolSpec
+from smb_finder.llmops_search import LlmopsFileSearcher, LlmopsSearchError
+from smb_finder.tooling import (
+    GET_DOCUMENT_METADATA_TOOL_DESCRIPTION,
+    GET_DOCUMENT_METADATA_TOOL_NAME,
+    DocumentMetadataOutput,
+    GetDocumentMetadataInput,
+    ToolExecutionError,
+    ToolExecutor,
+)
 
 
-class RecordingFinder:
-    def __init__(self, *, name: str = "분자검사", path: str = "검사결과/2026/분자검사") -> None:
-        self.name = name
-        self.path = path
-        self.requests: list[object] = []
-
-    def find(self, request):  # noqa: ANN001
-        self.requests.append(request)
-        return SimpleNamespace(
-            query=request.query,
-            normalized_query=request.query,
-            hits=[SimpleNamespace(name=self.name, path=self.path, score=0.9, depth=3)],
-            result_count=1,
-            elapsed_ms=3.2,
-            over_budget=False,
-            source="index",
-        )
-
-
-class RecordingSearcher:
+class RecordingMetadataReader:
     def __init__(self) -> None:
-        self.requests: list[object] = []
+        self.calls: list[tuple[UUID, UUID | None, float]] = []
 
-    def search(self, request):  # noqa: ANN001
-        self.requests.append(request)
-        return SimpleNamespace(
-            query=request.query,
-            terms=[request.query],
-            hits=[
-                SimpleNamespace(
-                    name="result.txt",
-                    path="검사결과/result.txt",
-                    ext=".txt",
-                    score=1.2,
-                    snippet="외부에 노출하면 안 되는 본문",
-                    size=123,
-                    mtime=1.0,
-                )
-            ],
-            result_count=1,
-            elapsed_ms=4.1,
-            over_budget=False,
-            indexed_files=99,
-        )
+    def get_document_metadata(
+        self,
+        doc_id: UUID,
+        revision_id: UUID | None = None,
+        *,
+        deadline: float,
+    ) -> dict[str, object]:
+        self.calls.append((doc_id, revision_id, deadline))
+        return _metadata_payload(doc_id, revision_id or uuid4())
 
 
-def _runtime(*, finder=None, content_searcher=None, **settings_kwargs):  # noqa: ANN001
-    return SimpleNamespace(
-        settings=Settings(_env_file=None, **settings_kwargs),
-        finder=finder if finder is not None else RecordingFinder(),
-        content_searcher=content_searcher if content_searcher is not None else RecordingSearcher(),
-    )
-
-
-def test_mcp_catalog_exposes_only_two_read_only_search_tools():
-    specs = ToolCatalog().list("mcp")
-
-    assert [spec.id for spec in specs] == ["find_folder", "search_content"]
-    assert all(spec.permission == "read" for spec in specs)
-    assert all(spec.read_only and spec.idempotent for spec in specs)
-    assert all(not spec.destructive and not spec.open_world for spec in specs)
-
-
-def test_explicit_empty_catalog_is_deny_all():
-    catalog = ToolCatalog(())
-
-    assert catalog.list("mcp") == ()
-    assert catalog.get("find_folder", "mcp") is None
-
-
-def test_catalog_handler_and_timeout_policy_are_the_execution_source():
-    class SyntheticInput(BaseModel):
-        value: str
-
-    class SyntheticOutput(BaseModel):
-        echoed: str
-
-    calls: list[str] = []
-
-    def handler(runtime, validated):  # noqa: ANN001
-        calls.append(runtime.marker)
-        return {"echoed": validated.value}
-
-    spec = ToolSpec(
-        id="synthetic_echo",
-        description="합성 catalog dispatch 검증",
-        input_model=SyntheticInput,
-        output_model=SyntheticOutput,
-        handler=handler,
-        timeout_resolver=lambda runtime: runtime.timeout_ms,
-        allowed_surfaces=frozenset({"playground"}),
-    )
-    runtime = SimpleNamespace(marker="catalog-handler", timeout_ms=250)
-
-    result = ToolExecutor(runtime, catalog=ToolCatalog((spec,))).execute(
-        "synthetic_echo",
-        {"value": "ok"},
-        surface="playground",
-    )
-
-    assert result == SyntheticOutput(echoed="ok")
-    assert calls == ["catalog-handler"]
-
-
-def test_mcp_catalog_rejects_admin_or_mutating_specs_even_if_surface_is_declared():
-    class SyntheticInput(BaseModel):
-        value: str
-
-    class SyntheticOutput(BaseModel):
-        echoed: str
-
-    def handler(runtime, validated):  # noqa: ANN001, ARG001
-        return {"echoed": validated.value}
-
-    admin_spec = ToolSpec(
-        id="admin_refresh",
-        description="관리자 작업",
-        input_model=SyntheticInput,
-        output_model=SyntheticOutput,
-        handler=handler,
-        timeout_resolver=lambda runtime: 250,
-        allowed_surfaces=frozenset({"playground", "mcp"}),
-        permission="admin",
-        read_only=False,
-        destructive=True,
-        idempotent=False,
-    )
-    catalog = ToolCatalog((admin_spec,))
-
-    assert catalog.list("playground") == (admin_spec,)
-    assert catalog.list("mcp") == ()
-    assert catalog.get("admin_refresh", "mcp") is None
-
-
-def test_find_folder_uses_default_limit_once_and_returns_minimal_contract():
-    finder = RecordingFinder()
-    executor = ToolExecutor(_runtime(finder=finder, find_default_limit=7))
-
-    result = executor.execute("find_folder", {"query": "  분자검사  "}, surface="mcp")
-
-    assert len(finder.requests) == 1
-    assert finder.requests[0].query == "분자검사"
-    assert finder.requests[0].limit == 7
-    assert result.model_dump() == {
-        "hits": [{"name": "분자검사", "path": "검사결과/2026/분자검사", "score": 0.9, "depth": 3}],
-        "result_count": 1,
-        "elapsed_ms": 3.2,
+def _metadata_payload(doc_id: UUID, revision_id: UUID) -> dict[str, object]:
+    return {
+        "source": "llmops",
+        "doc_id": doc_id,
+        "revision_id": revision_id,
+        "is_active": True,
+        "revision_status": "active",
+        "extension": ".txt",
+        "size_bytes": 123,
+        "modified_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+        "elapsed_ms": 2.0,
         "over_budget": False,
+        "degraded_dependencies": [],
     }
 
 
-def test_search_content_excludes_query_snippet_and_internal_metadata():
-    searcher = RecordingSearcher()
-    executor = ToolExecutor(_runtime(content_searcher=searcher))
-
-    result = executor.execute("search_content", {"query": "민감 검색어", "limit": 2}, surface="mcp")
-    payload = result.model_dump_json()
-
-    assert len(searcher.requests) == 1
-    assert searcher.requests[0].limit == 2
-    assert "민감 검색어" not in payload
-    assert "노출하면 안 되는 본문" not in payload
-    assert "snippet" not in payload
-    assert "indexed_files" not in payload
-    assert "mtime" not in payload
-    assert "size" not in payload
-
-
-def test_invalid_arguments_and_logs_do_not_echo_query(caplog):
-    caplog.set_level(logging.INFO, logger="smb_finder.tooling.executor")
-    secret_query = "환자식별자-DO-NOT-ECHO"
-    executor = ToolExecutor(_runtime())
-
-    with pytest.raises(ToolExecutionError) as exc_info:
-        executor.execute("find_folder", {"query": secret_query, "limit": 999}, surface="mcp")
-
-    assert exc_info.value.code == "invalid_arguments"
-    assert secret_query not in exc_info.value.message
-    assert secret_query not in caplog.text
+def test_metadata_contract_is_exact_and_forbids_legacy_search_fields():
+    assert GET_DOCUMENT_METADATA_TOOL_NAME == "get_document_metadata"
+    assert GET_DOCUMENT_METADATA_TOOL_DESCRIPTION
+    assert set(GetDocumentMetadataInput.model_json_schema()["properties"]) == {"doc_id", "revision_id"}
+    assert set(DocumentMetadataOutput.model_json_schema()["properties"]) == {
+        "source",
+        "doc_id",
+        "revision_id",
+        "is_active",
+        "revision_status",
+        "extension",
+        "size_bytes",
+        "modified_at",
+        "elapsed_ms",
+        "over_budget",
+        "degraded_dependencies",
+    }
+    serialized = (
+        DocumentMetadataOutput(
+            **_metadata_payload(uuid4(), uuid4()),
+        )
+        .model_dump_json()
+        .lower()
+    )
+    for forbidden in ("filename", "title", "path", "uri", "key", "body", "snippet", "query"):
+        assert forbidden not in serialized
 
 
-def test_absolute_or_unc_output_is_rejected_without_echoing_path():
-    unsafe_path = r"\\internal-host\private-share\patient.txt"
-    executor = ToolExecutor(_runtime(finder=RecordingFinder(path=unsafe_path)))
+def test_executor_validates_uuid_without_calling_reader_or_echoing_input():
+    reader = RecordingMetadataReader()
+    executor = ToolExecutor(reader)
+    invalid_doc_id = "invalid-document-id"
+    try:
+        with pytest.raises(ToolExecutionError) as captured:
+            executor.execute({"doc_id": invalid_doc_id})
+    finally:
+        executor.close()
 
-    with pytest.raises(ToolExecutionError) as exc_info:
-        executor.execute("find_folder", {"query": "test"}, surface="mcp")
-
-    assert exc_info.value.code == "unsafe_tool_output"
-    assert unsafe_path not in exc_info.value.message
+    assert captured.value.code == "invalid_arguments"
+    assert invalid_doc_id not in captured.value.message
+    assert reader.calls == []
 
 
-@pytest.mark.parametrize(
-    ("finder", "settings_kwargs"),
-    [
-        (RecordingFinder(path="10.20.30.40/private"), {}),
-        (RecordingFinder(name="10.20.30.40"), {}),
-        (RecordingFinder(path="configured-share/folder"), {"smb_share_name": "configured-share"}),
-        (
-            RecordingFinder(name="report-local-secret-token.txt"),
-            {"mcp_api_token": "local-secret-token"},
+def test_executor_passes_one_absolute_deadline_and_returns_exact_output():
+    reader = RecordingMetadataReader()
+    executor = ToolExecutor(reader)
+    doc_id = uuid4()
+    revision_id = uuid4()
+    started = time.monotonic()
+    try:
+        result = executor.execute({"doc_id": str(doc_id), "revision_id": str(revision_id)})
+    finally:
+        executor.close()
+
+    assert result.doc_id == doc_id
+    assert result.revision_id == revision_id
+    assert reader.calls[0][:2] == (doc_id, revision_id)
+    assert started < reader.calls[0][2] <= started + 1.6
+
+
+def test_default_executor_budget_reaches_real_llmops_metadata_adapter():
+    doc_id = uuid4()
+    revision_id = uuid4()
+    connect_calls: list[dict[str, object]] = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):  # noqa: ANN002
+            return None
+
+        def execute(self, _query, _parameters):  # noqa: ANN001
+            return None
+
+        def fetchone(self):
+            return {
+                "doc_id": doc_id,
+                "revision_id": revision_id,
+                "is_active": True,
+                "revision_status": "ACTIVE",
+                "extension": ".txt",
+                "file_size": 1,
+                "source_modified_at": None,
+            }
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):  # noqa: ANN002
+            return None
+
+        def cursor(self, **_kwargs):  # noqa: ANN003
+            return Cursor()
+
+    def connect(**kwargs):  # noqa: ANN003
+        connect_calls.append(kwargs)
+        return Connection()
+
+    searcher = LlmopsFileSearcher(
+        Settings(
+            _env_file=None,
+            llmops_db_host="db.test",
+            llmops_postgres_db="llmops_test",
+            postgres_user="reader",
+            postgres_password="synthetic-placeholder",
         ),
-    ],
-)
-def test_internal_identifiers_and_tokens_are_rejected_from_name_and_path(finder, settings_kwargs):
-    executor = ToolExecutor(_runtime(finder=finder, **settings_kwargs))
+        connect=connect,
+    )
+    executor = ToolExecutor(searcher)
+    durations: list[float] = []
+    try:
+        for _ in range(100):
+            started = time.perf_counter()
+            result = executor.execute({"doc_id": str(doc_id)})
+            durations.append(time.perf_counter() - started)
+    finally:
+        executor.close()
 
-    with pytest.raises(ToolExecutionError) as exc_info:
-        executor.execute("find_folder", {"query": "test"}, surface="mcp")
-
-    assert exc_info.value.code == "unsafe_tool_output"
-
-
-def test_content_index_count_is_internal_only():
-    class EmptySearcher:
-        def search(self, request):  # noqa: ANN001, ARG002
-            return SimpleNamespace(
-                hits=[],
-                result_count=0,
-                elapsed_ms=1.0,
-                over_budget=False,
-                indexed_files=10,
-            )
-
-    executor = ToolExecutor(_runtime(content_searcher=EmptySearcher()))
-    result = executor.execute("search_content", {"query": "no match"}, surface="playground")
-
-    assert result.indexed_files == 10
-    assert "indexed_files" not in result.model_dump()
-    assert "indexed_files" not in result.model_json_schema()["properties"]
+    assert result.doc_id == doc_id
+    assert result.revision_id == revision_id
+    assert len(connect_calls) == 100
+    assert all(call["connect_timeout"] == 1 for call in connect_calls)
+    p95_seconds = sorted(durations)[94]
+    assert p95_seconds < 0.05, f"fake-connect metadata p95={p95_seconds * 1000:.3f}ms"
 
 
-def test_timeout_is_soft_and_returns_safe_error():
-    class SlowFinder(RecordingFinder):
-        def find(self, request):  # noqa: ANN001
-            time.sleep(0.2)
-            return super().find(request)
+def test_executor_maps_adapter_budget_error_to_safe_timeout():
+    class BudgetReader(RecordingMetadataReader):
+        def get_document_metadata(self, doc_id, revision_id=None, *, deadline):  # noqa: ANN001, ANN201
+            raise LlmopsSearchError("metadata_budget_exhausted", "adapter detail", 15.0)
 
-    executor = ToolExecutor(_runtime(finder=SlowFinder(), find_budget_ms=100), max_concurrency=1)
-    started = time.perf_counter()
+    executor = ToolExecutor(BudgetReader())
+    try:
+        with pytest.raises(ToolExecutionError) as captured:
+            executor.execute({"doc_id": str(uuid4())})
+    finally:
+        executor.close()
 
-    with pytest.raises(ToolExecutionError) as exc_info:
-        executor.execute("find_folder", {"query": "slow"}, surface="mcp")
-
-    assert exc_info.value.code == "tool_timeout"
-    assert time.perf_counter() - started < 0.18
+    assert captured.value.code == "tool_timeout"
+    assert "adapter detail" not in captured.value.message
 
 
-def test_semaphore_wait_and_execution_share_one_deadline():
-    class VerySlowFinder(RecordingFinder):
-        def find(self, request):  # noqa: ANN001
-            time.sleep(0.35)
-            return super().find(request)
+def test_executor_maps_unexpected_adapter_error_without_reflecting_detail():
+    class FailingReader(RecordingMetadataReader):
+        def get_document_metadata(self, doc_id, revision_id=None, *, deadline):  # noqa: ANN001, ANN201
+            raise ValueError("private adapter detail")
 
-    executor = ToolExecutor(_runtime(finder=VerySlowFinder(), find_budget_ms=100), max_concurrency=1)
-    with pytest.raises(ToolExecutionError):
-        executor.execute("find_folder", {"query": "first"}, surface="mcp")
+    executor = ToolExecutor(FailingReader())
+    try:
+        with pytest.raises(ToolExecutionError) as captured:
+            executor.execute({"doc_id": str(uuid4())})
+    finally:
+        executor.close()
 
-    started = time.perf_counter()
-    with pytest.raises(ToolExecutionError) as exc_info:
-        executor.execute("find_folder", {"query": "second"}, surface="mcp")
-    elapsed = time.perf_counter() - started
+    assert captured.value.code == "internal_error"
+    assert "private adapter detail" not in captured.value.message
 
-    assert exc_info.value.code == "tool_busy"
-    assert elapsed < 0.16
-    time.sleep(0.16)
+
+def test_timeout_returns_promptly_and_running_worker_is_not_reused_as_queue_capacity():
+    release = threading.Event()
+    active = 0
+    active_lock = threading.Lock()
+    all_active = threading.Event()
+
+    class BlockingReader(RecordingMetadataReader):
+        def get_document_metadata(self, doc_id, revision_id=None, *, deadline):  # noqa: ANN001, ANN201
+            nonlocal active
+            with active_lock:
+                active += 1
+                if active == 2:
+                    all_active.set()
+            try:
+                release.wait(timeout=2)
+                return _metadata_payload(doc_id, revision_id or uuid4())
+            finally:
+                with active_lock:
+                    active -= 1
+
+    executor = ToolExecutor(BlockingReader(), timeout_ms=100, max_concurrency=2)
+    errors: list[str] = []
+
+    def invoke() -> None:
+        try:
+            executor.execute({"doc_id": str(uuid4())})
+        except ToolExecutionError as exc:
+            errors.append(exc.code)
+
+    callers = [threading.Thread(target=invoke) for _ in range(2)]
+    for caller in callers:
+        caller.start()
+    assert all_active.wait(timeout=1)
+    started = time.monotonic()
+    with pytest.raises(ToolExecutionError) as captured:
+        executor.execute({"doc_id": str(uuid4())})
+    elapsed = time.monotonic() - started
+    release.set()
+    for caller in callers:
+        caller.join(timeout=1)
+    executor.close()
+
+    assert captured.value.code == "tool_timeout"
+    assert elapsed < 0.05
+    assert errors == []
+    assert active == 0
+
+
+def test_close_waits_for_cooperative_active_worker_and_returns_with_zero_active_workers():
+    release = threading.Event()
+    entered = threading.Event()
+    active = 0
+
+    class BlockingReader(RecordingMetadataReader):
+        def get_document_metadata(self, doc_id, revision_id=None, *, deadline):  # noqa: ANN001, ANN201
+            nonlocal active
+            active += 1
+            entered.set()
+            try:
+                release.wait(timeout=2)
+                return _metadata_payload(doc_id, revision_id or uuid4())
+            finally:
+                active -= 1
+
+    executor = ToolExecutor(BlockingReader(), timeout_ms=100, max_concurrency=1)
+    caller = threading.Thread(
+        target=lambda: pytest.raises(ToolExecutionError, executor.execute, {"doc_id": str(uuid4())})
+    )
+    caller.start()
+    assert entered.wait(timeout=1)
+    caller.join(timeout=1)
+    close_returned = threading.Event()
+    closer = threading.Thread(target=lambda: (executor.close(), close_returned.set()))
+    closer.start()
+    assert close_returned.wait(timeout=0.05) is False
+    release.set()
+    closer.join(timeout=1)
+
+    assert close_returned.is_set() is True
+    assert active == 0
+    assert all(not thread.is_alive() for thread in executor._pool._threads)  # noqa: SLF001

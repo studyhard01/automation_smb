@@ -16,6 +16,7 @@ dependencies = [
     "smbprotocol>=1.15,<2",
     "pypdf>=6.0,<7",
     "langgraph>=1,<2",
+    "mcp>=2,<3",
 ]
 
 [project.optional-dependencies]

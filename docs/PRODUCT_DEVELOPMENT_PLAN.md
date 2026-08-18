@@ -39,7 +39,7 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 - 외부 DB·LLM 없이 실행되는 Mock Retriever/Model 프로필
 - 공통 Model Gateway와 Citation·Policy·오류 계약
 - 활성 FastAPI lifespan에 연결되는 read-only MCP Metadata Tool
-- bounded in-memory Session Cache와 timeout/fallback 계약
+- 서버 소유 다중 턴 상태가 생길 때만 재개하는 Session Cache 보류 기준
 - 위 항목의 상세 순서와 완료 기준은 [Bot Main Core 구현 계획](BOT_MAIN_CORE_IMPLEMENTATION_PLAN.md)을 따른다.
 
 ### 현재 제외
@@ -64,8 +64,9 @@ Playground다. 현재 성공 기준은 다음 수직 흐름의 실제 연결이�
 - 현재 FastAPI와 레거시 MCP·LangGraph 실험의 실행 경계를 먼저 고정
 - FastAPI + 최소 graph + Mock Retriever/Model 수직 슬라이스
 - 공통 Model Gateway로 검색어 확장·근거 답변의 timeout·오류 계약 통합
-- read-only 문서 metadata tool과 bounded Session Cache를 활성 FastAPI lifespan에 연결
-- metadata tool은 기본 정보 → 활성 Revision → 버전 관계 → 저장소 상태 → 선택 범위 Citation 검색 순으로 확장
+- read-only `get_document_metadata` 한 개와 bounded timeout/concurrency를 활성 FastAPI lifespan에 연결
+- Session Cache는 서버가 복원할 상태·authenticated principal·허용 schema·worker miss 의미가 확정될 때까지 보류
+- 추가 metadata tool은 실제 소비 흐름이 승인된 뒤 별도 수직 슬라이스로 검토
 - 삭제된 `FolderIndex`·SQLite 계약을 되살려 레거시 테스트만 통과시키는 방식은 사용하지 않음
 
 ### P0-B — 수직 흐름 안정화

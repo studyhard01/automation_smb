@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -285,11 +286,7 @@ class UploadRegistry:
 
         with self._lock:
             return next(
-                (
-                    record
-                    for record in self._load()
-                    if record.doc_id == doc_id and record.revision_id == revision_id
-                ),
+                (record for record in self._load() if record.doc_id == doc_id and record.revision_id == revision_id),
                 None,
             )
 
@@ -327,10 +324,12 @@ class SmbUploadWriter:
         *,
         smb_module: Any = smbclient,
         clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._settings = settings
         self._smb = smb_module
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._monotonic = monotonic
         self._slots = threading.BoundedSemaphore(settings.smb_upload_max_concurrency)
         self._session_lock = threading.Lock()
         self._connected = False
@@ -342,14 +341,18 @@ class SmbUploadWriter:
             self._smb.reset_connection_cache()
             self._connected = False
 
-    def _connect(self) -> None:
+    def _connect(self, *, connection_timeout_seconds: int | None = None) -> None:
         if self._connected:
             return
         with self._session_lock:
             if self._connected:
                 return
             try:
-                timeout_seconds = max(1, self._settings.smb_upload_timeout_ms // 1000)
+                configured_timeout_seconds = max(1, self._settings.smb_upload_timeout_ms // 1000)
+                timeout_seconds = min(
+                    configured_timeout_seconds,
+                    connection_timeout_seconds or configured_timeout_seconds,
+                )
                 self._smb.register_session(
                     self._settings.effective_smb_upload_host,
                     username=self._settings.effective_smb_upload_username,
@@ -416,7 +419,14 @@ class SmbUploadWriter:
         finally:
             self._slots.release()
 
-    def create_xlsx(self, content: bytes, file_name: str, relative_directory: str) -> FileUploadResponse:
+    def create_xlsx(
+        self,
+        content: bytes,
+        file_name: str,
+        relative_directory: str,
+        *,
+        deadline: float | None = None,
+    ) -> FileUploadResponse:
         """완성된 XLSX를 기존 파일 변경 없이 최종 이름으로 한 번만 생성한다."""
 
         if not self._settings.smb_upload_enabled:
@@ -426,6 +436,11 @@ class SmbUploadWriter:
 
         normalized_directory = normalize_relative_directory(relative_directory)
         safe_name = sanitize_filename(file_name)
+        started = self._monotonic()
+        effective_deadline = started + self._settings.smb_upload_timeout_ms / 1000
+        if deadline is not None:
+            effective_deadline = min(effective_deadline, deadline)
+        self._ensure_proposal_write_budget(effective_deadline)
         if Path(safe_name).suffix.lower() != ".xlsx":
             raise UploadError("file_type_not_allowed", "기안 초안은 XLSX 형식으로만 저장할 수 있습니다.", 415)
         if not content:
@@ -437,26 +452,34 @@ class SmbUploadWriter:
 
         uploaded_at = self._clock()
         try:
-            deadline = time.monotonic() + self._settings.smb_upload_timeout_ms / 1000
-            self._connect()
+            self._ensure_proposal_write_budget(effective_deadline)
+            self._connect(connection_timeout_seconds=self._remaining_proposal_write_timeout_seconds(effective_deadline))
             root = rf"\\{self._settings.effective_smb_upload_host}\{self._settings.effective_smb_upload_share_name}"
             destination = str(PureWindowsPath(root, *normalized_directory.split("/")))
-            if not self._smb.path.isdir(destination):
+            self._ensure_proposal_write_budget(effective_deadline)
+            if not self._smb.path.isdir(
+                destination,
+                connection_timeout=self._remaining_proposal_write_timeout_seconds(effective_deadline),
+            ):
                 raise UploadError("upload_directory_unavailable", "설정한 기안 저장 폴더를 사용할 수 없습니다.", 503)
 
             final_path = str(PureWindowsPath(destination, safe_name))
             try:
-                with self._smb.open_file(final_path, mode="xb") as target:
+                self._ensure_proposal_write_budget(effective_deadline)
+                with self._smb.open_file(
+                    final_path,
+                    mode="xb",
+                    connection_timeout=self._remaining_proposal_write_timeout_seconds(effective_deadline),
+                ) as target:
                     for offset in range(0, len(content), _CHUNK_SIZE):
-                        if time.monotonic() > deadline:
-                            raise UploadError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
+                        self._ensure_proposal_write_budget(effective_deadline)
                         target.write(content[offset : offset + _CHUNK_SIZE])
             except Exception as exc:  # noqa: BLE001 - smbclient는 충돌도 SMBOSError로 반환할 수 있다.
                 if _is_file_exists_error(exc):
                     raise UploadError("file_already_exists", "같은 이름의 기안 파일이 이미 있습니다.", 409) from exc
                 raise
-            if time.monotonic() > deadline:
-                raise UploadError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
+            if self._monotonic() >= effective_deadline:
+                _logger.warning("SMB 기안 초안 저장 완료: over_budget=true")
             return FileUploadResponse(
                 file_name=safe_name,
                 size_bytes=len(content),
@@ -471,6 +494,19 @@ class SmbUploadWriter:
             raise UploadError("smb_upload_failed", "공유폴더에 기안 초안을 저장하지 못했습니다.", 503) from exc
         finally:
             self._slots.release()
+
+    def _ensure_proposal_write_budget(self, deadline: float) -> None:
+        if self._monotonic() >= deadline:
+            raise UploadError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
+
+    def _remaining_proposal_write_timeout_seconds(self, deadline: float) -> int:
+        remaining_seconds = deadline - self._monotonic()
+        if remaining_seconds < 1:
+            raise UploadError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
+        return min(
+            max(1, self._settings.smb_upload_timeout_ms // 1000),
+            math.floor(remaining_seconds),
+        )
 
     def _read_upload_content(self, source: BinaryIO, deadline: float) -> bytes:
         """SMB 파일을 만들기 전에 크기·빈 파일·시간 예산을 로컬에서 검증한다."""
@@ -489,9 +525,21 @@ class SmbUploadWriter:
             raise UploadError("empty_file", "빈 파일은 첨부할 수 없습니다.", 400)
         return bytes(content)
 
-    def read(self, file_name: str, relative_directory: str, *, expected_size: int) -> bytes:
+    def read(
+        self,
+        file_name: str,
+        relative_directory: str,
+        *,
+        expected_size: int,
+        deadline: float | None = None,
+    ) -> bytes:
         """등록된 업로드 원본을 제한된 크기와 시간 안에서 다시 읽는다."""
 
+        started = self._monotonic()
+        effective_deadline = started + self._settings.smb_upload_timeout_ms / 1000
+        if deadline is not None:
+            effective_deadline = min(effective_deadline, deadline)
+        self._ensure_read_budget(effective_deadline)
         normalized_directory = normalize_relative_directory(relative_directory)
         safe_name = sanitize_filename(file_name)
         if expected_size < 1 or expected_size > self._settings.smb_upload_max_size_bytes:
@@ -500,18 +548,26 @@ class SmbUploadWriter:
             raise UploadError("upload_busy", "다른 파일 작업을 처리하고 있습니다. 잠시 후 다시 시도해 주세요.", 429)
 
         try:
-            self._connect()
-            deadline = time.monotonic() + self._settings.smb_upload_timeout_ms / 1000
+            connection_timeout_seconds = self._remaining_read_timeout_seconds(effective_deadline)
+            self._connect(connection_timeout_seconds=connection_timeout_seconds)
             root = rf"\\{self._settings.effective_smb_upload_host}\{self._settings.effective_smb_upload_share_name}"
             source_path = str(PureWindowsPath(root, *normalized_directory.split("/"), safe_name))
-            if not self._smb.path.exists(source_path):
+            self._ensure_read_budget(effective_deadline)
+            if not self._smb.path.exists(
+                source_path,
+                connection_timeout=self._remaining_read_timeout_seconds(effective_deadline),
+            ):
                 raise UploadError("uploaded_file_not_found", "첨부한 파일을 공유폴더에서 찾을 수 없습니다.", 404)
 
             data = bytearray()
-            with self._smb.open_file(source_path, mode="rb") as source:
+            self._ensure_read_budget(effective_deadline)
+            with self._smb.open_file(
+                source_path,
+                mode="rb",
+                connection_timeout=self._remaining_read_timeout_seconds(effective_deadline),
+            ) as source:
                 while True:
-                    if time.monotonic() > deadline:
-                        raise UploadError("uploaded_file_read_timeout", "첨부 파일을 읽는 시간이 초과됐습니다.", 504)
+                    self._ensure_read_budget(effective_deadline)
                     chunk = source.read(_CHUNK_SIZE)
                     if not chunk:
                         break
@@ -520,6 +576,7 @@ class SmbUploadWriter:
                         raise UploadError("uploaded_file_too_large", "첨부 파일 크기가 허용 범위를 넘었습니다.", 413)
             if not data:
                 raise UploadError("uploaded_file_empty", "첨부 파일 내용이 비어 있습니다.", 422)
+            self._ensure_read_budget(effective_deadline)
             return bytes(data)
         except UploadError:
             raise
@@ -528,6 +585,20 @@ class SmbUploadWriter:
             raise UploadError("uploaded_file_read_failed", "첨부 파일을 공유폴더에서 읽지 못했습니다.", 503) from exc
         finally:
             self._slots.release()
+
+    def _ensure_read_budget(self, deadline: float) -> None:
+        if self._monotonic() >= deadline:
+            raise UploadError("uploaded_file_read_timeout", "첨부 파일을 읽는 시간이 초과됐습니다.", 504)
+
+    def _remaining_read_timeout_seconds(self, deadline: float) -> int:
+        now = self._monotonic()
+        remaining_seconds = deadline - now
+        if remaining_seconds < 1:
+            raise UploadError("uploaded_file_read_timeout", "첨부 파일을 읽는 시간이 초과됐습니다.", 504)
+        return min(
+            max(1, self._settings.smb_upload_timeout_ms // 1000),
+            math.floor(remaining_seconds),
+        )
 
     @property
     def allowed_extensions(self) -> tuple[str, ...]:
@@ -555,6 +626,7 @@ class UploadManager:
         store: RuntimeUploadSettingsStore | None = None,
         writer: SmbUploadWriter | None = None,
         registry: UploadRegistry | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings
         default_directory = settings.effective_smb_upload_default_relative_directory
@@ -566,6 +638,7 @@ class UploadManager:
         )
         self.writer = writer or SmbUploadWriter(settings)
         self.registry = registry or UploadRegistry(Path(settings.smb_upload_registry_path))
+        self._clock = clock
 
     def close(self) -> None:
         """SMB writer를 종료한다."""
@@ -633,7 +706,13 @@ class UploadManager:
             }
         )
 
-    def save_proposal_draft(self, content: bytes, file_name: str) -> FileUploadResponse:
+    def save_proposal_draft(
+        self,
+        content: bytes,
+        file_name: str,
+        *,
+        deadline: float | None = None,
+    ) -> FileUploadResponse:
         """설정된 기안 폴더에 확정된 이름으로 신규 XLSX를 한 번만 추가한다."""
 
         relative_directory = self.store.get_proposal_draft_relative_directory()
@@ -641,17 +720,39 @@ class UploadManager:
             raise UploadError("proposal_directory_not_configured", "기안 초안 저장 폴더를 먼저 설정해 주세요.", 503)
 
         safe_name = sanitize_filename(file_name)
-        return self.writer.create_xlsx(content, safe_name, relative_directory)
+        return self.writer.create_xlsx(content, safe_name, relative_directory, deadline=deadline)
 
-    def validate_selections(self, selections: list[tuple[UUID, UUID]]) -> bool:
+    def validate_selections(
+        self,
+        selections: list[tuple[UUID, UUID]],
+        *,
+        deadline: float | None = None,
+    ) -> bool:
         """업로드 문서 UUID가 모두 서버 레지스트리에 등록돼 있는지 확인한다."""
 
-        return all(self.registry.find(doc_id, revision_id) is not None for doc_id, revision_id in selections)
+        valid = True
+        for doc_id, revision_id in selections:
+            if deadline is not None:
+                self._ensure_retrieval_budget(deadline)
+            valid = self.registry.find(doc_id, revision_id) is not None and valid
+        if deadline is not None:
+            self._ensure_retrieval_budget(deadline)
+        return valid
 
-    def retrieve(self, query: str, selections: list[tuple[UUID, UUID]]) -> ScopedRetrievalResult:
+    def retrieve(
+        self,
+        query: str,
+        selections: list[tuple[UUID, UUID]],
+        *,
+        deadline: float | None = None,
+    ) -> ScopedRetrievalResult:
         """업로드한 SMB 원본을 즉시 추출해 선택 문서 대화용 근거를 만든다."""
 
-        started = time.perf_counter()
+        started = self._clock()
+        effective_deadline = (
+            deadline if deadline is not None else started + self.settings.playground_agent_budget_ms / 1000
+        )
+        self._ensure_retrieval_budget(effective_deadline)
         read_ms = 0.0
         extract_ms = 0.0
         candidates: list[tuple[UploadedFileRecord, int, str, float]] = []
@@ -660,26 +761,31 @@ class UploadManager:
         query_tokens = self._query_tokens(query)
 
         for doc_id, revision_id in selections:
+            self._ensure_retrieval_budget(effective_deadline)
             record = self.registry.find(doc_id, revision_id)
             if record is None:
                 raise UploadError("uploaded_file_not_found", "첨부 파일 참조가 만료됐습니다. 다시 첨부해 주세요.", 404)
             scopes.append(RetrievalScope(doc_id=record.doc_id, revision_id=record.revision_id))
 
-            read_started = time.perf_counter()
+            self._ensure_retrieval_budget(effective_deadline)
+            read_started = self._clock()
             data = self.writer.read(
                 record.file_name,
                 record.relative_directory,
                 expected_size=record.size_bytes,
+                deadline=effective_deadline,
             )
-            read_ms += (time.perf_counter() - read_started) * 1000
+            read_ms += (self._clock() - read_started) * 1000
 
-            extract_started = time.perf_counter()
+            self._ensure_retrieval_budget(effective_deadline)
+            extract_started = self._clock()
             extracted = extract_text(
                 record.file_name,
                 data,
                 max_chars=max(self.settings.llmops_chunk_max_chars, 200_000),
             )
-            extract_ms += (time.perf_counter() - extract_started) * 1000
+            extract_ms += (self._clock() - extract_started) * 1000
+            self._ensure_retrieval_budget(effective_deadline)
             if extracted.status != "ok":
                 degraded.append(f"uploaded_file_{extracted.status}")
                 continue
@@ -710,7 +816,8 @@ class UploadManager:
             )
             for index, (record, chunk_index, text, lexical) in enumerate(selected, start=1)
         ]
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        self._ensure_retrieval_budget(effective_deadline)
+        elapsed_ms = round((self._clock() - started) * 1000, 1)
         metadata = RetrievalMetadata(
             trace_id=uuid.uuid4(),
             scope=scopes,
@@ -724,15 +831,26 @@ class UploadManager:
                 "extract": round(extract_ms, 1),
             },
             elapsed_ms=elapsed_ms,
-            over_budget=elapsed_ms > self.settings.playground_agent_budget_ms,
+            over_budget=self._clock() >= effective_deadline,
         )
+        self._ensure_retrieval_budget(effective_deadline)
         return ScopedRetrievalResult(citations=citations, metadata=metadata)
+
+    def _ensure_retrieval_budget(self, deadline: float) -> None:
+        if self._clock() >= deadline:
+            raise UploadError(
+                "uploaded_retrieval_budget_exhausted",
+                "첨부 문서 검색 시간 예산이 소진됐습니다.",
+                504,
+            )
 
     @staticmethod
     def _query_tokens(query: str) -> tuple[str, ...]:
         """즉시 근거 정렬에 쓸 중복 없는 한국어·영문 토큰을 만든다."""
 
-        return tuple(dict.fromkeys(token for token in re.findall(r"[0-9A-Za-z가-힣_]+", query.casefold()) if len(token) > 1))
+        return tuple(
+            dict.fromkeys(token for token in re.findall(r"[0-9A-Za-z가-힣_]+", query.casefold()) if len(token) > 1)
+        )
 
     @staticmethod
     def _chunks(text: str, max_chars: int) -> list[str]:

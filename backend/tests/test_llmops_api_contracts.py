@@ -11,6 +11,7 @@ from smb_finder.config import Settings
 from smb_finder.llmops_search import LlmopsSearchError
 from smb_finder.models import StoreConnectionState
 from smb_finder.playground.document_api import DocumentRuntime, create_document_router
+from smb_finder.playground.upload_service import UploadError
 
 
 def _app(runtime: DocumentRuntime) -> FastAPI:
@@ -70,12 +71,17 @@ def test_file_search_database_failure_is_503():
 
 
 class StaleFileSearcher:
-    def validate_active_selections(self, _selections):  # noqa: ANN001
+    def __init__(self) -> None:
+        self.deadline = None
+
+    def validate_active_selections(self, _selections, *, deadline=None):  # noqa: ANN001, ANN202
+        self.deadline = deadline
         return set()
 
 
 def test_chat_rejects_stale_selected_revision_before_retrieval():
-    runtime = DocumentRuntime(settings=_settings(), file_searcher=StaleFileSearcher())
+    searcher = StaleFileSearcher()
+    runtime = DocumentRuntime(settings=_settings(), file_searcher=searcher)
 
     response = _request(
         _app(runtime),
@@ -98,16 +104,22 @@ def test_chat_rejects_stale_selected_revision_before_retrieval():
     )
 
     assert response.status_code == 409
+    assert searcher.deadline is not None
     assert response.json()["detail"]["code"] == "selected_file_stale"
 
 
 class StaleUploadManager:
-    def validate_selections(self, _selections):  # noqa: ANN001
+    def __init__(self) -> None:
+        self.deadline = None
+
+    def validate_selections(self, _selections, *, deadline=None):  # noqa: ANN001
+        self.deadline = deadline
         return False
 
 
 def test_chat_rejects_unknown_uploaded_file_reference():
-    runtime = DocumentRuntime(settings=_settings(), upload_manager=StaleUploadManager())
+    upload_manager = StaleUploadManager()
+    runtime = DocumentRuntime(settings=_settings(), upload_manager=upload_manager)
 
     response = _request(
         _app(runtime),
@@ -129,7 +141,43 @@ def test_chat_rejects_unknown_uploaded_file_reference():
     )
 
     assert response.status_code == 409
+    assert upload_manager.deadline is not None
     assert response.json()["detail"]["code"] == "uploaded_file_stale"
+
+
+class ExpiredUploadManager:
+    def validate_selections(self, _selections, *, deadline=None):  # noqa: ANN001, ARG002
+        raise UploadError(
+            "uploaded_retrieval_budget_exhausted",
+            "첨부 문서 검색 시간 예산이 소진되었습니다.",
+            504,
+        )
+
+
+def test_chat_maps_expired_upload_selection_validation_to_safe_504():
+    runtime = DocumentRuntime(settings=_settings(), upload_manager=ExpiredUploadManager())
+
+    response = _request(
+        _app(runtime),
+        "POST",
+        "/api/playground/chat",
+        json={
+            "message": "Summarize this uploaded synthetic document.",
+            "mode": "document_qa",
+            "selected_files": [
+                {
+                    "source": "upload",
+                    "doc_id": "33333333-3333-3333-3333-333333333333",
+                    "revision_id": "44444444-4444-4444-4444-444444444444",
+                    "file_name": "synthetic-note.md",
+                    "title": "Synthetic note",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 504
+    assert response.json()["detail"]["code"] == "uploaded_retrieval_budget_exhausted"
 
 
 class StatusAdapter:

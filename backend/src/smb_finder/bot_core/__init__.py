@@ -15,6 +15,16 @@ from .contracts import (
     SelectedDocumentId,
 )
 from .graph import create_bot_graph
+from .model_gateway import (
+    JsonModelGateway,
+    ModelGatewayError,
+    ModelGatewayErrorCode,
+    ModelGatewayResult,
+    ModelPurpose,
+    ModelTokenUsage,
+    OllamaModelGateway,
+    is_internal_http_url,
+)
 from .routing import route_request
 
 __all__ = [
@@ -27,9 +37,17 @@ __all__ = [
     "DeterministicModelFake",
     "DeterministicRetrieverFake",
     "MetadataProtocol",
+    "JsonModelGateway",
+    "ModelGatewayError",
+    "ModelGatewayErrorCode",
+    "ModelGatewayResult",
+    "ModelPurpose",
+    "ModelTokenUsage",
     "ModelProtocol",
+    "OllamaModelGateway",
     "RetrieverProtocol",
     "SelectedDocumentId",
     "create_bot_graph",
+    "is_internal_http_url",
     "route_request",
 ]

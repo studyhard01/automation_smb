@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import io
 import re
 import zipfile
@@ -11,10 +10,10 @@ from pathlib import Path
 from uuid import UUID
 from xml.etree import ElementTree
 
-import httpx
 import pytest
 from pydantic import ValidationError
 
+from smb_finder.bot_core import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
 from smb_finder.config import Settings
 from smb_finder.models import DocumentCitation, RetrievalScores
 from smb_finder.playground.proposal_context import pack_proposal_context
@@ -117,6 +116,15 @@ def test_proposal_document_v2_is_strict_and_rejects_invalid_table_shape() -> Non
     payload["unexpected"] = True
     with pytest.raises(ValidationError):
         ProposalDocumentV2.model_validate(payload)
+
+
+def test_verification_claim_pattern_uses_ollama_compatible_ascii_digits() -> None:
+    schema = ProposalEvidenceVerification.model_json_schema()
+    pattern = schema["$defs"]["ProposalClaimVerdict"]["properties"]["claim_id"]["pattern"]
+
+    assert pattern == r"^C[0-9]{4}$"
+    with pytest.raises(ValidationError):
+        ProposalClaimVerdict(claim_id="C12A4", status="supported", action="keep", citations=["E001"])
 
 
 def test_required_money_safety_net_asks_once_when_event_fee_is_missing() -> None:
@@ -239,15 +247,9 @@ def test_event_evidence_filter_excludes_post_event_proofs_by_document_and_report
         _citation(1, "행사 발표 주제와 전시 분야를 안내합니다.", document=1).model_copy(
             update={"title": "합성 행사 프로그램"}
         ),
-        _citation(2, "결제 영수증 승인 금액입니다.", document=2).model_copy(
-            update={"title": "합성 결제 영수증"}
-        ),
-        _citation(3, "같은 영수증의 카드 전표입니다.", document=2).model_copy(
-            update={"title": "합성 결제 영수증"}
-        ),
-        _citation(4, "참석 확인증 발급 내역입니다.", document=3).model_copy(
-            update={"title": "합성 참석 확인증"}
-        ),
+        _citation(2, "결제 영수증 승인 금액입니다.", document=2).model_copy(update={"title": "합성 결제 영수증"}),
+        _citation(3, "같은 영수증의 카드 전표입니다.", document=2).model_copy(update={"title": "합성 결제 영수증"}),
+        _citation(4, "참석 확인증 발급 내역입니다.", document=3).model_copy(update={"title": "합성 참석 확인증"}),
     ]
 
     filtered = filter_proposal_evidence(
@@ -329,7 +331,7 @@ def test_event_document_is_normalized_to_compact_order_and_drops_full_schedule_s
             "heading": "주요 발표 주제",
             "semantic_role": "details",
             "citations": ["E001"],
-                "blocks": [{"type": "list", "ordered": False, "items": ["합성 주제"]}],
+            "blocks": [{"type": "list", "ordered": False, "items": ["합성 주제"]}],
             "missing_information": [],
         },
     ]
@@ -366,12 +368,7 @@ def test_v2_workbook_keeps_text_rows_editable_and_renders_five_column_table_with
     ]
     payload["missing_information"] = []
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
 
     generated = render_proposal_workbook(template_path.read_bytes(), ProposalDocumentV2.model_validate(payload))
@@ -386,7 +383,10 @@ def test_v2_workbook_keeps_text_rows_editable_and_renders_five_column_table_with
     _assert_ignorable_namespace_prefixes_are_declared(sheet_xml)
     _assert_ignorable_namespace_prefixes_are_declared(styles_xml)
     merges = {item.attrib["ref"] for item in sheet.findall("main:mergeCells/main:mergeCell", namespace)}
-    assert not any(reference.startswith(("A15:", "A16:", "A17:", "A18:", "A19:", "A20:", "A21:", "A22:", "A23:")) for reference in merges)
+    assert not any(
+        reference.startswith(("A15:", "A16:", "A17:", "A18:", "A19:", "A20:", "A21:", "A22:", "A23:"))
+        for reference in merges
+    )
     body_cell = sheet.find(".//main:c[@r='A16']", namespace)
     assert body_cell is not None
     body_style = styles.findall("main:cellXfs/main:xf", namespace)[int(body_cell.attrib["s"])]
@@ -409,9 +409,7 @@ def test_v2_workbook_keeps_text_rows_editable_and_renders_five_column_table_with
         f"Q{table_row}:U{table_row}",
         f"V{table_row}:Z{table_row}",
     }.issubset(merges)
-    header_style = styles.findall("main:cellXfs/main:xf", namespace)[
-        int(table_header_cell.attrib["s"])
-    ]
+    header_style = styles.findall("main:cellXfs/main:xf", namespace)[int(table_header_cell.attrib["s"])]
     assert header_style.attrib["borderId"] != "0"
     assert header_style.find("main:alignment", namespace).attrib["wrapText"] == "1"  # type: ignore[union-attr]
     assert "customHeight" in sheet.find(f".//main:row[@r='{table_row}']", namespace).attrib  # type: ignore[union-attr]
@@ -431,12 +429,7 @@ def test_v2_workbook_keeps_text_rows_editable_and_renders_five_column_table_with
 
 def test_generated_main_sheet_uses_normal_view_and_preserves_other_view_settings() -> None:
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
     template = template_path.read_bytes()
     namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
@@ -478,12 +471,7 @@ def test_wide_table_is_preserved_as_matrix_in_appendix_sheet() -> None:
     ]
     payload["missing_information"] = []
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
 
     generated = render_proposal_workbook(template_path.read_bytes(), ProposalDocumentV2.model_validate(payload))
@@ -501,6 +489,7 @@ def test_wide_table_is_preserved_as_matrix_in_appendix_sheet() -> None:
     main_texts = [item.text or "" for item in main.findall(".//main:c/main:is/main:t", namespace)]
     assert any("세부내용" in value and "참조" in value for value in main_texts)
     assert not any(" | " in value for value in main_texts)
+
 
 def test_legacy_projection_is_deterministic_and_preserves_table_header() -> None:
     document = ProposalDocumentV2.model_validate(_document_payload())
@@ -573,12 +562,7 @@ def test_large_multiline_table_projection_always_fits_workbook_and_keeps_omissio
     assert "구분 항목 | 금액 일정" in fields.body
 
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
     generated = insert_proposal_fields(template_path.read_bytes(), fields)
     assert generated.startswith(b"PK\x03\x04")
@@ -621,122 +605,181 @@ def test_context_packer_is_deterministic_bounded_and_preserves_important_lines()
     assert first.context_sha256 == sha256(first.text.encode("utf-8")).hexdigest()
 
 
-class _SequenceClient:
-    def __init__(self, *, always_limit: bool = False) -> None:
-        self.always_limit = always_limit
+class _SequenceGateway:
+    def __init__(self, sequence: list[dict | ModelGatewayError] | None = None) -> None:
+        self.sequence = sequence or [_document_payload()]
         self.calls: list[dict] = []
 
-    def post(self, url: str, *, json: dict) -> httpx.Response:
-        self.calls.append(json)
-        request = httpx.Request("POST", url)
-        if self.always_limit or len(self.calls) == 1:
-            return httpx.Response(
-                400,
-                json={"error": "prompt is too long for the context window"},
-                request=request,
-            )
-        return httpx.Response(
-            200,
-            json={
-                "message": {"content": json_module.dumps(_document_payload(), ensure_ascii=False)},
-                "prompt_eval_count": 321,
-            },
-            request=request,
+    def invoke_json(self, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append(kwargs)
+        value = self.sequence[min(len(self.calls) - 1, len(self.sequence) - 1)]
+        if isinstance(value, ModelGatewayError):
+            raise value
+        return ModelGatewayResult(
+            payload=kwargs["response_model"].model_validate(value),
+            provider="ollama",
+            model=kwargs["model"],
+            usage=ModelTokenUsage(prompt_tokens=321, completion_tokens=10),
+            elapsed_ms=5.0,
         )
 
     def close(self) -> None:
         return None
 
 
-class _InvalidThenValidClient:
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def post(self, url: str, *, json: dict) -> httpx.Response:
-        self.calls.append(json)
-        request = httpx.Request("POST", url)
-        content = {"schema_version": "wrong-contract"} if len(self.calls) == 1 else _document_payload()
-        return httpx.Response(
-            200,
-            json={"message": {"content": json_module.dumps(content, ensure_ascii=False)}},
-            request=request,
-        )
-
-    def close(self) -> None:
-        return None
-
-
-class _AlwaysValidClient:
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
-
-    def post(self, url: str, *, json: dict) -> httpx.Response:
-        self.calls.append(json)
-        request = httpx.Request("POST", url)
-        return httpx.Response(
-            200,
-            json={"message": {"content": json_module.dumps(_document_payload(), ensure_ascii=False)}},
-            request=request,
-        )
-
-    def close(self) -> None:
-        return None
-
-
-json_module = json
-
-
-def test_context_limit_retries_once_with_half_budget_and_records_usage() -> None:
-    client = _SequenceClient()
-    generator = LocalProposalDraftGenerator(_settings(), client=client)
+def test_gateway_generation_records_packed_context_usage_and_deadline() -> None:
+    gateway = _SequenceGateway()
+    generator = LocalProposalDraftGenerator(_settings(), gateway=gateway, clock=lambda: 100.0)
     evidence = [_citation(1, "합성 근거 " * 120, score=0.9)]
 
-    result = generator.generate("합성 구매 기안을 작성해 줘", evidence)
+    result = generator.generate("합성 구매 기안을 작성해 줘", evidence, deadline=100.25)
 
-    assert len(client.calls) == 2
-    first_context = client.calls[0]["messages"][1]["content"]
-    retry_context = client.calls[1]["messages"][1]["content"]
-    assert len(retry_context) < len(first_context)
-    assert result.context_usage.retry_count == 1
-    assert result.context_usage.context_budget_chars == 1000
-    assert result.context_usage.first_attempt_context_chars is not None
+    assert len(gateway.calls) == 1
+    assert gateway.calls[0]["purpose"] == "proposal_generation"
+    assert gateway.calls[0]["deadline"] == 100.25
+    assert gateway.calls[0]["context_window_tokens"] == _settings().proposal_llm_num_ctx
+    assert result.context_usage.retry_count == 0
     assert result.context_usage.prompt_eval_count == 321
     assert result.document is not None
     assert result.fields.title == result.document.title
     assert result.packed_citation_map == (("E001", str(evidence[0].chunk_id)),)
-    retry_context_only = retry_context.split("\n\n선택 문서 근거:\n", 1)[1]
-    assert result.packed_context_sha256 == sha256(retry_context_only.encode("utf-8")).hexdigest()
+    context_only = gateway.calls[0]["messages"][1]["content"].split("\n\n선택 문서 근거:\n", 1)[1]
+    assert result.packed_context_sha256 == sha256(context_only.encode("utf-8")).hexdigest()
 
 
-def test_context_limit_retry_is_bounded_to_two_calls() -> None:
-    client = _SequenceClient(always_limit=True)
-    generator = LocalProposalDraftGenerator(_settings(), client=client)
+def test_expired_deadline_does_not_invoke_proposal_gateway() -> None:
+    gateway = _SequenceGateway()
+    generator = LocalProposalDraftGenerator(_settings(), gateway=gateway, clock=lambda: 100.0)
 
     with pytest.raises(ProposalDraftError) as raised:
-        generator.generate("합성 기안을 작성해 줘", [_citation(1, "합성 근거 " * 120)])
+        generator.generate("합성 기안을 작성해 줘", [_citation(1, "합성 근거 " * 120)], deadline=100.0)
 
-    assert raised.value.code == "proposal_context_limit_exceeded"
-    assert raised.value.status_code == 422
-    assert raised.value.context_usage is not None
-    assert raised.value.context_usage.retry_count == 1
-    assert raised.value.context_usage.first_attempt_context_chars is not None
-    assert len(client.calls) == 2
+    assert raised.value.code == "proposal_llm_unavailable"
+    assert gateway.calls == []
 
 
 def test_invalid_structured_response_retries_once_with_repair_instruction() -> None:
-    client = _InvalidThenValidClient()
-    generator = LocalProposalDraftGenerator(_settings(), client=client)
+    gateway = _SequenceGateway([ModelGatewayError("output_schema_invalid", retryable=False), _document_payload()])
+    generator = LocalProposalDraftGenerator(_settings(), gateway=gateway)
 
     result = generator.generate("합성 구매 기안을 작성해 줘", [_citation(1, "합성 구매 근거")])
 
     assert result.document is not None
-    assert len(client.calls) == 2
-    assert "strict JSON 계약을 충족하지 못했습니다" in client.calls[1]["messages"][0]["content"]
+    assert len(gateway.calls) == 2
+    assert "strict JSON 계약을 충족하지 못했습니다" in gateway.calls[1]["messages"][0]["content"]
+
+
+def test_context_limit_retries_once_with_half_context_separately_from_structure_repair() -> None:
+    gateway = _SequenceGateway(
+        [
+            ModelGatewayError("output_schema_invalid", retryable=False),
+            ModelGatewayError("model_context_limit", retryable=True),
+            _document_payload(),
+        ]
+    )
+    settings = _settings(proposal_context_max_chars=2000, proposal_context_per_document_chars=2000)
+    generator = LocalProposalDraftGenerator(settings, gateway=gateway)
+
+    result = generator.generate("합성 구매 기안을 작성해 줘", [_citation(1, "합성 구매 근거 " * 500)])
+
+    assert len(gateway.calls) == 3
+    assert result.context_usage.retry_count == 1
+    assert result.context_usage.first_attempt_context_chars is not None
+    assert result.context_usage.first_attempt_context_chars > result.context_usage.context_chars
+    assert "strict JSON 계약을 충족하지 못했습니다" in gateway.calls[2]["messages"][0]["content"]
+
+
+def test_second_context_limit_returns_safe_error_with_half_context_usage() -> None:
+    gateway = _SequenceGateway(
+        [
+            ModelGatewayError("model_context_limit", retryable=True),
+            ModelGatewayError("model_context_limit", retryable=True),
+        ]
+    )
+    generator = LocalProposalDraftGenerator(
+        _settings(proposal_context_max_chars=2000, proposal_context_per_document_chars=2000),
+        gateway=gateway,
+    )
+
+    with pytest.raises(ProposalDraftError) as raised:
+        generator.generate("합성 구매 기안을 작성해 줘", [_citation(1, "합성 구매 근거 " * 500)])
+
+    assert raised.value.code == "proposal_context_limit_exceeded"
+    assert raised.value.context_usage is not None
+    assert raised.value.context_usage.retry_count == 1
+    assert len(gateway.calls) == 2
+
+
+def test_evidence_assessment_uses_shared_gateway_and_same_deadline() -> None:
+    gateway = _SequenceGateway(
+        [
+            {
+                "schema_version": "proposal-evidence-verification-v1",
+                "claims": [
+                    {"claim_id": "C0001", "status": "supported", "action": "keep", "citations": ["E001"]},
+                    {"claim_id": "C0002", "status": "supported", "action": "keep", "citations": ["E001"]},
+                ],
+                "questions": [],
+            }
+        ]
+    )
+    generator = LocalProposalDraftGenerator(
+        _settings(),
+        gateway_getter=lambda: gateway,
+        clock=lambda: 100.0,
+    )
+
+    verification = generator.assess(
+        "합성 구매 승인 요청",
+        ProposalDocumentV2.model_validate(_document_payload()),
+        [_citation(1, "합성 장비 구매 근거")],
+        proposal_type="purchase",
+        deadline=100.25,
+    )
+
+    assert len(verification.claims) == 2
+    assert gateway.calls[0]["purpose"] == "proposal_validation"
+    assert gateway.calls[0]["deadline"] == 100.25
+    assert gateway.calls[0]["context_window_tokens"] == _settings().proposal_llm_num_ctx
+
+
+def test_assessment_maps_context_limit_without_retry_and_preserves_usage() -> None:
+    gateway = _SequenceGateway([ModelGatewayError("model_context_limit", retryable=True)])
+    generator = LocalProposalDraftGenerator(_settings(), gateway=gateway)
+
+    with pytest.raises(ProposalDraftError) as raised:
+        generator.assess(
+            "합성 구매 승인 요청",
+            ProposalDocumentV2.model_validate(_document_payload()),
+            [_citation(1, "합성 장비 구매 근거")],
+            proposal_type="purchase",
+        )
+
+    assert raised.value.code == "proposal_context_limit_exceeded"
+    assert raised.value.context_usage is not None
+    assert len(gateway.calls) == 1
+
+
+def test_expired_assessment_deadline_does_not_invoke_gateway() -> None:
+    gateway = _SequenceGateway()
+    generator = LocalProposalDraftGenerator(_settings(), gateway=gateway, clock=lambda: 100.0)
+
+    with pytest.raises(ProposalDraftError) as raised:
+        generator.assess(
+            "합성 구매 승인 요청",
+            ProposalDocumentV2.model_validate(_document_payload()),
+            [_citation(1, "합성 장비 구매 근거")],
+            proposal_type="purchase",
+            deadline=100.0,
+        )
+
+    assert raised.value.code == "proposal_verification_unavailable"
+    assert gateway.calls == []
 
 
 def test_quality_refinement_uses_type_checklist_and_normalizes_approval_request() -> None:
-    client = _AlwaysValidClient()
-    generator = LocalProposalDraftGenerator(_settings(), client=client)
+    gateway = _SequenceGateway()
+    generator = LocalProposalDraftGenerator(_settings(), gateway=gateway)
     document = ProposalDocumentV2.model_validate(_document_payload())
 
     result = generator.refine(
@@ -748,12 +791,12 @@ def test_quality_refinement_uses_type_checklist_and_normalizes_approval_request(
 
     assert result.document is not None
     assert result.document.approval_request == "다음과 같이 구매를 진행하고자 하오니 검토 후 승인하여 주시기 바랍니다."
-    assert "품목, 수량, 단가, 총액" in client.calls[0]["messages"][1]["content"]
+    assert "품목, 수량, 단가, 총액" in gateway.calls[0]["messages"][1]["content"]
 
 
 def test_event_quality_refinement_adds_missing_grounded_decision_sentence() -> None:
-    client = _AlwaysValidClient()
-    generator = LocalProposalDraftGenerator(_settings(), client=client)
+    gateway = _SequenceGateway()
+    generator = LocalProposalDraftGenerator(_settings(), gateway=gateway)
     document = ProposalDocumentV2.model_validate(_document_payload())
     evidence = [
         _citation(
@@ -899,7 +942,7 @@ def test_purchase_background_is_kept_only_when_reference_explicitly_supports_it(
 
 
 def test_revision_reserves_base_document_from_runtime_context_budget() -> None:
-    client = _SequenceClient()
+    gateway = _SequenceGateway()
     generator = LocalProposalDraftGenerator(
         _settings(
             proposal_llm_num_ctx=4096,
@@ -907,7 +950,7 @@ def test_revision_reserves_base_document_from_runtime_context_budget() -> None:
             proposal_context_max_chars=30_000,
             proposal_context_per_document_chars=10_000,
         ),
-        client=client,
+        gateway=gateway,
     )
     payload = _document_payload()
     payload["sections"][0]["blocks"] = [
@@ -926,4 +969,4 @@ def test_revision_reserves_base_document_from_runtime_context_budget() -> None:
     assert raised.value.code == "proposal_context_limit_exceeded"
     assert raised.value.context_usage is not None
     assert raised.value.context_usage.context_budget_chars < 256
-    assert client.calls == []
+    assert gateway.calls == []

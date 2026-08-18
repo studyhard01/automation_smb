@@ -1,37 +1,71 @@
-"""기존 검색 runtime을 읽기 전용 MCP Streamable HTTP endpoint로 노출한다."""
+"""문서 metadata 하나만 제공하는 MCP v2 Streamable HTTP bundle."""
 
 from __future__ import annotations
 
 import hmac
 import ipaddress
-import inspect
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Annotated
+from typing import Any
+from uuid import UUID
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field, ValidationError
+from mcp.server import MCPServer
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import ValidationError
 from starlette.datastructures import Headers, URLPath
 from starlette.responses import JSONResponse
 from starlette.routing import BaseRoute, Match, NoMatchFound
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from .config import Settings
-from .tooling import ToolCatalog, ToolExecutionError, ToolExecutor, ToolSpec
+from .tooling import (
+    GET_DOCUMENT_METADATA_TOOL_DESCRIPTION,
+    GET_DOCUMENT_METADATA_TOOL_NAME,
+    DocumentMetadataOutput,
+    MetadataReader,
+    ToolExecutionError,
+    ToolExecutor,
+)
+from .tooling.contracts import GetDocumentMetadataInput
+
+
+class SafeMCPServer(MCPServer[Any]):
+    """tool 오류를 입력 원문 없는 구조화된 MCP 결과로 정규화한다."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any | None = None) -> Any:
+        if name != GET_DOCUMENT_METADATA_TOOL_NAME:
+            return _tool_error_result(ToolExecutionError("invalid_arguments", "허용되지 않은 도구입니다."))
+        try:
+            GetDocumentMetadataInput.model_validate(arguments)
+        except ValidationError:
+            return _tool_error_result(ToolExecutionError("invalid_arguments", "도구 입력이 올바르지 않습니다."))
+        try:
+            return await super().call_tool(name, arguments, context)
+        except Exception as exc:
+            cause: BaseException | None = exc
+            while cause is not None:
+                if isinstance(cause, ToolExecutionError):
+                    return _tool_error_result(cause)
+                cause = cause.__cause__
+            return _tool_error_result(
+                ToolExecutionError("internal_error", "메타데이터 도구를 실행할 수 없습니다.", retryable=True)
+            )
 
 
 @dataclass(frozen=True)
 class McpBundle:
-    """FastMCP server와 보안 wrapper가 적용된 ASGI app 묶음."""
+    """호스트 앱이 mount/lifespan/close를 연결할 최소 MCP 구성."""
 
-    server: FastMCP
+    server: MCPServer[Any]
     app: ASGIApp
+    executor: ToolExecutor
+
+    def close(self) -> None:
+        """호스트가 metadata adapter보다 먼저 worker를 종료한다."""
+
+        self.executor.close()
 
 
 class McpExactRoute(BaseRoute):
-    """하위 경로 redirect 없이 정확히 `/mcp`에서 ASGI app을 호출한다."""
+    """정확한 `/mcp`만 전달하고 trailing slash 자동 redirect는 404로 막는다."""
 
     def __init__(self, path: str, app: ASGIApp, *, name: str = "mcp") -> None:
         self.path = path
@@ -39,7 +73,7 @@ class McpExactRoute(BaseRoute):
         self.name = name
 
     def matches(self, scope: Scope) -> tuple[Match, Scope]:
-        if scope["type"] == "http" and scope.get("path") == self.path:
+        if scope["type"] == "http" and scope.get("path") in {self.path, f"{self.path}/"}:
             return Match.FULL, {}
         return Match.NONE, {}
 
@@ -49,172 +83,108 @@ class McpExactRoute(BaseRoute):
         raise NoMatchFound(name, path_params)
 
     async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
-        await self.app(scope, receive, send)
+        if scope.get("path") != self.path:
+            await _http_error(send, 404, "not_found")
+            return
+        inner_scope = dict(scope)
+        inner_scope["root_path"] = f"{scope.get('root_path', '')}{self.path}"
+        inner_scope["path"] = "/"
+        inner_scope["raw_path"] = b"/"
+        await self.app(inner_scope, receive, send)
 
 
-class SafeFastMCP(FastMCP):
-    """FastMCP/Pydantic의 상세 오류가 입력 원문을 반사하지 않게 정규화한다."""
+class McpAccessMiddleware:
+    """MCP sub-app을 loopback client와 전용 bearer token으로 제한한다."""
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        try:
-            return await super().call_tool(name, arguments)
-        except ToolError as exc:
-            cause: BaseException | None = exc
-            while cause is not None:
-                if isinstance(cause, ToolExecutionError):
-                    raise ToolError(f"{cause.code}: {cause.message}") from None
-                if isinstance(cause, ValidationError):
-                    raise ToolError("invalid_arguments: 도구 입력이 올바르지 않습니다.") from None
-                cause = cause.__cause__
-            raise ToolError("tool_error: 도구 실행에 실패했습니다.") from None
-
-
-class McpSecurityMiddleware:
-    """MCP 경로에만 token·loopback·Host·Origin·본문 크기 제한을 적용한다."""
-
-    def __init__(self, app: ASGIApp, settings: Settings) -> None:
-        self.app = app
-        self._token = settings.mcp_api_token
-        self._allow_remote = settings.mcp_allow_remote
-        self._allowed_hosts = settings.mcp_allowed_host_set
-        self._allowed_origins = settings.mcp_allowed_origin_set
-        self._max_body_bytes = settings.mcp_max_body_bytes
+    def __init__(self, app: ASGIApp, *, bearer_token: str) -> None:
+        self._app = app
+        self._bearer_token = bearer_token
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
-            await self.app(scope, receive, send)
+            await self._app(scope, receive, send)
             return
-
-        headers = Headers(scope=scope)
-        if not self._allow_remote and not _is_loopback_client(scope):
+        if not _is_loopback_client(scope):
             await _http_error(send, 403, "remote_client_forbidden")
             return
-
-        if _normalized_host(headers.get("host", "")) not in self._allowed_hosts:
-            await _http_error(send, 403, "host_forbidden")
-            return
-
-        origin = headers.get("origin", "").strip().rstrip("/").lower()
-        if origin and origin not in self._allowed_origins:
-            await _http_error(send, 403, "origin_forbidden")
-            return
-
-        authorization = headers.get("authorization", "")
+        authorization = Headers(scope=scope).get("authorization", "")
         scheme, separator, supplied_token = authorization.partition(" ")
-        if separator != " " or scheme.lower() != "bearer" or not hmac.compare_digest(supplied_token, self._token):
-            await _http_error(
-                send,
-                401,
-                "authentication_required",
-                headers={"WWW-Authenticate": "Bearer"},
+        if (
+            separator != " "
+            or scheme.lower() != "bearer"
+            or not hmac.compare_digest(
+                supplied_token,
+                self._bearer_token,
             )
+        ):
+            await _http_error(send, 401, "authentication_required", headers={"WWW-Authenticate": "Bearer"})
             return
-
-        content_length = headers.get("content-length")
-        if content_length:
-            try:
-                if int(content_length) > self._max_body_bytes:
-                    await _http_error(send, 413, "request_too_large")
-                    return
-            except ValueError:
-                await _http_error(send, 400, "invalid_content_length")
-                return
-
-        if scope.get("method", "GET").upper() == "POST":
-            body = await _read_limited_body(receive, self._max_body_bytes)
-            if body is None:
-                await _http_error(send, 413, "request_too_large")
-                return
-            replayed = False
-
-            async def replay_receive() -> Message:
-                nonlocal replayed
-                if replayed:
-                    return {"type": "http.disconnect"}
-                replayed = True
-                return {"type": "http.request", "body": body, "more_body": False}
-
-            receive = replay_receive
-
-        await self.app(scope, receive, send)
-
-
-def validate_mcp_settings(settings: Settings) -> None:
-    """활성화된 MCP가 인증 없이 시작되거나 관리자 token을 재사용하지 않게 검증한다."""
-
-    if not settings.mcp_enabled:
-        return
-    if not settings.mcp_api_token.strip():
-        raise RuntimeError("MCP_ENABLED=true이면 별도의 MCP_API_TOKEN이 필요합니다.")
-    if settings.admin_api_token and hmac.compare_digest(settings.mcp_api_token, settings.admin_api_token):
-        raise RuntimeError("MCP_API_TOKEN은 ADMIN_API_TOKEN과 다른 값을 사용해야 합니다.")
-    if not settings.mcp_allowed_host_set:
-        raise RuntimeError("MCP_ALLOWED_HOSTS에는 하나 이상의 Host가 필요합니다.")
+        await self._app(scope, receive, send)
 
 
 def create_mcp_bundle(
-    runtime_provider: Any,
-    settings: Settings,
+    metadata_reader: MetadataReader,
     *,
-    catalog: ToolCatalog | None = None,
+    bearer_token: str,
+    timeout_ms: int = 1500,
+    max_concurrency: int = 2,
 ) -> McpBundle:
-    """catalog에서 MCP 공개가 승인된 도구만 Streamable HTTP app에 등록한다."""
+    """`/mcp` mount 전용 sub-app과 단일 metadata tool을 생성한다."""
 
-    validate_mcp_settings(settings)
-    executor = ToolExecutor(runtime_provider, catalog=catalog)
-    server = SafeFastMCP(
-        name="automation-smb-search",
-        instructions="사전 구축된 온프레미스 인덱스를 읽기 전용으로 검색합니다.",
+    token = bearer_token.strip()
+    if not token:
+        raise RuntimeError("MCP 전용 bearer token이 필요합니다.")
+    executor = ToolExecutor(
+        metadata_reader,
+        timeout_ms=timeout_ms,
+        max_concurrency=max_concurrency,
+    )
+    server: MCPServer[Any] = SafeMCPServer(
+        "automation-smb-metadata",
+        instructions="서버가 발급한 UUID의 문서 revision 상태만 읽습니다.",
+    )
+
+    @server.tool(
+        name=GET_DOCUMENT_METADATA_TOOL_NAME,
+        description=GET_DOCUMENT_METADATA_TOOL_DESCRIPTION,
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        ),
+        structured_output=True,
+    )
+    async def get_document_metadata(
+        doc_id: UUID,
+        revision_id: UUID | None = None,
+    ) -> DocumentMetadataOutput:
+        """문서 UUID로 canonical revision 상태를 조회한다."""
+
+        return await executor.execute_async({"doc_id": doc_id, "revision_id": revision_id})
+
+    # 호스트는 `McpExactRoute("/mcp", bundle.app)`로 이 내부 `/` endpoint만 연결한다.
+    app = server.streamable_http_app(
+        streamable_http_path="/",
         stateless_http=True,
         json_response=True,
-        streamable_http_path="/mcp",
+        host="127.0.0.1",
     )
-    for spec in executor.catalog.list("mcp"):
-        server.add_tool(
-            _build_mcp_handler(executor, spec),
-            name=spec.id,
-            description=spec.description,
-            annotations=ToolAnnotations(
-                readOnlyHint=spec.read_only,
-                destructiveHint=spec.destructive,
-                idempotentHint=spec.idempotent,
-                openWorldHint=spec.open_world,
-            ),
-            structured_output=True,
-        )
-
-    secured_app = McpSecurityMiddleware(server.streamable_http_app(), settings)
-    return McpBundle(server=server, app=secured_app)
+    return McpBundle(server=server, app=McpAccessMiddleware(app, bearer_token=token), executor=executor)
 
 
-def _build_mcp_handler(executor: ToolExecutor, spec: ToolSpec) -> Callable[..., Awaitable[BaseModel]]:
-    """Pydantic 입력 계약을 FastMCP 함수 signature로 변환한다."""
-
-    async def execute_catalog_tool(**arguments: Any) -> BaseModel:
-        return await executor.execute_async(spec.id, arguments, surface="mcp")
-
-    parameters: list[inspect.Parameter] = []
-    for name, field_info in spec.input_model.model_fields.items():
-        annotation: Any = field_info.rebuild_annotation()
-        if field_info.description:
-            annotation = Annotated[annotation, Field(description=field_info.description)]
-        default = inspect.Parameter.empty if field_info.is_required() else field_info.default
-        parameters.append(
-            inspect.Parameter(
-                name,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                default=default,
-                annotation=annotation,
-            )
-        )
-    execute_catalog_tool.__name__ = spec.id
-    execute_catalog_tool.__qualname__ = spec.id
-    setattr(
-        execute_catalog_tool,
-        "__signature__",
-        inspect.Signature(parameters=parameters, return_annotation=spec.output_model),
+def _tool_error_result(error: ToolExecutionError) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(text=f"{error.code}: {error.message}")],
+        isError=True,
+        _meta={
+            "com.automation-smb/tool-error": {
+                "code": error.code,
+                "retryable": error.retryable,
+                "elapsed_ms": max(0.0, error.elapsed_ms),
+            }
+        },
     )
-    return execute_catalog_tool
 
 
 def _is_loopback_client(scope: Scope) -> bool:
@@ -225,35 +195,6 @@ def _is_loopback_client(scope: Scope) -> bool:
         return ipaddress.ip_address(client[0]).is_loopback
     except ValueError:
         return False
-
-
-def _normalized_host(value: str) -> str:
-    value = value.strip().lower()
-    if value.startswith("["):
-        closing = value.find("]")
-        return value[: closing + 1] if closing >= 0 else value
-    host, separator, port = value.rpartition(":")
-    if separator and port.isdigit():
-        return host
-    return value
-
-
-async def _read_limited_body(receive: Receive, maximum: int) -> bytes | None:
-    chunks: list[bytes] = []
-    size = 0
-    while True:
-        message = await receive()
-        if message["type"] == "http.disconnect":
-            return b""
-        if message["type"] != "http.request":
-            continue
-        chunk = message.get("body", b"")
-        size += len(chunk)
-        if size > maximum:
-            return None
-        chunks.append(chunk)
-        if not message.get("more_body", False):
-            return b"".join(chunks)
 
 
 async def _http_error(

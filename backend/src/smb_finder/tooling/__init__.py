@@ -1,19 +1,16 @@
-"""REST·Playground·MCP가 공유하는 검색 도구 계층."""
+"""MCP 문서 metadata 도구의 공개 계약."""
 
-from .catalog import SEARCH_TOOL_SPECS, ToolCatalog, ToolSpec, ToolSurface
-from .contracts import FindFolderInput, FindFolderOutput, SearchContentInput, SearchContentOutput
+from .catalog import GET_DOCUMENT_METADATA_TOOL_DESCRIPTION, GET_DOCUMENT_METADATA_TOOL_NAME
+from .contracts import DocumentMetadataOutput, GetDocumentMetadataInput
 from .errors import ToolExecutionError
-from .executor import ToolExecutor
+from .executor import MetadataReader, ToolExecutor
 
 __all__ = [
-    "SEARCH_TOOL_SPECS",
-    "FindFolderInput",
-    "FindFolderOutput",
-    "SearchContentInput",
-    "SearchContentOutput",
-    "ToolCatalog",
+    "GET_DOCUMENT_METADATA_TOOL_DESCRIPTION",
+    "GET_DOCUMENT_METADATA_TOOL_NAME",
+    "DocumentMetadataOutput",
+    "GetDocumentMetadataInput",
+    "MetadataReader",
     "ToolExecutionError",
     "ToolExecutor",
-    "ToolSpec",
-    "ToolSurface",
 ]

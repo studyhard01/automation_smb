@@ -13,6 +13,11 @@
 
 ## 현재 교훈
 
+### 2026-08-14 — 절대 deadline은 모든 단계와 되돌릴 수 없는 commit 경계를 함께 다룬다
+- 상황: 상위 요청은 timeout을 반환했지만 선택 검증·DB 연결·SMB 읽기·worker가 계속됐고, 반대로 SMB exclusive write가 성공한 뒤 deadline을 검사해 504로 바꾸면 삭제할 수 없는 파일과 registry 상태가 어긋났다.
+- 교훈: 하나의 monotonic deadline을 admission·connect·query·read·model·render·write 시작 전까지 전달하고, timeout된 worker의 slot과 종료도 추적해야 한다. 다만 되돌릴 수 없는 create-only commit이 성공한 뒤에는 실패로 뒤집지 말고 bookkeeping을 마쳐야 한다.
+- 다음 적용: 느린 fake로 연속 포화·shutdown·zero-work를 검증하고, 외부 쓰기는 각 chunk 시작 전 예산과 남은 I/O timeout을 적용한다. 최종 byte와 close 성공 뒤에는 안전한 over-budget 집계만 남기고 성공 상태를 일관되게 기록한다.
+
 ### 2026-08-11 — 근거 없는 문장은 선택 정보 삭제와 필수 정보 질문으로 분리한다
 - 상황: 생성 prompt에 추측 금지만 적어서는 LLM이 만든 각 문장의 근거 여부를 구분할 수 없었고, 실제 모델은 검증 prompt를 보강한 뒤에도 명시적으로 요청된 참가비 누락을 `completed`로 판정했다.
 - 교훈: 문단·목록 항목·표 행을 독립 주장으로 재검증하고 선택 정보는 삭제하되 필수 누락·충돌만 최대 3개 질문으로 바꿔야 한다. 2차 품질 편집도 그럴듯한 배경을 새로 만들 수 있으므로 기존 사실 주장은 불변으로 유지하고, 검증 citation 재구성과 유형별 결정론적 안전망을 마지막에 적용한다.
@@ -54,9 +59,9 @@
 - 다음 적용: Driver나 확장 설치 전에 버전과 실행 계층을 확인하고, escape된 실제 SQL과 Query·timeout 지원을 최소 smoke로 검증한다.
 
 ### 2026-08-04 — 로컬 LLM의 구조화 출력은 실제 모델 호환성과 서버 검증을 함께 둔다
-- 상황: thinking token 절단은 native format으로 줄였지만, 다른 모델은 schema 객체 처리 중 vocabulary 로딩에 실패했고 JSON 문자열 모드만 지원했다.
-- 교훈: provider의 구조화 출력 지원은 endpoint가 아니라 실제 모델별로 확인하고, 호환 JSON 모드 뒤 애플리케이션 schema 검증으로 필드 계약을 닫아야 한다.
-- 다음 적용: `think=false`와 최소 JSON 모드를 실제 모델로 smoke하고, Pydantic의 필수·추가 필드·길이 검증과 invalid/truncated JSON 회귀 테스트를 함께 둔다.
+- 상황: thinking token 절단과 모델별 schema 지원 차이뿐 아니라, 검증 schema의 `\d` 정규식이 Ollama grammar parser에서 즉시 400으로 거절됐지만 일반 연결 오류로 표시됐다.
+- 교훈: provider의 구조화 출력은 endpoint·모델뿐 아니라 JSON Schema 방언까지 확인하고, provider 호환 schema 뒤 애플리케이션 Pydantic 검증으로 필드 계약을 닫아야 한다.
+- 다음 적용: `think=false`와 실제 schema를 모델에 smoke하고, ASCII 문자 클래스처럼 동등한 호환 표현을 우선한다. grammar 생성 오류는 연결 장애와 구분하고 필수·추가 필드·길이·invalid JSON 회귀를 유지한다.
 
 ### 2026-08-03 — Frontend 원본·스타일 계약·build 산출물을 함께 검사한다
 - 상황: 남은 설정 JavaScript가 Vite 설정을 가로챌 수 있었고, Vue class를 바꾼 뒤 레거시 CSS selector가 남아 중앙 화면 높이와 배치가 무너졌다.
@@ -67,12 +72,6 @@
 - 상황: 좌측 검색 문장을 중앙 입력으로 복사하는 것만으로는 대화 범위를 보장할 수 없었고, 결과별 버전 확인이 파일 선택 동작과 섞일 수 있었다.
 - 교훈: 안정적인 ID와 선택 상태를 API까지 전달하되, 선택 없이 가능한 보조 동작은 카드의 독립 이벤트로 분리하고 서버에서 대상을 다시 검증해야 한다.
 - 다음 적용: 선택형 UI는 결과 표시·선택/해제·카드별 보조 동작·중앙 범위·downstream 요청을 contract test와 화면 smoke로 검증한다.
-
-### 2026-08-03 — 구축 데이터 schema는 복제하지 않고 소비 계약으로 경계 짓는다
-- 상황: 문서·Revision·Chunk·Artifact·Graph가 여러 저장소에 분산돼 한 저장소만 검색하면 버전명이나 Object key 단서를 놓칠 수 있었다.
-- 교훈: 저장소별 read-only 후보를 병렬 수집하되 최종 ID·활성 Revision은 PostgreSQL 기준 원장에서 hydrate해 중복과 stale 대상을 차단한다.
-- 다음 적용: 멀티스토어 검색은 저장소별 timeout·부분 실패·매칭 출처·단계 지연을 계약에 포함한다. 선택적 LLM 확장은
-  전체 절대 deadline의 작은 몫만 쓰고 즉시 규칙 fallback하며, 실제 연결 smoke에서 전체 목표와 `over_budget` 판정까지 확인한다.
 
 ## 새 항목 템플릿
 

@@ -15,6 +15,7 @@ LLMOps 데이터셋을 읽기 전용으로 조회하고, 명시적으로 허용�
 - 답변: 온프레미스 Ollama만 사용, Citation과 검색 지연 반환
 - 문서 보기: MinIO Preview/Canonical read-only 조회
 - 버전 관계: Neo4j Document/Revision 관계 read-only 조회
+- MCP metadata: 기본 비활성 exact `/mcp`에서 UUID 기반 문서/Revision 상태 1개만 loopback·token 보호로 조회
 - 기안 초안: 선택 문서 근거와 사용자 설명으로 strict V2 초안을 만든 뒤 유형별 품질 편집·주장 검증·결정론적 안전망을 적용하고, 기존 3필드/기안 템플릿과 호환 투영해 SMB 신규 저장한 뒤 대화창 다운로드 제공
 - 기안 평가: 외부 dataset을 읽기 전용으로 받아 근거 25·온프레미스 LLM Judge 내용 45·XLSX 20·도구 흐름 10점으로 채점하고, runtime/model 컨텍스트 초과를 원문 없이 집계
 - 파일 첨부: `[업로드] 문서명_YYYYMMDD_v1.0.확장자` 저장 규칙으로 SMB share 내부 상대 경로에 비덮어쓰기 저장하고, 업로드 직후 대화 참고 파일에 자동 추가해 원본을 즉시 근거로 사용
@@ -38,7 +39,8 @@ automation_smb/
 │  │  ├─ llmops_retrieval.py         # 선택 Revision Hybrid/RRF 검색
 │  │  ├─ llmops_artifacts.py         # MinIO 문서 보기
 │  │  ├─ llmops_graph.py             # Neo4j 버전 관계
-│  │  ├─ bot_core/                    # 주입형 LangGraph·결정론 Router·합성 fake 계약
+│  │  ├─ bot_core/                    # LangGraph·Router·합성 fake·공통 JSON Model Gateway
+│  │  ├─ mcp_server.py, tooling/       # 공식 MCP v2 단일 metadata tool·bounded timeout
 │  │  ├─ playground/document_*.py    # 선택 문서 채팅 API·서비스·계약
 │  │  ├─ playground/upload_*.py      # 제한된 SMB 첨부·비밀 없는 runtime 설정
 │  │  ├─ playground/proposal_*.py    # 선택 문서 기반 구조화 기안·XLSX 생성·다운로드 API
@@ -77,6 +79,7 @@ automation_smb/
 | 공유폴더 파일 첨부 | `POST /api/playground/files/upload` |
 | 서비스 상태 | `GET /health` |
 | Vue 화면 | `GET /playground` |
+| 문서 metadata MCP | `/mcp` (기본 비활성, OpenAPI 비노출, loopback+token) |
 
 파일 선택은 화면 상태만 믿지 않습니다. 채팅 요청 직전에 Backend가 선택한 UUID pair가 현재 활성 Revision인지 다시
 검증하며, 변경됐으면 `409 selected_file_stale`을 반환합니다. 업로드 파일도 서버 runtime registry의 UUID pair를 다시
@@ -99,6 +102,10 @@ PostgreSQL·MinIO·Neo4j의 read-only 계정, 온프레미스 Ollama 주소와 �
 기안 자동 저장은 `SMB_UPLOAD_ENABLED=true`로 명시적으로 켜야 하며, 실제 값·내부 주소·파일 목록은 코드·문서·로그에
 기록하지 않습니다.
 
+MCP는 환경에서 `MCP_ENABLED=true`와 별도 `MCP_API_TOKEN`을 함께 주입한 경우에만 활성화됩니다. 기본값은 404이며,
+remote MCP/OAuth·MCP UI·write/admin/index/download tool은 현재 범위에 포함하지 않습니다. `.env*` 값은 승인 없이
+수정하지 않습니다.
+
 ### Docker와 LAN 실행
 
 ```powershell
@@ -115,15 +122,16 @@ docker compose up -d
 ## 테스트
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\evaluate_quality.py
+uv run --no-sync python scripts/evaluate_quality.py
 .\.venv\Scripts\python.exe -m pytest backend/tests/test_llmops_search.py backend/tests/test_llmops_retrieval.py backend/tests/test_llmops_stores.py backend/tests/test_llmops_api_contracts.py backend/tests/test_proposal_draft.py backend/tests/test_proposal_evaluation.py backend/tests/test_proposal_live_runner.py backend/tests/test_upload_api.py
 npm.cmd --prefix .\frontend run typecheck
 npm.cmd --prefix .\frontend run test
 npm.cmd --prefix .\frontend run build
 ```
 
-영구 삭제 승인 전까지 `backend/tests/`에는 실행 경로에서 분리된 레거시 테스트가 물리적으로 남아 있으므로 전체 디렉터리
-수집 대신 위 현재 수직 흐름 명령이나 [품질 평가 script](scripts/evaluate_quality.py)를 사용합니다.
+영구 삭제 승인 전까지 `backend/tests/`에는 실행 경로에서 분리된 레거시 테스트가 물리적으로 남아 있습니다. exact list
+8개만 수집하지 않으므로 활성 비통합 전체 suite는 `uv run --no-sync pytest -m "not integration" backend/tests`로
+실행할 수 있습니다.
 
 실제 연결 smoke는 합성 데이터가 들어 있는 read-only DB 저장소에서 수행합니다. SMB 쓰기 smoke는 승인된 합성 파일과
 설정된 업로드 하위 폴더에서만 별도로 수행합니다.

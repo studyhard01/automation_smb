@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-import ipaddress
 import json
 import logging
 import math
@@ -19,19 +18,28 @@ from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
-from urllib.parse import urlparse
 from uuid import UUID
 from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
-import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError, field_validator, model_validator
 
+from smb_finder.bot_core import (
+    JsonModelGateway,
+    ModelGatewayError,
+    OllamaModelGateway,
+    is_internal_http_url,
+)
 from smb_finder.config import Settings
 from smb_finder.models import DocumentCitation
 
 from .document_models import SelectedFileContext
-from .proposal_context import PackedProposalContext, ProposalContextUsage, estimate_proposal_tokens, pack_proposal_context
+from .proposal_context import (
+    PackedProposalContext,
+    ProposalContextUsage,
+    estimate_proposal_tokens,
+    pack_proposal_context,
+)
 from .proposal_evidence import (
     ProposalEvidenceFilterSummary,
     filter_proposal_evidence,
@@ -43,6 +51,14 @@ _logger = logging.getLogger(__name__)
 _TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "proposal_draft.xlsx"
 _TEMPLATE_NAME = "기안지_초안.xlsx"
 _PROPOSAL_PREFIX = "[기안] "
+
+
+def _is_internal_http_url(value: str) -> bool:
+    """평가 모듈의 기존 import를 공통 Gateway URL 정책에 연결한다."""
+
+    return is_internal_http_url(value)
+
+
 _TITLE_SHEET_NAME = "기안지"
 _TITLE_CELL = "C8"
 _APPROVAL_REQUEST_CELL = "A10"
@@ -334,7 +350,7 @@ class ProposalClaimVerdict(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    claim_id: str = Field(pattern=r"^C\d{4}$")
+    claim_id: str = Field(pattern=r"^C[0-9]{4}$")
     status: Literal["supported", "derived", "unsupported", "conflicting"]
     action: Literal["keep", "omit", "ask"]
     citations: list[str] = Field(default_factory=list, max_length=30)
@@ -545,6 +561,7 @@ class ProposalDraftGenerator(Protocol):
         evidence: list[DocumentCitation],
         *,
         proposal_type: ResolvedProposalType = "general",
+        deadline: float | None = None,
     ) -> ProposalDraftResult:
         """사용자 설명과 선택 문서 근거를 받아 세 필드를 반환한다."""
 
@@ -558,6 +575,7 @@ class ProposalDraftGenerator(Protocol):
         evidence: list[DocumentCitation],
         *,
         proposal_type: ResolvedProposalType,
+        deadline: float | None = None,
     ) -> ProposalDraftResult:
         """기존 strict V2 문서를 선택 근거와 피드백 안에서 수정한다."""
 
@@ -570,22 +588,9 @@ class ProposalDraftGenerator(Protocol):
         proposal_type: ResolvedProposalType,
         user_answers: list[str] | None = None,
         allow_questions: bool = True,
+        deadline: float | None = None,
     ) -> ProposalEvidenceVerification:
         """초안의 각 주장에 근거가 있는지 판정하고 필수 질문만 반환한다."""
-
-
-def _is_internal_http_url(value: str) -> bool:
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-        return False
-    host = parsed.hostname.casefold()
-    if host in {"localhost", "host.docker.internal"}:
-        return True
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return "." not in host
-    return address.is_private or address.is_loopback or address.is_link_local
 
 
 def _clean_title(value: str) -> str:
@@ -631,19 +636,6 @@ def _revision_summary(before: ProposalDocumentV2, after: ProposalDocumentV2, rev
     return f"피드백을 반영한 v1.{revision_minor} 수정본입니다. 변경 항목: {', '.join(changed)}."
 
 
-_CONTEXT_LIMIT_MARKERS = (
-    "context length",
-    "context window",
-    "maximum context",
-    "prompt is too long",
-    "prompt too long",
-    "too many tokens",
-    "token limit",
-    "num_ctx",
-    "request too large",
-    "request entity too large",
-    "payload too large",
-)
 _PROPOSAL_PROMPT_RESERVE_TOKENS = 1024
 
 
@@ -652,58 +644,10 @@ def _evidence_context_budget_chars(settings: Settings, *, fixed_prompt_chars: in
 
     input_tokens = max(
         1,
-        settings.proposal_llm_num_ctx
-        - settings.proposal_llm_max_tokens
-        - _PROPOSAL_PROMPT_RESERVE_TOKENS,
+        settings.proposal_llm_num_ctx - settings.proposal_llm_max_tokens - _PROPOSAL_PROMPT_RESERVE_TOKENS,
     )
     runtime_input_chars = input_tokens * 8 // 5
     return max(1, min(settings.proposal_context_max_chars, runtime_input_chars - fixed_prompt_chars))
-
-
-class _ContextLimitError(RuntimeError):
-    """한 번만 축소 재시도하기 위해 내부에서만 쓰는 컨텍스트 제한 신호."""
-
-
-def _is_context_limit_message(value: str) -> bool:
-    normalized = value.casefold()
-    return any(marker in normalized for marker in _CONTEXT_LIMIT_MARKERS)
-
-
-def _is_context_limit_http_error(exc: httpx.HTTPError) -> bool:
-    response = getattr(exc, "response", None)
-    text = str(exc)
-    if response is not None:
-        if response.status_code == 413:
-            return True
-        try:
-            text = f"{text} {response.text}"
-        except (AttributeError, RuntimeError):
-            pass
-    return _is_context_limit_message(text)
-
-
-def _decode_llm_payload(data: object) -> tuple[dict, int | None]:
-    if not isinstance(data, dict):
-        raise ValueError("LLM 응답이 JSON 객체가 아닙니다.")
-    prompt_eval_count = data.get("prompt_eval_count")
-    if not isinstance(prompt_eval_count, int) or prompt_eval_count < 0:
-        prompt_eval_count = None
-    error = data.get("error")
-    if isinstance(error, str) and _is_context_limit_message(error):
-        raise _ContextLimitError
-    if "schema_version" in data or all(key in data for key in ("title", "approval_request", "body")):
-        return data, prompt_eval_count
-    message = data.get("message")
-    raw_content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(raw_content, str):
-        raise ValueError("LLM 응답에 기안 문서가 없습니다.")
-    text = raw_content.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    decoded = json.loads(text)
-    if not isinstance(decoded, dict):
-        raise ValueError("LLM 응답이 JSON 객체가 아닙니다.")
-    return decoded, prompt_eval_count
 
 
 def _validate_document_citations(document: ProposalDocumentV2, available: tuple[str, ...]) -> None:
@@ -760,9 +704,7 @@ _EXPLICIT_BACKGROUND_TERMS = ("배경", "필요성", "문제점", "현황", "어
 _EVENT_SECTION_ORDER = ("참가 목적", "참가 내용", "행사 주요 내용")
 _EVENT_SCHEDULE_TERMS = ("일정", "시간표", "타임테이블", "agenda", "schedule")
 _EVENT_MAIN_CONTENT_TERMS = ("주요", "프로그램", "세션", "발표", "전시", "주제", "내용")
-_EVENT_DATE_VALUE_PATTERN = re.compile(
-    r"(?:20\d{2}[년./-]\s*\d{1,2}[월./-]\s*\d{1,2}일?|\d{1,2}월\s*\d{1,2}일)"
-)
+_EVENT_DATE_VALUE_PATTERN = re.compile(r"(?:20\d{2}[년./-]\s*\d{1,2}[월./-]\s*\d{1,2}일?|\d{1,2}월\s*\d{1,2}일)")
 _EVENT_LOCATION_TERMS = ("장소", "개최", "열린다", "진행된다", "컨벤션", "회의실", "세미나실", "강당")
 _EVENT_PARTICIPANT_PATTERN = re.compile(r"(?:참석자|참가자|인원)|(?<!\d)\d+\s*명")
 _EVENT_FEE_PATTERN = re.compile(r"참가비|등록비|교육비")
@@ -790,7 +732,9 @@ def _event_section_heading(section: ProposalSectionV2) -> str | None:
     return "참가 내용"
 
 
-def normalize_proposal_document(document: ProposalDocumentV2, proposal_type: ResolvedProposalType) -> ProposalDocumentV2:
+def normalize_proposal_document(
+    document: ProposalDocumentV2, proposal_type: ResolvedProposalType
+) -> ProposalDocumentV2:
     """행사 참석 초안은 세 개의 간결한 본문 범주만 남기고 순서를 고정한다."""
 
     if proposal_type != "event_attendance":
@@ -854,7 +798,9 @@ def _event_decision_fact_safety_net(
         missing_checks.append(lambda value: _EVENT_PARTICIPANT_PATTERN.search(value) is not None)
     if _EVENT_FEE_PATTERN.search(document_text) is None:
         missing_checks.append(
-            lambda value: _EVENT_FEE_PATTERN.search(value) is not None and _MONEY_VALUE_PATTERN.search(value) is not None
+            lambda value: (
+                _EVENT_FEE_PATTERN.search(value) is not None and _MONEY_VALUE_PATTERN.search(value) is not None
+            )
         )
     if not missing_checks:
         return document
@@ -867,12 +813,12 @@ def _event_decision_fact_safety_net(
         if citation_id is None:
             continue
         sentences = [
-            sentence.strip()
-            for sentence in re.split(r"(?<=[.!?다])\s+|[\r\n]+", citation.excerpt)
-            if sentence.strip()
+            sentence.strip() for sentence in re.split(r"(?<=[.!?다])\s+|[\r\n]+", citation.excerpt) if sentence.strip()
         ]
         for sentence in sentences:
-            matched = {index for index, check in enumerate(missing_checks) if index not in satisfied and check(sentence)}
+            matched = {
+                index for index, check in enumerate(missing_checks) if index not in satisfied and check(sentence)
+            }
             if not matched:
                 continue
             normalized = sentence.rstrip(".!? ") + "."
@@ -903,9 +849,7 @@ def _event_decision_fact_safety_net(
         details = sections[details_index]
         sections[details_index] = details.model_copy(
             update={
-                "citations": list(
-                    dict.fromkeys([*details.citations, *(citation_id for _, citation_id in additions)])
-                ),
+                "citations": list(dict.fromkeys([*details.citations, *(citation_id for _, citation_id in additions)])),
                 "blocks": [
                     *details.blocks,
                     *(ProposalParagraphBlock(type="paragraph", text=text) for text, _ in additions),
@@ -965,9 +909,7 @@ def _purchase_background_safety_net(
     if any(term in source_text for term in _EXPLICIT_BACKGROUND_TERMS):
         return document
     return document.model_copy(
-        update={
-            "sections": [section for section in document.sections if section.semantic_role != "background"]
-        }
+        update={"sections": [section for section in document.sections if section.semantic_role != "background"]}
     )
 
 
@@ -1008,9 +950,7 @@ def _merge_quality_refinement(
     return refined.model_copy(
         update={
             "sections": sections,
-            "missing_information": list(
-                dict.fromkeys([*original.missing_information, *refined.missing_information])
-            ),
+            "missing_information": list(dict.fromkeys([*original.missing_information, *refined.missing_information])),
         }
     )
 
@@ -1040,9 +980,7 @@ def resolve_proposal_type(
         return ProposalTypeResolution(proposal_type=instruction_type, source="rule")
     if instruction_marked:
         return ProposalTypeResolution(proposal_type="general", source="fallback")
-    reference_titles = " ".join(
-        item.title for item in evidence if not is_strong_post_action_metadata(item.title)
-    )
+    reference_titles = " ".join(item.title for item in evidence if not is_strong_post_action_metadata(item.title))
     reference_type, _ = detect(reference_titles)
     if reference_type is not None:
         return ProposalTypeResolution(proposal_type=reference_type, source="rule")
@@ -1072,7 +1010,10 @@ def _proposal_claims(document: ProposalDocumentV2) -> list[_ProposalClaim]:
                 items = list(enumerate(block.items))
             else:
                 items = [
-                    (row_index, " / ".join(f"{header}: {cell}" for header, cell in zip(block.headers, row, strict=True)))
+                    (
+                        row_index,
+                        " / ".join(f"{header}: {cell}" for header, cell in zip(block.headers, row, strict=True)),
+                    )
                     for row_index, row in enumerate(block.rows)
                 ]
             for item_index, text in items:
@@ -1120,8 +1061,7 @@ def _enforce_required_fact_safety_net(
     """명시적으로 금액 승인을 요구한 기안에서 금액 누락·환각을 결정론적으로 막는다."""
 
     source_text = "\n".join(
-        [instruction, *user_answers]
-        + [f"{citation.title}\n{citation.excerpt}" for citation in evidence]
+        [instruction, *user_answers] + [f"{citation.title}\n{citation.excerpt}" for citation in evidence]
     )
     source_money = _money_values(source_text)
     normalized_source = re.sub(r"\s+", " ", source_text).casefold()
@@ -1211,9 +1151,7 @@ def apply_proposal_evidence_verification(
         for index, candidate in enumerate(question_candidates, start=1)
     ]
 
-    claim_by_path = {
-        (claim.section_index, claim.block_index, claim.item_index): claim.claim_id for claim in claims
-    }
+    claim_by_path = {(claim.section_index, claim.block_index, claim.item_index): claim.claim_id for claim in claims}
 
     def should_keep(claim_id: str) -> bool:
         verdict = verdicts[claim_id]
@@ -1307,17 +1245,34 @@ def apply_proposal_evidence_verification(
     return sanitized, completion
 
 
+class _ProposalGenerationPayload(RootModel[ProposalDocumentV2 | ProposalDraftFields]):
+    """V2 전환 중인 로컬 모델의 strict V2 또는 구 3필드 응답."""
+
+
 class LocalProposalDraftGenerator:
     """온프레미스 Ollama에서 strict V2 기안 문서를 생성한다."""
 
-    def __init__(self, settings: Settings, *, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        gateway: JsonModelGateway | None = None,
+        gateway_getter: Callable[[], JsonModelGateway | None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._settings = settings
-        self._client = client or httpx.Client(timeout=max(1.0, settings.proposal_llm_timeout_ms / 1000))
+        self._gateway = gateway
+        self._gateway_getter = gateway_getter
+        self._clock = clock
+        self._owns_gateway = gateway is None and gateway_getter is None
+        if self._owns_gateway:
+            self._gateway = OllamaModelGateway(settings)
 
     def close(self) -> None:
         """재사용하던 HTTP 연결을 닫는다."""
 
-        self._client.close()
+        if self._owns_gateway and self._gateway is not None:
+            self._gateway.close()
 
     def generate(
         self,
@@ -1325,6 +1280,7 @@ class LocalProposalDraftGenerator:
         evidence: list[DocumentCitation],
         *,
         proposal_type: ResolvedProposalType = "general",
+        deadline: float | None = None,
     ) -> ProposalDraftResult:
         """외부 주소는 거부하고 선택 문서 근거로 strict V2 기안을 반환한다."""
 
@@ -1333,6 +1289,7 @@ class LocalProposalDraftGenerator:
             evidence,
             proposal_type=proposal_type,
             current_document=None,
+            deadline=self._effective_deadline(deadline),
         )
 
     def revise(
@@ -1342,6 +1299,7 @@ class LocalProposalDraftGenerator:
         evidence: list[DocumentCitation],
         *,
         proposal_type: ResolvedProposalType,
+        deadline: float | None = None,
     ) -> ProposalDraftResult:
         """현재 문서와 사용자 피드백을 근거 범위 안에서 strict V2로 다시 작성한다."""
 
@@ -1350,6 +1308,7 @@ class LocalProposalDraftGenerator:
             evidence,
             proposal_type=proposal_type,
             current_document=document,
+            deadline=self._effective_deadline(deadline),
         )
 
     def refine(
@@ -1359,6 +1318,7 @@ class LocalProposalDraftGenerator:
         evidence: list[DocumentCitation],
         *,
         proposal_type: ResolvedProposalType,
+        deadline: float | None = None,
     ) -> ProposalDraftResult:
         """속도보다 내용 완결성을 우선해 초안을 한 번 더 편집 검토한다."""
 
@@ -1374,6 +1334,7 @@ class LocalProposalDraftGenerator:
             evidence,
             proposal_type=proposal_type,
             current_document=document,
+            deadline=self._effective_deadline(deadline),
         )
         if refined.document is None:
             return refined
@@ -1408,15 +1369,13 @@ class LocalProposalDraftGenerator:
         proposal_type: ResolvedProposalType,
         user_answers: list[str] | None = None,
         allow_questions: bool = True,
+        deadline: float | None = None,
     ) -> ProposalEvidenceVerification:
         """문서 단위가 아닌 주장 단위로 근거를 다시 확인한다."""
 
-        root_url = self._settings.ollama_base_url.strip().rstrip("/")
         model = self._settings.llmops_chat_model.strip()
-        if not root_url or not model:
-            raise ProposalDraftError("local_llm_not_configured", "로컬 LLM 주소 또는 모델이 구성되지 않았습니다.", 503)
-        if not _is_internal_http_url(root_url):
-            raise ProposalDraftError("local_llm_url_not_internal", "기안 내용은 온프레미스 LLM으로만 전송할 수 있습니다.", 503)
+        effective_deadline = self._effective_deadline(deadline)
+        gateway = self._resolve_gateway()
         if not evidence:
             raise ProposalDraftError("proposal_evidence_unavailable", "기안 근거를 다시 확인할 수 없습니다.", 422)
 
@@ -1481,32 +1440,29 @@ class LocalProposalDraftGenerator:
             per_document_chars=min(self._settings.proposal_context_per_document_chars, evidence_budget_chars),
             max_citations=self._settings.proposal_context_max_citations,
         )
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        f"사용자 입력:\n{chr(10).join(user_sources)}\n\n현재 초안:\n{document_json}\n\n"
-                        f"검증할 주장:\n{claims_json}\n\n참고 문서 근거:\n{context.text}"
-                    ),
-                },
-            ],
-            "stream": False,
-            "think": False,
-            "format": "json",
-            "options": {
-                "temperature": 0,
-                "num_ctx": self._settings.proposal_llm_num_ctx,
-                "num_predict": self._settings.proposal_llm_max_tokens,
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"사용자 입력:\n{chr(10).join(user_sources)}\n\n현재 초안:\n{document_json}\n\n"
+                    f"검증할 주장:\n{claims_json}\n\n참고 문서 근거:\n{context.text}"
+                ),
             },
-        }
+        ]
         try:
-            response = self._client.post(f"{root_url}/api/chat", json=payload)
-            response.raise_for_status()
-            decoded, _ = _decode_llm_payload(response.json())
-            verification = ProposalEvidenceVerification.model_validate(decoded)
+            self._ensure_model_budget(effective_deadline, verification=True)
+            result = gateway.invoke_json(
+                purpose="proposal_validation",
+                model=model,
+                messages=messages,
+                response_model=ProposalEvidenceVerification,
+                deadline=effective_deadline,
+                max_timeout_ms=self._settings.proposal_llm_timeout_ms,
+                max_output_tokens=self._settings.proposal_llm_max_tokens,
+                context_window_tokens=self._settings.proposal_llm_num_ctx,
+            )
+            verification = result.payload
             verification = _enforce_required_fact_safety_net(
                 verification,
                 claims,
@@ -1520,32 +1476,21 @@ class LocalProposalDraftGenerator:
             for verdict in verification.claims:
                 if not set(verdict.citations).issubset(allowed_citations):
                     raise ValueError("근거 검증 결과가 제공되지 않은 근거 ID를 사용했습니다.")
-                if verdict.status in {"supported", "derived"} and (
-                    verdict.action != "keep" or not verdict.citations
-                ):
+                if verdict.status in {"supported", "derived"} and (verdict.action != "keep" or not verdict.citations):
                     raise ValueError("유지할 주장에는 supported/derived 판정과 근거가 필요합니다.")
                 if verdict.status in {"unsupported", "conflicting"} and verdict.action == "keep":
                     raise ValueError("근거 없거나 충돌하는 주장은 유지할 수 없습니다.")
             return verification
-        except _ContextLimitError as exc:
-            raise ProposalDraftError(
-                "proposal_context_limit_exceeded",
-                "초안 근거 검증이 로컬 LLM의 컨텍스트 제한을 초과했습니다.",
-                422,
-                context_usage=context.usage,
-            ) from exc
-        except httpx.HTTPError as exc:
-            if _is_context_limit_http_error(exc):
+        except ModelGatewayError as exc:
+            if exc.code == "model_context_limit":
                 raise ProposalDraftError(
                     "proposal_context_limit_exceeded",
-                    "초안 근거 검증이 로컬 LLM의 컨텍스트 제한을 초과했습니다.",
+                    "기안 근거 검증이 로컬 LLM의 컨텍스트 제한을 초과했습니다.",
                     422,
                     context_usage=context.usage,
                 ) from exc
-            _logger.warning("기안 근거 검증 LLM 연결 실패: failure_type=%s", type(exc).__name__)
-            raise ProposalDraftError("proposal_verification_unavailable", "기안 근거를 확인할 수 없습니다.", 503) from exc
-        except (json.JSONDecodeError, TypeError, ValueError, ValidationError) as exc:
-            _logger.warning("기안 근거 검증 응답 실패: failure_type=%s", type(exc).__name__)
+            raise self._proposal_gateway_error(exc, verification=True) from exc
+        except (TypeError, ValueError, ValidationError) as exc:
             raise ProposalDraftError(
                 "proposal_verification_response_invalid",
                 "로컬 LLM이 올바른 근거 검증 결과를 반환하지 않았습니다.",
@@ -1559,15 +1504,12 @@ class LocalProposalDraftGenerator:
         *,
         proposal_type: ResolvedProposalType,
         current_document: ProposalDocumentV2 | None,
+        deadline: float,
     ) -> ProposalDraftResult:
         """생성과 수정이 공유하는 bounded LLM 호출."""
 
-        root_url = self._settings.ollama_base_url.strip().rstrip("/")
         model = self._settings.llmops_chat_model.strip()
-        if not root_url or not model:
-            raise ProposalDraftError("local_llm_not_configured", "로컬 LLM 주소 또는 모델이 구성되지 않았습니다.", 503)
-        if not _is_internal_http_url(root_url):
-            raise ProposalDraftError("local_llm_url_not_internal", "기안 내용은 온프레미스 LLM으로만 전송할 수 있습니다.", 503)
+        gateway = self._resolve_gateway()
 
         if not evidence:
             raise ProposalDraftError(
@@ -1635,25 +1577,33 @@ class LocalProposalDraftGenerator:
         structure_retry_used = False
         active_system_prompt = system_prompt
         while True:
-            payload = self._build_payload(
-                model,
+            messages = self._build_messages(
                 active_system_prompt,
                 instruction,
                 context,
                 current_document_json=current_document_json,
             )
             try:
-                response = self._client.post(f"{root_url}/api/chat", json=payload)
-                response.raise_for_status()
-                decoded, prompt_eval_count = _decode_llm_payload(response.json())
-                if decoded.get("schema_version") == "proposal-document-v2":
-                    document = ProposalDocumentV2.model_validate(decoded)
+                self._ensure_model_budget(deadline, verification=False)
+                gateway_result = gateway.invoke_json(
+                    purpose="proposal_generation",
+                    model=model,
+                    messages=messages,
+                    response_model=_ProposalGenerationPayload,
+                    deadline=deadline,
+                    max_timeout_ms=self._settings.proposal_llm_timeout_ms,
+                    max_output_tokens=self._settings.proposal_llm_max_tokens,
+                    context_window_tokens=self._settings.proposal_llm_num_ctx,
+                )
+                decoded = gateway_result.payload.root
+                if isinstance(decoded, ProposalDocumentV2):
+                    document = decoded
                     _validate_document_citations(document, context.citation_ids)
                     document = normalize_proposal_document(document, proposal_type)
                     fields = project_document_to_legacy_fields(document)
                 else:
                     # 배포 전환 중인 기존 로컬 모델 응답도 API 호환을 위해 단일 섹션으로 승격한다.
-                    fields = ProposalDraftFields.model_validate(decoded)
+                    fields = decoded
                     document = _legacy_document(fields, context.citation_ids[0])
                     document = normalize_proposal_document(document, proposal_type)
                     fields = project_document_to_legacy_fields(document)
@@ -1665,7 +1615,7 @@ class LocalProposalDraftGenerator:
                             + len(context.text)
                             + len(current_document_json)
                         ),
-                        "prompt_eval_count": prompt_eval_count,
+                        "prompt_eval_count": gateway_result.usage.prompt_tokens,
                     }
                 )
                 _logger.info(
@@ -1688,19 +1638,26 @@ class LocalProposalDraftGenerator:
                     packed_citation_map=tuple(zip(context.citation_ids, context.source_chunk_ids, strict=True)),
                     packed_context_sha256=context.context_sha256,
                 )
-            except _ContextLimitError as exc:
-                context_error: Exception = exc
-            except httpx.HTTPError as exc:
-                if not _is_context_limit_http_error(exc):
-                    _logger.warning("기안 로컬 LLM 연결 실패: failure_type=%s", type(exc).__name__)
-                    raise ProposalDraftError(
-                        "proposal_llm_unavailable",
-                        "로컬 LLM에 연결할 수 없습니다.",
-                        503,
-                    ) from exc
-                context_error = exc
-            except (json.JSONDecodeError, KeyError, TypeError, ValueError, ValidationError) as exc:
-                _logger.warning("기안 구조화 응답 생성 실패: failure_type=%s", type(exc).__name__)
+            except ModelGatewayError as exc:
+                if exc.code == "model_context_limit":
+                    context_error: Exception = exc
+                elif exc.code not in {"invalid_model_response", "output_schema_invalid"}:
+                    raise self._proposal_gateway_error(exc, verification=False) from exc
+                else:
+                    if structure_retry_used:
+                        raise ProposalDraftError(
+                            "proposal_llm_response_invalid",
+                            "로컬 LLM이 올바른 기안 JSON을 반환하지 않았습니다.",
+                            502,
+                        ) from exc
+                    structure_retry_used = True
+                    active_system_prompt = (
+                        system_prompt
+                        + " 이전 응답은 strict JSON 계약을 충족하지 못했습니다. 모든 필수 키와 올바른 block 구조를 갖춘 "
+                        "proposal-document-v2 JSON 객체 하나만 다시 반환하세요. 설명, 코드 펜스, 추가 키는 금지합니다."
+                    )
+                    continue
+            except (KeyError, TypeError, ValueError, ValidationError) as exc:
                 if structure_retry_used:
                     raise ProposalDraftError(
                         "proposal_llm_response_invalid",
@@ -1738,38 +1695,78 @@ class LocalProposalDraftGenerator:
                 first_attempt_context_chars=first_attempt_chars,
             )
 
-    def _build_payload(
+    def _build_messages(
         self,
-        model: str,
         system_prompt: str,
         instruction: str,
         context: PackedProposalContext,
         *,
         current_document_json: str = "",
-    ) -> dict:
-        """Ollama JSON 요청을 컨텍스트 예산과 출력 예산으로 제한한다."""
+    ) -> list[dict[str, str]]:
+        """공통 Gateway에 전달할 기안 메시지를 컨텍스트 예산 안에서 만든다."""
 
         current_document_part = (
             f"현재 기안 문서:\n{current_document_json}\n\n수정 피드백:\n" if current_document_json else "기안 설명:\n"
         )
-        return {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": f"{current_document_part}{instruction.strip()}\n\n선택 문서 근거:\n{context.text}",
-                },
-            ],
-            "stream": False,
-            "think": False,
-            "format": "json",
-            "options": {
-                "temperature": 0,
-                "num_ctx": self._settings.proposal_llm_num_ctx,
-                "num_predict": self._settings.proposal_llm_max_tokens,
+        return [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"{current_document_part}{instruction.strip()}\n\n선택 문서 근거:\n{context.text}",
             },
-        }
+        ]
+
+    def _effective_deadline(self, deadline: float | None) -> float:
+        if deadline is not None:
+            return deadline
+        return self._clock() + self._settings.proposal_llm_timeout_ms / 1000
+
+    def _resolve_gateway(self) -> JsonModelGateway:
+        gateway = self._gateway_getter() if self._gateway_getter is not None else self._gateway
+        if gateway is None:
+            raise ProposalDraftError(
+                "local_llm_not_configured",
+                "로컬 LLM 주소 또는 모델이 구성되지 않았습니다.",
+                503,
+            )
+        return gateway
+
+    def _ensure_model_budget(self, deadline: float, *, verification: bool) -> None:
+        if self._clock() < deadline:
+            return
+        if verification:
+            raise ProposalDraftError("proposal_verification_unavailable", "기안 근거를 확인할 수 없습니다.", 503)
+        raise ProposalDraftError("proposal_llm_unavailable", "로컬 LLM에 연결할 수 없습니다.", 503)
+
+    @staticmethod
+    def _proposal_gateway_error(exc: ModelGatewayError, *, verification: bool) -> ProposalDraftError:
+        if exc.code == "model_not_configured":
+            return ProposalDraftError(
+                "local_llm_not_configured",
+                "로컬 LLM 주소 또는 모델이 구성되지 않았습니다.",
+                503,
+            )
+        if exc.code == "model_url_not_internal":
+            return ProposalDraftError(
+                "local_llm_url_not_internal",
+                "기안 내용은 온프레미스 LLM으로만 전송할 수 있습니다.",
+                503,
+            )
+        if exc.code in {"invalid_model_response", "output_schema_invalid"}:
+            if verification:
+                return ProposalDraftError(
+                    "proposal_verification_response_invalid",
+                    "로컬 LLM이 올바른 근거 검증 결과를 반환하지 않았습니다.",
+                    502,
+                )
+            return ProposalDraftError(
+                "proposal_llm_response_invalid",
+                "로컬 LLM이 올바른 기안 JSON을 반환하지 않았습니다.",
+                502,
+            )
+        if verification:
+            return ProposalDraftError("proposal_verification_unavailable", "기안 근거를 확인할 수 없습니다.", 503)
+        return ProposalDraftError("proposal_llm_unavailable", "로컬 LLM에 연결할 수 없습니다.", 503)
 
 
 class ProposalDraftRegistry:
@@ -1887,16 +1884,11 @@ def _inline_string_cell(xml: str, cell_ref: str, value: str, *, default_style: s
             f"<is><t>{escaped_value}</t></is></c></row>"
         )
         updated_rows = f"{rows[:insert_at]}{new_row}{rows[insert_at:]}"
-        replacement = (
-            f"{sheet_data_match.group('open')}{updated_rows}{sheet_data_match.group('close')}"
-        )
-        return f"{xml[:sheet_data_match.start()]}{replacement}{xml[sheet_data_match.end():]}"
-    new_cell = (
-        f'<c r="{cell_ref}" s="{default_style}" t="inlineStr">'
-        f"<is><t>{escaped_value}</t></is></c>"
-    )
+        replacement = f"{sheet_data_match.group('open')}{updated_rows}{sheet_data_match.group('close')}"
+        return f"{xml[: sheet_data_match.start()]}{replacement}{xml[sheet_data_match.end() :]}"
+    new_cell = f'<c r="{cell_ref}" s="{default_style}" t="inlineStr"><is><t>{escaped_value}</t></is></c>'
     replacement = f"{row_match.group('open')}{new_cell}{row_match.group('cells')}{row_match.group('close')}"
-    return f"{xml[:row_match.start()]}{replacement}{xml[row_match.end():]}"
+    return f"{xml[: row_match.start()]}{replacement}{xml[row_match.end() :]}"
 
 
 @dataclass(frozen=True)
@@ -2032,7 +2024,9 @@ def _find_or_create_row(sheet_data: ElementTree.Element, row_number: int) -> Ele
             return row
         if existing > row_number:
             row = ElementTree.Element(_xlsx_tag("row"), {"r": str(row_number)})
-            sheet_data.insert(list(sheet_data).index(next(item for item in sheet_data if int(item.attrib["r"]) == existing)), row)
+            sheet_data.insert(
+                list(sheet_data).index(next(item for item in sheet_data if int(item.attrib["r"]) == existing)), row
+            )
             return row
     return ElementTree.SubElement(sheet_data, _xlsx_tag("row"), {"r": str(row_number)})
 
@@ -2142,9 +2136,7 @@ def _expand_worksheet_dimension(root: ElementTree.Element, sheet_data: ElementTr
     if end_column_match is None or end_row_match is None:
         return
     populated_rows = [
-        int(row.attrib["r"])
-        for row in sheet_data.findall(_xlsx_tag("row"))
-        if row.find(_xlsx_tag("c")) is not None
+        int(row.attrib["r"]) for row in sheet_data.findall(_xlsx_tag("row")) if row.find(_xlsx_tag("c")) is not None
     ]
     if not populated_rows:
         return
@@ -2574,6 +2566,7 @@ class ProposalDraftService:
         *,
         template_path: Path = _TEMPLATE_PATH,
         clock: Callable[[], datetime] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
         draft_generator: ProposalDraftGenerator | None = None,
         title_generator: ProposalDraftGenerator | None = None,
         registry: ProposalDraftRegistry | None = None,
@@ -2582,7 +2575,10 @@ class ProposalDraftService:
         self._upload_manager = upload_manager
         self._template_path = template_path
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._draft_generator = draft_generator or title_generator or (LocalProposalDraftGenerator(settings) if settings else None)
+        self._monotonic = monotonic
+        self._draft_generator = (
+            draft_generator or title_generator or (LocalProposalDraftGenerator(settings) if settings else None)
+        )
         self._registry = registry or ProposalDraftRegistry()
 
     def close(self) -> None:
@@ -2591,11 +2587,22 @@ class ProposalDraftService:
         if self._draft_generator is not None:
             self._draft_generator.close()
 
+    def _effective_deadline(self, deadline: float | None) -> float | None:
+        if deadline is not None or self._settings is None:
+            return deadline
+        return self._monotonic() + self._settings.proposal_llm_timeout_ms / 1000
+
+    def _ensure_completion_budget(self, deadline: float | None) -> None:
+        if deadline is not None and self._monotonic() >= deadline:
+            raise ProposalDraftError("upload_timeout", "기안 초안 저장 시간이 초과되었습니다.", 504)
+
     def _read_template(self) -> bytes:
         try:
             content = self._template_path.read_bytes()
         except OSError as exc:
-            raise ProposalDraftError("proposal_template_unavailable", "기안 초안 서식을 불러올 수 없습니다.", 503) from exc
+            raise ProposalDraftError(
+                "proposal_template_unavailable", "기안 초안 서식을 불러올 수 없습니다.", 503
+            ) from exc
         if not content.startswith(b"PK\x03\x04"):
             raise ProposalDraftError("proposal_template_invalid", "기안 초안 서식이 올바르지 않습니다.", 503)
         return content
@@ -2618,11 +2625,14 @@ class ProposalDraftService:
         user_answers: list[str] | None = None,
         allow_questions: bool = True,
         clarification_round: int = 0,
+        deadline: float | None = None,
     ) -> tuple[ProposalDocumentV2, ProposalCompletionSummary, float]:
         """지원하는 생성기에서는 별도 근거 판정을 수행하고 구 테스트 double은 호환한다."""
 
         if self._draft_generator is None:
-            raise ProposalDraftError("proposal_generation_not_configured", "기안 초안 생성 기능이 구성되지 않았습니다.", 503)
+            raise ProposalDraftError(
+                "proposal_generation_not_configured", "기안 초안 생성 기능이 구성되지 않았습니다.", 503
+            )
         assessor = getattr(self._draft_generator, "assess", None)
         if not callable(assessor):
             return document, _fallback_completion(document), 0.0
@@ -2634,6 +2644,7 @@ class ProposalDraftService:
             proposal_type=proposal_type,
             user_answers=user_answers,
             allow_questions=allow_questions,
+            deadline=deadline,
         )
         try:
             verified_document, completion = apply_proposal_evidence_verification(
@@ -2659,12 +2670,16 @@ class ProposalDraftService:
         proposal_type: ProposalTypeRequest = "auto",
         validation_ms: float = 0.0,
         retrieval_ms: float = 0.0,
+        deadline: float | None = None,
     ) -> ProposalDraftGenerateResponse:
         """선택 문서 근거로 세 필드를 생성해 신규 XLSX로 저장하고 다운로드를 등록한다."""
 
         if self._draft_generator is None or self._upload_manager is None:
-            raise ProposalDraftError("proposal_generation_not_configured", "기안 초안 생성 기능이 구성되지 않았습니다.", 503)
+            raise ProposalDraftError(
+                "proposal_generation_not_configured", "기안 초안 생성 기능이 구성되지 않았습니다.", 503
+            )
         started = time.perf_counter()
+        effective_deadline = self._effective_deadline(deadline)
         type_resolution = resolve_proposal_type(proposal_type, instruction, evidence)
         filter_started = time.perf_counter()
         filtered = filter_proposal_evidence(
@@ -2685,6 +2700,7 @@ class ProposalDraftService:
             instruction,
             filtered.citations,
             proposal_type=type_resolution.proposal_type,
+            deadline=effective_deadline,
         )
         refiner = getattr(self._draft_generator, "refine", None)
         if callable(refiner) and draft_result.document is not None:
@@ -2693,6 +2709,7 @@ class ProposalDraftService:
                 draft_result.document,
                 filtered.citations,
                 proposal_type=type_resolution.proposal_type,
+                deadline=effective_deadline,
             )
         llm_ms = round((time.perf_counter() - llm_started) * 1000, 1)
         generated_structured_document = draft_result.document is not None
@@ -2704,6 +2721,7 @@ class ProposalDraftService:
                 document,
                 filtered.citations,
                 proposal_type=type_resolution.proposal_type,
+                deadline=effective_deadline,
             )
             fields = (
                 project_document_to_legacy_fields(document)
@@ -2765,13 +2783,16 @@ class ProposalDraftService:
                 },
             )
 
+        self._ensure_completion_budget(effective_deadline)
         workbook_started = time.perf_counter()
         try:
             content = render_proposal_workbook(self._read_template(), document)
         except ProposalDraftError:
             raise
         except ValueError as exc:
-            raise ProposalDraftError("proposal_workbook_generation_failed", "기안 초안 엑셀을 생성하지 못했습니다.", 503) from exc
+            raise ProposalDraftError(
+                "proposal_workbook_generation_failed", "기안 초안 엑셀을 생성하지 못했습니다.", 503
+            ) from exc
         workbook_ms = round((time.perf_counter() - workbook_started) * 1000, 1)
 
         file_name = build_versioned_filename(
@@ -2781,7 +2802,8 @@ class ProposalDraftService:
         )
         smb_started = time.perf_counter()
         try:
-            saved = self._upload_manager.save_proposal_draft(content, file_name)
+            self._ensure_completion_budget(effective_deadline)
+            saved = self._upload_manager.save_proposal_draft(content, file_name, deadline=effective_deadline)
         except UploadError as exc:
             raise ProposalDraftError(exc.code, exc.message, exc.status_code) from exc
         smb_ms = round((time.perf_counter() - smb_started) * 1000, 1)
@@ -2866,12 +2888,16 @@ class ProposalDraftService:
         *,
         validation_ms: float = 0.0,
         retrieval_ms: float = 0.0,
+        deadline: float | None = None,
     ) -> ProposalDraftClarificationResponse:
         """최대 세 답변을 사용자 근거로 반영한 뒤에만 XLSX를 생성·신규 저장한다."""
 
         if self._draft_generator is None or self._upload_manager is None:
-            raise ProposalDraftError("proposal_generation_not_configured", "기안 초안 생성 기능이 구성되지 않았습니다.", 503)
+            raise ProposalDraftError(
+                "proposal_generation_not_configured", "기안 초안 생성 기능이 구성되지 않았습니다.", 503
+            )
         started = time.perf_counter()
+        effective_deadline = self._effective_deadline(deadline)
         base = self.get_clarification_record(draft_id, selected_files)
         expected = {question.question_id: question for question in base.completion.questions}
         received = {answer.question_id: answer for answer in answers}
@@ -2898,14 +2924,15 @@ class ProposalDraftService:
             )
 
         llm_started = time.perf_counter()
-        clarification_instruction = (
-            f"원본 작성 요청:\n{base.instruction}\n\n사용자 확인 답변:\n" + "\n".join(answer_sources)
+        clarification_instruction = f"원본 작성 요청:\n{base.instruction}\n\n사용자 확인 답변:\n" + "\n".join(
+            answer_sources
         )
         clarified_result = self._draft_generator.revise(
             clarification_instruction,
             base.document,
             filtered.citations,
             proposal_type=base.proposal_type,
+            deadline=effective_deadline,
         )
         refiner = getattr(self._draft_generator, "refine", None)
         if callable(refiner) and clarified_result.document is not None:
@@ -2914,6 +2941,7 @@ class ProposalDraftService:
                 clarified_result.document,
                 filtered.citations,
                 proposal_type=base.proposal_type,
+                deadline=effective_deadline,
             )
         llm_ms = round((time.perf_counter() - llm_started) * 1000, 1)
         clarified_document = clarified_result.document or _legacy_document(clarified_result.fields)
@@ -2927,6 +2955,7 @@ class ProposalDraftService:
                 user_answers=answer_sources,
                 allow_questions=False,
                 clarification_round=1,
+                deadline=effective_deadline,
             )
             fields = project_document_to_legacy_fields(clarified_document)
         except ValueError as exc:
@@ -2936,13 +2965,16 @@ class ProposalDraftService:
                 502,
             ) from exc
 
+        self._ensure_completion_budget(effective_deadline)
         workbook_started = time.perf_counter()
         try:
             content = render_proposal_workbook(self._read_template(), clarified_document)
         except ProposalDraftError:
             raise
         except ValueError as exc:
-            raise ProposalDraftError("proposal_workbook_generation_failed", "기안 초안 엑셀을 생성하지 못했습니다.", 503) from exc
+            raise ProposalDraftError(
+                "proposal_workbook_generation_failed", "기안 초안 엑셀을 생성하지 못했습니다.", 503
+            ) from exc
         workbook_ms = round((time.perf_counter() - workbook_started) * 1000, 1)
         file_name = build_versioned_filename(
             f"{_title_document_name(fields.title)}.xlsx",
@@ -2951,7 +2983,8 @@ class ProposalDraftService:
         )
         smb_started = time.perf_counter()
         try:
-            saved = self._upload_manager.save_proposal_draft(content, file_name)
+            self._ensure_completion_budget(effective_deadline)
+            saved = self._upload_manager.save_proposal_draft(content, file_name, deadline=effective_deadline)
         except UploadError as exc:
             raise ProposalDraftError(exc.code, exc.message, exc.status_code) from exc
         smb_ms = round((time.perf_counter() - smb_started) * 1000, 1)
@@ -3040,12 +3073,16 @@ class ProposalDraftService:
         *,
         validation_ms: float = 0.0,
         retrieval_ms: float = 0.0,
+        deadline: float | None = None,
     ) -> ProposalDraftRevisionResponse:
         """원본 기록은 유지하고 피드백을 반영한 새 minor 버전을 신규 저장한다."""
 
         if self._draft_generator is None or self._upload_manager is None:
-            raise ProposalDraftError("proposal_generation_not_configured", "기안 초안 생성 기능이 구성되지 않았습니다.", 503)
+            raise ProposalDraftError(
+                "proposal_generation_not_configured", "기안 초안 생성 기능이 구성되지 않았습니다.", 503
+            )
         started = time.perf_counter()
+        effective_deadline = self._effective_deadline(deadline)
         base = self.get_revision_record(draft_id, selected_files)
         filter_started = time.perf_counter()
         filtered = filter_proposal_evidence(
@@ -3069,6 +3106,7 @@ class ProposalDraftService:
             base.document,
             filtered.citations,
             proposal_type=base.proposal_type,
+            deadline=effective_deadline,
         )
         refiner = getattr(self._draft_generator, "refine", None)
         if callable(refiner) and revised_result.document is not None:
@@ -3077,6 +3115,7 @@ class ProposalDraftService:
                 revised_result.document,
                 filtered.citations,
                 proposal_type=base.proposal_type,
+                deadline=effective_deadline,
             )
         llm_ms = round((time.perf_counter() - llm_started) * 1000, 1)
         revised_document = revised_result.document or _legacy_document(revised_result.fields)
@@ -3088,6 +3127,7 @@ class ProposalDraftService:
                 filtered.citations,
                 proposal_type=base.proposal_type,
                 allow_questions=False,
+                deadline=effective_deadline,
             )
             fields = project_document_to_legacy_fields(revised_document)
         except ValueError as exc:
@@ -3097,13 +3137,16 @@ class ProposalDraftService:
                 502,
             ) from exc
 
+        self._ensure_completion_budget(effective_deadline)
         workbook_started = time.perf_counter()
         try:
             content = render_proposal_workbook(self._read_template(), revised_document)
         except ProposalDraftError:
             raise
         except ValueError as exc:
-            raise ProposalDraftError("proposal_workbook_generation_failed", "기안 수정본 엑셀을 생성하지 못했습니다.", 503) from exc
+            raise ProposalDraftError(
+                "proposal_workbook_generation_failed", "기안 수정본 엑셀을 생성하지 못했습니다.", 503
+            ) from exc
         workbook_ms = round((time.perf_counter() - workbook_started) * 1000, 1)
 
         try:
@@ -3115,7 +3158,8 @@ class ProposalDraftService:
         file_name = _revision_file_name(base.download.file_name, revision_minor)
         smb_started = time.perf_counter()
         try:
-            saved = self._upload_manager.save_proposal_draft(content, file_name)
+            self._ensure_completion_budget(effective_deadline)
+            saved = self._upload_manager.save_proposal_draft(content, file_name, deadline=effective_deadline)
         except UploadError as exc:
             raise ProposalDraftError(exc.code, exc.message, exc.status_code) from exc
         smb_ms = round((time.perf_counter() - smb_started) * 1000, 1)

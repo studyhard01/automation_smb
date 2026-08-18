@@ -141,7 +141,7 @@
         "forbidden_tokens": ["Langflow를 사용"]
       },
       "docs/IMPLEMENTATION_STATUS.md": {
-        "required_tokens": ["기준일: 2026-08-12", "자연어 파일 검색", "선택 문서 검증", "기안 초안", "제거 대상 판정", "Docker 패키징", "파일 첨부"],
+        "required_tokens": ["기준일: 2026-08-14", "자연어 파일 검색", "선택 문서 검증", "기안 초안", "제거 대상 판정", "Docker 패키징", "파일 첨부"],
         "forbidden_tokens": []
       },
       "docs/DATASET_DB_INTEGRATION_PLAN.md": {

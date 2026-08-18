@@ -18,6 +18,7 @@ from smb_finder.models import DocumentCitation
 
 from .document_models import SelectedFileContext
 from .proposal_draft import (
+    LocalProposalDraftGenerator,
     ProposalDraftClarificationRequest,
     ProposalDraftClarificationResponse,
     ProposalDraftError,
@@ -48,7 +49,19 @@ def create_upload_router(
     """비밀을 받거나 반환하지 않는 설정·첨부 API를 생성한다."""
 
     upload_manager = manager or UploadManager(settings)
-    draft_service = proposal_draft_service or ProposalDraftService(settings, upload_manager)
+    if proposal_draft_service is not None:
+        draft_service = proposal_draft_service
+    elif runtime_getter is not None:
+        draft_service = ProposalDraftService(
+            settings,
+            upload_manager,
+            draft_generator=LocalProposalDraftGenerator(
+                settings,
+                gateway_getter=lambda: getattr(runtime_getter(), "model_gateway", None),
+            ),
+        )
+    else:
+        draft_service = ProposalDraftService(settings, upload_manager)
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
@@ -71,6 +84,8 @@ def create_upload_router(
     async def collect_proposal_evidence(
         selected_files: list[SelectedFileContext],
         query: str,
+        *,
+        deadline: float,
     ) -> tuple[list[DocumentCitation], float, float]:
         """선택 snapshot을 재검증하고 같은 범위 안에서만 근거를 다시 검색한다."""
 
@@ -83,9 +98,7 @@ def create_upload_router(
         database_selections = [
             (str(item.doc_id), str(item.revision_id)) for item in selected_files if item.source == "llmops"
         ]
-        upload_selections = [
-            (item.doc_id, item.revision_id) for item in selected_files if item.source == "upload"
-        ]
+        upload_selections = [(item.doc_id, item.revision_id) for item in selected_files if item.source == "upload"]
 
         validation_started = time.perf_counter()
         if database_selections:
@@ -93,9 +106,16 @@ def create_upload_router(
             if file_searcher is None:
                 raise HTTPException(
                     status_code=503,
-                    detail={"code": "selected_file_validation_unavailable", "message": "선택 문서를 확인할 수 없습니다."},
+                    detail={
+                        "code": "selected_file_validation_unavailable",
+                        "message": "선택 문서를 확인할 수 없습니다.",
+                    },
                 )
-            valid = await run_in_threadpool(file_searcher.validate_active_selections, database_selections)
+            valid = await run_in_threadpool(
+                file_searcher.validate_active_selections,
+                database_selections,
+                deadline=deadline,
+            )
             if set(database_selections) != valid:
                 raise HTTPException(
                     status_code=409,
@@ -111,7 +131,11 @@ def create_upload_router(
                     status_code=503,
                     detail={"code": "upload_context_unavailable", "message": "첨부 파일을 확인할 수 없습니다."},
                 )
-            valid_uploads = await run_in_threadpool(context_upload_manager.validate_selections, upload_selections)
+            valid_uploads = await run_in_threadpool(
+                context_upload_manager.validate_selections,
+                upload_selections,
+                deadline=deadline,
+            )
             if not valid_uploads:
                 raise HTTPException(
                     status_code=409,
@@ -129,12 +153,30 @@ def create_upload_router(
             if scoped_retriever is None:
                 raise HTTPException(
                     status_code=503,
-                    detail={"code": "proposal_retrieval_unavailable", "message": "선택 문서 근거를 검색할 수 없습니다."},
+                    detail={
+                        "code": "proposal_retrieval_unavailable",
+                        "message": "선택 문서 근거를 검색할 수 없습니다.",
+                    },
                 )
-            database_result = await run_in_threadpool(scoped_retriever.retrieve, query, database_selections)
+            database_result = await run_in_threadpool(
+                scoped_retriever.retrieve,
+                query,
+                database_selections,
+                deadline=deadline,
+            )
             evidence.extend(database_result.citations)
         if upload_selections:
-            upload_result = await run_in_threadpool(context_upload_manager.retrieve, query, upload_selections)
+            if time.monotonic() >= deadline:
+                raise LlmopsSearchError(
+                    "llmops_retrieval_budget_exhausted",
+                    "기안 근거 검색 시간 예산이 소진됐습니다.",
+                )
+            upload_result = await run_in_threadpool(
+                context_upload_manager.retrieve,
+                query,
+                upload_selections,
+                deadline=deadline,
+            )
             evidence.extend(upload_result.citations)
         retrieval_ms = round((time.perf_counter() - retrieval_started) * 1000, 1)
         if not evidence:
@@ -216,10 +258,12 @@ def create_upload_router(
         summary="선택 문서 기반 구조화 기안 생성 또는 필수 정보 확인",
     )
     async def generate_proposal_draft(request: ProposalDraftGenerateRequest) -> ProposalDraftGenerateResponse:
+        deadline = time.monotonic() + settings.proposal_llm_timeout_ms / 1000
         try:
             evidence, validation_ms, retrieval_ms = await collect_proposal_evidence(
                 request.selected_files,
                 request.instruction,
+                deadline=deadline,
             )
             return await run_in_threadpool(
                 draft_service.generate,
@@ -229,6 +273,7 @@ def create_upload_router(
                 proposal_type=request.proposal_type,
                 validation_ms=validation_ms,
                 retrieval_ms=retrieval_ms,
+                deadline=deadline,
             )
         except LlmopsSearchError as exc:
             raise HTTPException(
@@ -251,6 +296,7 @@ def create_upload_router(
         draft_id: UUID,
         request: ProposalDraftClarificationRequest,
     ) -> ProposalDraftClarificationResponse:
+        deadline = time.monotonic() + settings.proposal_llm_timeout_ms / 1000
         try:
             base = await run_in_threadpool(
                 draft_service.get_clarification_record,
@@ -259,9 +305,14 @@ def create_upload_router(
             )
             question_map = {question.question_id: question.prompt for question in base.completion.questions}
             query = f"{base.instruction}\n" + "\n".join(
-                f"{question_map.get(answer.question_id, answer.question_id)}: {answer.answer}" for answer in request.answers
+                f"{question_map.get(answer.question_id, answer.question_id)}: {answer.answer}"
+                for answer in request.answers
             )
-            evidence, validation_ms, retrieval_ms = await collect_proposal_evidence(request.selected_files, query)
+            evidence, validation_ms, retrieval_ms = await collect_proposal_evidence(
+                request.selected_files,
+                query,
+                deadline=deadline,
+            )
             return await run_in_threadpool(
                 draft_service.clarify,
                 draft_id,
@@ -270,6 +321,7 @@ def create_upload_router(
                 evidence,
                 validation_ms=validation_ms,
                 retrieval_ms=retrieval_ms,
+                deadline=deadline,
             )
         except LlmopsSearchError as exc:
             raise HTTPException(
@@ -292,6 +344,7 @@ def create_upload_router(
         draft_id: UUID,
         request: ProposalDraftRevisionRequest,
     ) -> ProposalDraftRevisionResponse:
+        deadline = time.monotonic() + settings.proposal_llm_timeout_ms / 1000
         try:
             base = await run_in_threadpool(
                 draft_service.get_revision_record,
@@ -299,7 +352,11 @@ def create_upload_router(
                 request.selected_files,
             )
             query = f"{base.instruction}\n수정 피드백: {request.feedback}"
-            evidence, validation_ms, retrieval_ms = await collect_proposal_evidence(request.selected_files, query)
+            evidence, validation_ms, retrieval_ms = await collect_proposal_evidence(
+                request.selected_files,
+                query,
+                deadline=deadline,
+            )
             return await run_in_threadpool(
                 draft_service.revise,
                 draft_id,
@@ -308,6 +365,7 @@ def create_upload_router(
                 evidence,
                 validation_ms=validation_ms,
                 retrieval_ms=retrieval_ms,
+                deadline=deadline,
             )
         except LlmopsSearchError as exc:
             raise HTTPException(
@@ -342,7 +400,7 @@ def create_upload_router(
             media_type=_XLSX_MEDIA_TYPE,
             headers={
                 "Content-Disposition": (
-                    f'attachment; filename="proposal_draft.xlsx"; filename*=UTF-8\'\'{encoded_name}'
+                    f"attachment; filename=\"proposal_draft.xlsx\"; filename*=UTF-8''{encoded_name}"
                 ),
                 "Cache-Control": "no-store",
                 "X-Content-Type-Options": "nosniff",

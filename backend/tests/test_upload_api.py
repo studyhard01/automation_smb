@@ -10,14 +10,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
-from uuid import uuid4
+from uuid import UUID, uuid4
 from xml.etree import ElementTree
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import ValidationError
 from smbprotocol.exceptions import NtStatus, SMBOSError
 
+from smb_finder.bot_core import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
 from smb_finder.config import Settings
 from smb_finder.models import DocumentCitation, RetrievalScores
 from smb_finder.playground.document_api import DocumentRuntime
@@ -75,6 +77,8 @@ class StubWriter:
         self.proposal_content = b""
         self.proposal_file_name = ""
         self.proposal_writes: list[tuple[str, bytes]] = []
+        self.proposal_deadlines: list[float | None] = []
+        self.read_deadlines: list[float | None] = []
 
     def close(self) -> None:
         self.closed = True
@@ -91,14 +95,30 @@ class StubWriter:
             indexed=False,
         )
 
-    def read(self, file_name: str, relative_directory: str, *, expected_size: int) -> bytes:
+    def read(
+        self,
+        file_name: str,
+        relative_directory: str,
+        *,
+        expected_size: int,
+        deadline: float | None = None,
+    ) -> bytes:
+        self.read_deadlines.append(deadline)
         assert file_name
         assert relative_directory == "team/inbox"
         assert expected_size == len(self.received)
         return self.received
 
-    def create_xlsx(self, content: bytes, file_name: str, relative_directory: str) -> FileUploadResponse:
+    def create_xlsx(
+        self,
+        content: bytes,
+        file_name: str,
+        relative_directory: str,
+        *,
+        deadline: float | None = None,
+    ) -> FileUploadResponse:
         assert relative_directory == "team/proposal"
+        self.proposal_deadlines.append(deadline)
         self.proposal_content = content
         self.proposal_file_name = file_name
         self.proposal_writes.append((file_name, content))
@@ -118,6 +138,7 @@ class StubDraftGenerator:
         self.evidence: list[list[DocumentCitation]] = []
         self.proposal_types: list[str] = []
         self.revisions: list[tuple[str, str, str]] = []
+        self.deadlines: list[float | None] = []
         self.closed = False
 
     def generate(
@@ -126,7 +147,9 @@ class StubDraftGenerator:
         evidence: list[DocumentCitation],
         *,
         proposal_type: str = "general",
+        deadline: float | None = None,
     ) -> ProposalDraftResult:
+        self.deadlines.append(deadline)
         self.instructions.append(instruction)
         self.evidence.append(evidence)
         self.proposal_types.append(proposal_type)
@@ -139,12 +162,12 @@ class StubDraftGenerator:
         evidence: list[DocumentCitation],
         *,
         proposal_type: str,
+        deadline: float | None = None,
     ) -> ProposalDraftResult:
+        self.deadlines.append(deadline)
         self.revisions.append((feedback, document.title, proposal_type))
         self.evidence.append(evidence)
-        revised_fields = self.fields.model_copy(
-            update={"body": f"{self.fields.body}\n수정 사항: {feedback}"}
-        )
+        revised_fields = self.fields.model_copy(update={"body": f"{self.fields.body}\n수정 사항: {feedback}"})
         return ProposalDraftResult(fields=revised_fields, model="synthetic-draft-model")
 
     def close(self) -> None:
@@ -207,7 +230,11 @@ def _citation() -> DocumentCitation:
 
 
 class StubFileSearcher:
-    def validate_active_selections(self, selections):  # noqa: ANN001
+    def __init__(self) -> None:
+        self.deadlines: list[float | None] = []
+
+    def validate_active_selections(self, selections, *, deadline=None):  # noqa: ANN001, ANN202
+        self.deadlines.append(deadline)
         return set(selections)
 
 
@@ -215,31 +242,65 @@ class StubRetriever:
     def __init__(self, citations: list[DocumentCitation] | None = None) -> None:
         self.citations = citations if citations is not None else [_citation()]
         self.calls: list[tuple[str, list[tuple[str, str]]]] = []
+        self.deadlines: list[float | None] = []
 
-    def retrieve(self, instruction: str, selections: list[tuple[str, str]]):
+    def retrieve(
+        self,
+        instruction: str,
+        selections: list[tuple[str, str]],
+        *,
+        deadline: float | None = None,
+    ):
         self.calls.append((instruction, selections))
+        self.deadlines.append(deadline)
         return SimpleNamespace(citations=self.citations)
 
 
-class StubLlmResponse:
-    def __init__(self, payload: dict) -> None:
-        self.payload = payload
+class StubUploadContextManager:
+    def __init__(self, citations: list[DocumentCitation] | None = None) -> None:
+        self.citations = citations if citations is not None else [_citation()]
+        self.validation_deadlines: list[float | None] = []
+        self.retrieval_deadlines: list[float | None] = []
 
-    def raise_for_status(self) -> None:
+    def validate_selections(self, _selections, *, deadline=None):  # noqa: ANN001, ANN202
+        self.validation_deadlines.append(deadline)
+        return True
+
+    def retrieve(self, _query, _selections, *, deadline=None):  # noqa: ANN001, ANN202
+        self.retrieval_deadlines.append(deadline)
+        return SimpleNamespace(citations=self.citations)
+
+
+class CountingRegistry:
+    def __init__(self) -> None:
+        self.lookups: list[tuple[UUID, UUID]] = []
+
+    def find(self, doc_id: UUID, revision_id: UUID):  # noqa: ANN201
+        self.lookups.append((doc_id, revision_id))
         return None
 
-    def json(self) -> dict:
-        return self.payload
 
-
-class StubLlmClient:
+class StubModelGateway:
     def __init__(self, response_payload: dict) -> None:
         self.response_payload = response_payload
-        self.calls: list[tuple[str, dict]] = []
+        self.calls: list[dict] = []
 
-    def post(self, url: str, *, json: dict) -> StubLlmResponse:
-        self.calls.append((url, json))
-        return StubLlmResponse(self.response_payload)
+    def invoke_json(self, **kwargs):  # noqa: ANN003, ANN201
+        self.calls.append(kwargs)
+        payload = self.response_payload
+        if "message" in payload:
+            payload = json.loads(payload["message"]["content"])
+        try:
+            validated = kwargs["response_model"].model_validate(payload)
+        except ValidationError as exc:
+            raise ModelGatewayError("output_schema_invalid", retryable=False) from exc
+        return ModelGatewayResult(
+            payload=validated,
+            provider="ollama",
+            model=kwargs["model"],
+            usage=ModelTokenUsage(),
+            elapsed_ms=1.0,
+        )
 
     def close(self) -> None:
         return None
@@ -367,12 +428,7 @@ def test_proposal_draft_settings_rejects_absolute_or_parent_paths(tmp_path: Path
 def test_proposal_draft_download_preserves_template_bytes_and_workbook_structure(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
     created_at = datetime(2026, 7, 29, 15, 30, tzinfo=UTC)
     service = ProposalDraftService(template_path=template_path, clock=lambda: created_at)
@@ -410,7 +466,7 @@ def test_proposal_draft_download_hides_missing_template_path(tmp_path: Path) -> 
 
 
 def test_local_proposal_generator_accepts_legacy_three_field_json_and_includes_evidence(tmp_path: Path) -> None:
-    client = StubLlmClient(
+    gateway = StubModelGateway(
         {
             "message": {
                 "content": json.dumps(
@@ -426,27 +482,27 @@ def test_local_proposal_generator_accepts_legacy_three_field_json_and_includes_e
     )
     generator = LocalProposalDraftGenerator(
         _settings(tmp_path, ollama_base_url="http://127.0.0.1:11434"),
-        client=client,
+        gateway=gateway,
     )
     citation = _citation()
 
     result = generator.generate("합성 구매 기안을 작성해 줘", [citation])
 
     assert result.fields.title == "합성 구매 기안"
-    call_url, payload = client.calls[0]
-    assert call_url == "http://127.0.0.1:11434/api/chat"
-    assert payload["format"] == "json"
-    assert "proposal-document-v2" in payload["messages"][0]["content"]
-    assert "빈 배열 []" in payload["messages"][0]["content"]
-    assert citation.title in payload["messages"][1]["content"]
-    assert citation.excerpt in payload["messages"][1]["content"]
+    call = gateway.calls[0]
+    assert call["purpose"] == "proposal_generation"
+    assert call["model"] == "synthetic-model"
+    assert "proposal-document-v2" in call["messages"][0]["content"]
+    assert "빈 배열 []" in call["messages"][0]["content"]
+    assert citation.title in call["messages"][1]["content"]
+    assert citation.excerpt in call["messages"][1]["content"]
 
 
 def test_local_proposal_generator_maps_missing_json_field_to_502(tmp_path: Path) -> None:
-    client = StubLlmClient({"message": {"content": '{"title":"합성","approval_request":"검토 바랍니다."}'}})
+    gateway = StubModelGateway({"message": {"content": '{"title":"합성","approval_request":"검토 바랍니다."}'}})
     generator = LocalProposalDraftGenerator(
         _settings(tmp_path, ollama_base_url="http://127.0.0.1:11434"),
-        client=client,
+        gateway=gateway,
     )
 
     with pytest.raises(ProposalDraftError) as raised:
@@ -457,19 +513,18 @@ def test_local_proposal_generator_maps_missing_json_field_to_502(tmp_path: Path)
 
 
 def test_local_proposal_generator_rejects_extra_json_field(tmp_path: Path) -> None:
-    client = StubLlmClient(
+    gateway = StubModelGateway(
         {
             "message": {
                 "content": (
-                    '{"title":"합성","approval_request":"검토 바랍니다.",'
-                    '"body":"합성 본문","unexpected":"거부 대상"}'
+                    '{"title":"합성","approval_request":"검토 바랍니다.","body":"합성 본문","unexpected":"거부 대상"}'
                 )
             }
         }
     )
     generator = LocalProposalDraftGenerator(
         _settings(tmp_path, ollama_base_url="http://127.0.0.1:11434"),
-        client=client,
+        gateway=gateway,
     )
 
     with pytest.raises(ProposalDraftError) as raised:
@@ -481,12 +536,7 @@ def test_local_proposal_generator_rejects_extra_json_field(tmp_path: Path) -> No
 
 def test_insert_proposal_fields_preserves_ooxml_and_writes_literal_cells() -> None:
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
 
     generated = insert_proposal_fields(
@@ -501,9 +551,9 @@ def test_insert_proposal_fields_preserves_ooxml_and_writes_literal_cells() -> No
     with zipfile.ZipFile(template_path) as original, zipfile.ZipFile(io.BytesIO(generated)) as workbook:
         assert workbook.testzip() is None
         assert original.namelist() == workbook.namelist()
-        assert [
-            name for name in original.namelist() if original.read(name) != workbook.read(name)
-        ] == ["xl/worksheets/sheet1.xml"]
+        assert [name for name in original.namelist() if original.read(name) != workbook.read(name)] == [
+            "xl/worksheets/sheet1.xml"
+        ]
         sheet = ElementTree.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
         namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
         cell = sheet.find(".//main:c[@r='C8']", namespace)
@@ -536,12 +586,7 @@ def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download
     )
     draft_generator = StubDraftGenerator(fields)
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
     service = ProposalDraftService(
         settings,
@@ -551,9 +596,10 @@ def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download
         draft_generator=draft_generator,
     )
     retriever = StubRetriever()
+    file_searcher = StubFileSearcher()
     runtime = DocumentRuntime(
         settings=settings,
-        file_searcher=StubFileSearcher(),
+        file_searcher=file_searcher,
         scoped_retriever=retriever,
         upload_manager=manager,
     )
@@ -585,6 +631,10 @@ def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download
     assert draft_generator.instructions == ["합성 구매 계획 기안을 작성해 줘"]
     assert draft_generator.evidence == [retriever.citations]
     assert draft_generator.proposal_types == ["purchase"]
+    assert retriever.deadlines[0] is not None
+    assert file_searcher.deadlines == retriever.deadlines
+    assert draft_generator.deadlines == retriever.deadlines
+    assert writer.proposal_deadlines == retriever.deadlines
     assert payload["title"] == "합성 자동화 구매 계획"
     assert payload["fields"] == fields.model_dump()
     assert payload["document"]["schema_version"] == "proposal-document-v2"
@@ -625,8 +675,7 @@ def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download
     assert sheet.findtext(".//main:c[@r='A15']/main:is/main:t", namespaces=namespace) == "1. 주요 내용"
     assert sheet.findtext(".//main:c[@r='A16']/main:is/main:t", namespaces=namespace) == "1. 목적"
     assert (
-        sheet.findtext(".//main:c[@r='A17']/main:is/main:t", namespaces=namespace)
-        == "합성 자동화 장비를 구매합니다."
+        sheet.findtext(".//main:c[@r='A17']/main:is/main:t", namespaces=namespace) == "합성 자동화 장비를 구매합니다."
     )
     assert set(payload["timings_ms"]) == {
         "validation",
@@ -637,6 +686,87 @@ def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download
         "workbook",
         "smb",
     }
+
+
+def test_proposal_upload_context_shares_validation_retrieval_model_and_write_deadline(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, proposal_draft_default_relative_directory="team/proposal")
+    writer = StubWriter()
+    manager = UploadManager(settings, writer=writer)
+    generator = StubDraftGenerator(
+        ProposalDraftFields(
+            title="합성 구매 계획",
+            approval_request="합성 구매를 승인하여 주시기 바랍니다.",
+            body="합성 장비 구매 근거를 반영합니다.",
+        )
+    )
+    service = ProposalDraftService(settings, manager, draft_generator=generator)
+    upload_context = StubUploadContextManager()
+    runtime = DocumentRuntime(settings=settings, upload_manager=upload_context)
+    citation = upload_context.citations[0]
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, manager, service, runtime_getter=lambda: runtime))
+
+    response = _request(
+        app,
+        "POST",
+        "/api/playground/drafts/proposal",
+        json_body={
+            "instruction": "합성 구매 기안을 작성해 줘",
+            "selected_files": [
+                {
+                    "source": "upload",
+                    "doc_id": str(citation.doc_id),
+                    "revision_id": str(citation.revision_id),
+                    "file_name": "synthetic.txt",
+                    "title": "합성 구매 근거",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 201
+    assert upload_context.validation_deadlines[0] is not None
+    assert upload_context.validation_deadlines == upload_context.retrieval_deadlines
+    assert generator.deadlines == upload_context.retrieval_deadlines
+    assert writer.proposal_deadlines == upload_context.retrieval_deadlines
+
+
+def test_expired_upload_selection_validation_stops_before_registry_and_retrieval(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, proposal_draft_default_relative_directory="team/proposal")
+    writer = StubWriter()
+    registry = CountingRegistry()
+    manager = UploadManager(settings, writer=writer, registry=registry, clock=lambda: float("inf"))
+    generator = StubDraftGenerator(
+        ProposalDraftFields(title="합성 계획", approval_request="합성 승인 요청", body="합성 본문")
+    )
+    service = ProposalDraftService(settings, manager, draft_generator=generator)
+    app = FastAPI()
+    app.include_router(create_upload_router(settings, manager, service, runtime_getter=lambda: runtime))
+    runtime = DocumentRuntime(settings=settings, upload_manager=manager)
+
+    response = _request(
+        app,
+        "POST",
+        "/api/playground/drafts/proposal",
+        json_body={
+            "instruction": "합성 계획 기안을 작성해 줘",
+            "selected_files": [
+                {
+                    "source": "upload",
+                    "doc_id": str(uuid4()),
+                    "revision_id": str(uuid4()),
+                    "file_name": "synthetic.txt",
+                    "title": "합성 근거",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 504
+    assert response.json()["detail"]["code"] == "uploaded_retrieval_budget_exhausted"
+    assert registry.lookups == []
+    assert writer.read_deadlines == []
+    assert generator.deadlines == []
 
 
 def test_proposal_generation_defers_save_until_required_clarification_is_answered(tmp_path: Path) -> None:
@@ -651,12 +781,7 @@ def test_proposal_generation_defers_save_until_required_clarification_is_answere
         )
     )
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
     service = ProposalDraftService(settings, manager, template_path=template_path, draft_generator=generator)
     retriever = StubRetriever()
@@ -724,6 +849,7 @@ def test_proposal_generation_defers_save_until_required_clarification_is_answere
     assert completed["saved_to_smb"] is True
     assert completed["download_url"]
     assert len(writer.proposal_writes) == 1
+    assert writer.proposal_deadlines == [generator.deadlines[-1]]
     assert generator.assessment_count == 2
 
 
@@ -738,12 +864,7 @@ def test_proposal_revision_inherits_scope_and_type_creates_v11_v12_and_preserves
     )
     draft_generator = StubDraftGenerator(fields)
     template_path = (
-        Path(__file__).resolve().parents[1]
-        / "src"
-        / "smb_finder"
-        / "playground"
-        / "templates"
-        / "proposal_draft.xlsx"
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
     )
     service = ProposalDraftService(
         settings,
@@ -820,6 +941,7 @@ def test_proposal_revision_inherits_scope_and_type_creates_v11_v12_and_preserves
         first_payload["file_name"],
         second.json()["file_name"],
     ]
+    assert writer.proposal_deadlines == draft_generator.deadlines
 
 
 def test_event_proposal_does_not_call_llm_when_only_receipt_evidence_remains(tmp_path: Path) -> None:
@@ -830,9 +952,7 @@ def test_event_proposal_does_not_call_llm_when_only_receipt_evidence_remains(tmp
         ProposalDraftFields(title="합성 행사 참가", approval_request="검토 바랍니다.", body="합성 본문")
     )
     service = ProposalDraftService(settings, manager, draft_generator=generator)
-    receipt = _citation().model_copy(
-        update={"title": "합성 행사 결제 영수증", "excerpt": "합성 카드 전표 승인 내역"}
-    )
+    receipt = _citation().model_copy(update={"title": "합성 행사 결제 영수증", "excerpt": "합성 카드 전표 승인 내역"})
     retriever = StubRetriever([receipt])
     runtime = DocumentRuntime(
         settings=settings,
@@ -1035,6 +1155,79 @@ def test_uploaded_file_is_immediately_retrievable_as_conversation_evidence(tmp_p
     assert result.metadata.scope[0].doc_id == response.selected_file.doc_id
     assert result.citations[0].location["source"] == "upload"
     assert "Friday" in result.citations[0].excerpt
+    assert writer.read_deadlines[0] is not None
+
+
+def test_upload_retrieval_does_not_read_after_deadline(tmp_path: Path) -> None:
+    writer = StubWriter()
+    manager = UploadManager(_settings(tmp_path), writer=writer, clock=lambda: 100.0)
+    response = manager.upload(io.BytesIO(b"Synthetic evidence."), "synthetic.txt")
+    assert response.selected_file is not None
+
+    with pytest.raises(UploadError) as captured:
+        manager.retrieve(
+            "synthetic",
+            [(response.selected_file.doc_id, response.selected_file.revision_id)],
+            deadline=100.0,
+        )
+
+    assert captured.value.code == "uploaded_retrieval_budget_exhausted"
+    assert writer.read_deadlines == []
+
+
+def test_upload_selection_validation_checks_budget_after_registry_completion(tmp_path: Path) -> None:
+    ticks = iter([99.0, 100.0])
+    registry = CountingRegistry()
+    manager = UploadManager(
+        _settings(tmp_path),
+        writer=StubWriter(),
+        registry=registry,
+        clock=lambda: next(ticks),
+    )
+    selection = (uuid4(), uuid4())
+
+    with pytest.raises(UploadError) as captured:
+        manager.validate_selections([selection], deadline=100.0)
+
+    assert captured.value.code == "uploaded_retrieval_budget_exhausted"
+    assert registry.lookups == [selection]
+
+
+def test_upload_retrieval_stops_before_extraction_when_read_consumes_deadline(tmp_path: Path) -> None:
+    now = [100.0]
+
+    class BudgetConsumingWriter(StubWriter):
+        def read(
+            self,
+            file_name: str,
+            relative_directory: str,
+            *,
+            expected_size: int,
+            deadline: float | None = None,
+        ) -> bytes:
+            data = super().read(
+                file_name,
+                relative_directory,
+                expected_size=expected_size,
+                deadline=deadline,
+            )
+            assert deadline is not None
+            now[0] = deadline
+            return data
+
+    writer = BudgetConsumingWriter()
+    manager = UploadManager(_settings(tmp_path), writer=writer, clock=lambda: now[0])
+    response = manager.upload(io.BytesIO(b"Synthetic evidence."), "synthetic.txt")
+    assert response.selected_file is not None
+
+    with pytest.raises(UploadError) as captured:
+        manager.retrieve(
+            "synthetic",
+            [(response.selected_file.doc_id, response.selected_file.revision_id)],
+            deadline=101.0,
+        )
+
+    assert captured.value.code == "uploaded_retrieval_budget_exhausted"
 
 
 def test_directory_and_filename_validation_rejects_path_semantics() -> None:
@@ -1072,10 +1265,11 @@ class _FakePath:
     def __init__(self, fake: "FakeSmb") -> None:
         self._fake = fake
 
-    def isdir(self, _path: str) -> bool:
+    def isdir(self, _path: str, **kwargs) -> bool:  # noqa: ANN003
+        self._fake.path_connection_timeouts.append(kwargs.get("connection_timeout"))
         return True
 
-    def exists(self, path: str) -> bool:
+    def exists(self, path: str, **_kwargs) -> bool:  # noqa: ANN003
         return path in self._fake.files
 
 
@@ -1086,15 +1280,22 @@ class FakeSmb:
         self.removed: list[str] = []
         self.renamed: list[tuple[str, str]] = []
         self.opened: list[tuple[str, str]] = []
+        self.session_calls = 0
+        self.session_connection_timeouts: list[int | None] = []
+        self.path_connection_timeouts: list[int | None] = []
+        self.open_connection_timeouts: list[int | None] = []
 
-    def register_session(self, _host: str, **_kwargs) -> None:
+    def register_session(self, _host: str, **kwargs) -> None:  # noqa: ANN003
+        self.session_calls += 1
+        self.session_connection_timeouts.append(kwargs.get("connection_timeout"))
         return None
 
     def reset_connection_cache(self) -> None:
         return None
 
-    def open_file(self, path: str, *, mode: str) -> _RemoteBuffer:
+    def open_file(self, path: str, *, mode: str, **_kwargs) -> _RemoteBuffer:  # noqa: ANN003
         assert mode == "xb"
+        self.open_connection_timeouts.append(_kwargs.get("connection_timeout"))
         self.opened.append((path, mode))
         if path in self.files:
             raise FileExistsError(path)
@@ -1109,10 +1310,34 @@ class FakeSmb:
         raise AssertionError("공유폴더 쓰기 경로는 rename을 호출하면 안 됩니다.")
 
 
+class _DeadlineCrossingRemoteBuffer(_RemoteBuffer):
+    def __init__(self, fake: "FakeSmb", path: str, on_close) -> None:  # noqa: ANN001
+        super().__init__(fake, path)
+        self._on_close = on_close
+
+    def __exit__(self, exc_type, exc, traceback) -> None:  # noqa: ANN001
+        super().__exit__(exc_type, exc, traceback)
+        self._on_close()
+
+
+class DeadlineCrossingSmb(FakeSmb):
+    def __init__(self, on_close) -> None:  # noqa: ANN001
+        super().__init__()
+        self._on_close = on_close
+
+    def open_file(self, path: str, *, mode: str, **kwargs) -> _RemoteBuffer:  # noqa: ANN003
+        assert mode == "xb"
+        self.open_connection_timeouts.append(kwargs.get("connection_timeout"))
+        self.opened.append((path, mode))
+        if path in self.files:
+            raise FileExistsError(path)
+        return _DeadlineCrossingRemoteBuffer(self, path, self._on_close)
+
+
 class CollisionSmb(FakeSmb):
     """실제 smbclient처럼 충돌을 FileExistsError가 아닌 SMBOSError로 반환한다."""
 
-    def open_file(self, path: str, *, mode: str) -> _RemoteBuffer:
+    def open_file(self, path: str, *, mode: str, **_kwargs) -> _RemoteBuffer:  # noqa: ANN003
         assert mode == "xb"
         self.opened.append((path, mode))
         raise SMBOSError(NtStatus.STATUS_OBJECT_NAME_COLLISION, path)
@@ -1130,6 +1355,98 @@ def test_smb_writer_rejects_oversize_before_creating_remote_file(tmp_path: Path)
     assert fake.opened == []
     assert fake.removed == []
     assert fake.renamed == []
+
+
+def test_smb_reader_does_not_connect_after_deadline(tmp_path: Path) -> None:
+    fake = FakeSmb()
+    writer = SmbUploadWriter(
+        _settings(tmp_path),
+        smb_module=fake,
+        monotonic=lambda: 100.0,
+    )
+
+    with pytest.raises(UploadError) as captured:
+        writer.read("synthetic.txt", "team/inbox", expected_size=4, deadline=100.0)
+
+    assert captured.value.code == "uploaded_file_read_timeout"
+    assert fake.session_calls == 0
+    assert fake.opened == []
+
+
+def test_proposal_writer_does_not_connect_or_create_after_deadline(tmp_path: Path) -> None:
+    fake = FakeSmb()
+    writer = SmbUploadWriter(_settings(tmp_path), smb_module=fake, monotonic=lambda: 100.0)
+
+    with pytest.raises(UploadError) as captured:
+        writer.create_xlsx(b"PK\x03\x04synthetic", "proposal.xlsx", "team/proposal", deadline=100.0)
+
+    assert captured.value.code == "upload_timeout"
+    assert fake.session_calls == 0
+    assert fake.opened == []
+
+
+def test_proposal_writer_bounds_smb_timeouts_to_request_deadline(tmp_path: Path) -> None:
+    fake = FakeSmb()
+    writer = SmbUploadWriter(
+        _settings(tmp_path, smb_upload_timeout_ms=5000),
+        smb_module=fake,
+        monotonic=lambda: 100.0,
+    )
+
+    writer.create_xlsx(b"PK\x03\x04synthetic", "proposal.xlsx", "team/proposal", deadline=102.9)
+
+    assert fake.session_connection_timeouts == [2]
+    assert fake.path_connection_timeouts == [2]
+    assert fake.open_connection_timeouts == [2]
+
+
+def test_committed_proposal_crossing_deadline_returns_success_and_registers_download(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [100.0]
+    settings = _settings(
+        tmp_path,
+        proposal_draft_default_relative_directory="team/proposal",
+        smb_upload_timeout_ms=5000,
+        smb_upload_max_size_bytes=5_000_000,
+    )
+    fake = DeadlineCrossingSmb(lambda: now.__setitem__(0, 102.0))
+    writer = SmbUploadWriter(settings, smb_module=fake, monotonic=lambda: now[0])
+    manager = UploadManager(settings, writer=writer)
+    generator = StubDraftGenerator(
+        ProposalDraftFields(
+            title="합성 기한 초과 저장",
+            approval_request="합성 요청을 승인하여 주시기 바랍니다.",
+            body="합성 근거를 반영한 본문입니다.",
+        )
+    )
+    template_path = (
+        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
+    )
+    service = ProposalDraftService(
+        settings,
+        manager,
+        template_path=template_path,
+        draft_generator=generator,
+        monotonic=lambda: now[0],
+    )
+    caplog.set_level("WARNING")
+
+    response = service.generate(
+        "합성 구매 기안을 작성해 줘",
+        [_citation()],
+        selected_files=[],
+        proposal_type="purchase",
+        deadline=102.0,
+    )
+
+    download = service.get_download(response.draft_id)
+    assert response.saved_to_smb is True
+    assert download.file_name == response.file_name
+    assert len(fake.files) == 1
+    assert "over_budget=true" in caplog.text
+    assert response.file_name not in caplog.text
 
 
 def test_smb_writer_explicit_gate_blocks_before_any_smb_write(tmp_path: Path) -> None:

@@ -10,18 +10,16 @@ _REMOVED_FINDER_CONTRACT_TESTS = (
 
 # 활성 FastAPI에 연결되지 않은 이전 Playground/MCP 계약은 현재 문서 runtime과 분리한다.
 _INACTIVE_PLAYGROUND_CONTRACT_TESTS = (
-    "test_mcp_server.py",
     "test_phase2_evaluation.py",
     "test_playground.py",
     "test_qc_audit.py",
     "test_qc_report_draft.py",
     "test_skills.py",
-    "test_tooling.py",
 )
 
 collect_ignore = [*_REMOVED_FINDER_CONTRACT_TESTS, *_INACTIVE_PLAYGROUND_CONTRACT_TESTS]
 
-assert len(collect_ignore) == 10
+assert len(collect_ignore) == 8
 assert len(set(collect_ignore)) == len(collect_ignore)
 
 
@@ -29,7 +27,7 @@ def pytest_report_header() -> list[str]:
     """수집하지 않는 레거시 모듈의 고정 범위를 pytest 결과에 노출한다."""
 
     return [
-        "legacy quarantine: 10 modules not collected (fixed list, no globs)",
+        "legacy quarantine: 8 modules not collected (fixed list, no globs)",
         f"  removed Finder/SQLite/RAG contracts (3): {', '.join(_REMOVED_FINDER_CONTRACT_TESTS)}",
-        f"  inactive Playground/MCP contracts (7): {', '.join(_INACTIVE_PLAYGROUND_CONTRACT_TESTS)}",
+        f"  inactive Playground contracts (5): {', '.join(_INACTIVE_PLAYGROUND_CONTRACT_TESTS)}",
     ]
