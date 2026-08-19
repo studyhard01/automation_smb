@@ -111,7 +111,6 @@ class Settings(BaseSettings):
     smb_username: str = ""
     smb_password: str = ""
     nas_url: str = ""
-    nas_source_name: str = ""
     nas_fold_path: str = ""
     nas_user: str = ""
     nas_pw: str = ""

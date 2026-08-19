@@ -6,7 +6,7 @@ import httpx
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from smb_finder.bot_core import ModelGatewayError, OllamaModelGateway
+from smb_finder.model_gateway import ModelGatewayError, OllamaModelGateway
 from smb_finder.config import Settings
 
 

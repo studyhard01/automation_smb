@@ -217,7 +217,7 @@ uv run --no-sync python scripts/run_proposal_evaluation.py `
 
 expected 출력과 reference를 oracle prediction으로 합성해 evaluator 자체의 상한과 현재 workbook 계약의 수용 범위를 검사한다.
 LLM·SMB는 호출하지 않으며 `render_proposal_workbook`으로 V2 workbook을 메모리에서 생성·검사한다. 본문 공간을 넘는 표는
-`세부내용` appendix까지 검증한다. 공개 renderer가 없는 과도기 환경에서만 legacy wrapper로 후퇴한다. `simulated` stage는
+`세부내용` appendix까지 검증한다. `simulated` stage는
 oracle 보고서에서만 성공으로 간주한다. 과거 `baseline` 이름은 deprecated alias로만 허용하며 보고서에
 `deprecated_baseline_alias_used=true`를 남긴다. 두 이름 모두 `evaluation_kind=oracle_contract_check`이고 제품 품질 점수로
 사용할 수 없다.

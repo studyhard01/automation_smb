@@ -13,9 +13,9 @@ from typing import Annotated, Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import intent
-from .bot_core import JsonModelGateway, ModelGatewayError, OllamaModelGateway
 from .config import Settings
 from .llmops_search import LlmopsSearchError, collapse_physical_hits
+from .model_gateway import JsonModelGateway, ModelGatewayError, OllamaModelGateway
 from .models import DocumentSearchHit, DocumentSearchRequest, DocumentSearchResponse, StoreConnectionState
 
 _logger = logging.getLogger(__name__)

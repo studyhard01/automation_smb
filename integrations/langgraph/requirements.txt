@@ -1,9 +1,0 @@
-# LangGraph 외피 의존성 (로컬 전용). 사내망 SSL 프록시면 설치 시:
-#   pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pythonhosted.org
-# 또는 uv:  uv pip install --native-tls -r requirements.txt
-langgraph>=0.2.50
-langgraph-cli[inmem]>=0.1.55   # `langgraph dev` (로컬 Studio 서버) 제공
-langchain-openai>=0.2          # 온프레미스 OpenAI 호환 LLM 호출
-langchain-core>=0.3
-httpx>=0.27
-pydantic-settings>=2.2

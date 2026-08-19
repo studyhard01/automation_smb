@@ -971,12 +971,8 @@ def _baseline_prediction(
             omitted_line_count=max(0, source_line_count - output_line_count),
             truncated=source_line_count > output_line_count or "생략" in fields.body,
         )
-        renderer = getattr(proposal_module, "render_proposal_workbook", None)
-        if renderer is None:
-            generated = proposal_module.insert_proposal_fields(template_path.read_bytes(), projected)
-        else:
-            generated = renderer(template_path.read_bytes(), core_document)
-            xlsx_contract = "proposal-xlsx-v2"
+        generated = proposal_module.render_proposal_workbook(template_path.read_bytes(), core_document)
+        xlsx_contract = "proposal-xlsx-v2"
         xlsx = inspect_proposal_workbook(
             generated,
             fields,
@@ -987,10 +983,8 @@ def _baseline_prediction(
         )
     except ValidationError:
         xlsx = ProposalXlsxStatus(generation_status="projection_invalid")
-    except RuntimeError as exc:
-        xlsx = ProposalXlsxStatus(
-            generation_status="body_limit" if getattr(exc, "code", "") == "proposal_body_too_long" else "generation_error"
-        )
+    except RuntimeError:
+        xlsx = ProposalXlsxStatus(generation_status="generation_error")
     except (ImportError, OSError, ValueError):
         xlsx = ProposalXlsxStatus(generation_status="generation_error")
     workbook_succeeded = all(

@@ -13,7 +13,7 @@ from xml.etree import ElementTree
 import pytest
 from pydantic import ValidationError
 
-from smb_finder.bot_core import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
+from smb_finder.model_gateway import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
 from smb_finder.config import Settings
 from smb_finder.models import DocumentCitation, RetrievalScores
 from smb_finder.playground.proposal_context import pack_proposal_context
@@ -29,7 +29,6 @@ from smb_finder.playground.proposal_draft import (
     _merge_quality_refinement,
     _purchase_background_safety_net,
     apply_proposal_evidence_verification,
-    insert_proposal_fields,
     normalize_proposal_document,
     project_document_to_legacy_fields,
     render_proposal_workbook,
@@ -560,13 +559,6 @@ def test_large_multiline_table_projection_always_fits_workbook_and_keeps_omissio
     assert len(fields.body) <= 6000
     assert fields.body.splitlines()[-1] == "※ 구조화 초안의 일부 세부 행은 엑셀 표시 범위로 인해 생략되었습니다."
     assert "구분 항목 | 금액 일정" in fields.body
-
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
-    )
-    generated = insert_proposal_fields(template_path.read_bytes(), fields)
-    assert generated.startswith(b"PK\x03\x04")
-
 
 def test_context_packer_is_deterministic_bounded_and_preserves_important_lines() -> None:
     filler = "일반 설명 " * 60

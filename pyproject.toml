@@ -15,7 +15,6 @@ dependencies = [
     "python-multipart>=0.0.20,<1",
     "smbprotocol>=1.15,<2",
     "pypdf>=6.0,<7",
-    "langgraph>=1,<2",
     "mcp>=2,<3",
 ]
 

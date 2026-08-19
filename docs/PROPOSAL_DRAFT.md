@@ -359,9 +359,6 @@ V2 본문은 자연스러운 페이지 구분을 위해 최대 120행까지 사�
 항목은 보존한다. renderer style을 `xl/styles.xml`에 추가하며 appendix가 필요할 때만 workbook 관계, content type과 새
 worksheet를 추가한다. `=`, `+`, `-`, `@`로 시작하는 값도 수식이 아닌 `inlineStr`로 기록한다.
 
-기존 외부 호출자를 위한 `insert_proposal_fields`는 3필드·33행 계약을 계속 제공한다. 실제 생성 서비스와 평가기는
-`render_proposal_workbook`을 사용하므로 legacy `fields.body`의 ` | ` 투영 문자열이 새 XLSX 표로 사용되지는 않는다.
-
 ## 오류 계약
 
 | code | status | 조건 |
@@ -373,7 +370,6 @@ worksheet를 추가한다. `=`, `+`, `-`, `@`로 시작하는 값도 수식이 �
 | `proposal_llm_unavailable` | 503 | 로컬 LLM 연결·timeout 실패 |
 | `proposal_verification_unavailable` | 503 | 별도 근거 검증 LLM 연결·timeout 실패 |
 | `proposal_verification_response_invalid` | 502 | 주장별 판정이 누락·중복되거나 허용되지 않은 근거를 사용 |
-| `proposal_body_too_long` | 422 | 외부 legacy 호출자가 직접 33행 초과 필드를 삽입 |
 | `proposal_workbook_generation_failed` | 503 | XLSX 생성 실패 |
 | `file_already_exists` | 409 | 동일한 최종 SMB 대상이 이미 존재 |
 | `proposal_revision_scope_mismatch` | 409 | 수정 요청의 선택 문서 snapshot이 원본과 다름 |

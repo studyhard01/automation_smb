@@ -11,9 +11,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from smb_finder.bot_core import JsonModelGateway, ModelGatewayError
 from smb_finder.config import Settings
 from smb_finder.llmops_search import LlmopsSearchError
+from smb_finder.model_gateway import JsonModelGateway, ModelGatewayError
 from smb_finder.models import ArtifactLink, RetrievalMetadata
 
 from .document_models import (

@@ -228,28 +228,6 @@ def create_upload_router(
                 detail={"code": "invalid_relative_directory", "message": str(exc)},
             ) from exc
 
-    @router.get(
-        "/api/playground/drafts/proposal",
-        response_class=Response,
-        operation_id="download_playground_proposal_draft",
-        summary="빈 기안 초안 XLSX 다운로드",
-        responses={
-            200: {
-                "content": {_XLSX_MEDIA_TYPE: {}},
-                "description": "원본 서식을 보존한 기안 초안 XLSX",
-            }
-        },
-    )
-    async def download_proposal_draft() -> Response:
-        try:
-            download = await run_in_threadpool(draft_service.get_template_download)
-        except ProposalDraftError as exc:
-            detail: dict[str, object] = {"code": exc.code, "message": exc.message}
-            if exc.context_usage is not None:
-                detail["context_usage"] = exc.context_usage.model_dump(mode="json")
-            raise HTTPException(status_code=exc.status_code, detail=detail) from exc
-        return _xlsx_response(download.file_name, download.content)
-
     @router.post(
         "/api/playground/drafts/proposal",
         response_model=ProposalDraftGenerateResponse,

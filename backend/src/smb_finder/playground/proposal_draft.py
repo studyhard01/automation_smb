@@ -24,7 +24,7 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError, field_validator, model_validator
 
-from smb_finder.bot_core import (
+from smb_finder.model_gateway import (
     JsonModelGateway,
     ModelGatewayError,
     OllamaModelGateway,
@@ -2502,60 +2502,6 @@ def render_proposal_workbook(template: bytes, document: ProposalDocumentV2) -> b
     return generated
 
 
-def insert_proposal_fields(template: bytes, fields: ProposalDraftFields) -> bytes:
-    """기존 XLSX ZIP 구조를 보존하며 제목·재가 요청·본문을 지정 위치에 literal string으로 쓴다."""
-
-    if not template.startswith(b"PK\x03\x04"):
-        raise ValueError("기안 초안 서식이 올바르지 않습니다.")
-    body_lines = fields.body.splitlines()
-    body_capacity = _BODY_END_ROW - _BODY_START_ROW + 1
-    if len(body_lines) > body_capacity:
-        raise ProposalDraftError(
-            "proposal_body_too_long",
-            f"기안 본문은 줄바꿈 기준 최대 {body_capacity}줄까지 작성할 수 있습니다.",
-            422,
-        )
-    source_buffer = io.BytesIO(template)
-    output_buffer = io.BytesIO()
-    with zipfile.ZipFile(source_buffer, "r") as source:
-        worksheet_path = _worksheet_path(source, _TITLE_SHEET_NAME)
-        with zipfile.ZipFile(output_buffer, "w") as target:
-            for item in source.infolist():
-                content = source.read(item.filename)
-                if item.filename == worksheet_path:
-                    xml = content.decode("utf-8")
-                    xml = _inline_string_cell(xml, _TITLE_CELL, fields.title, default_style="3")
-                    xml = _inline_string_cell(
-                        xml,
-                        _APPROVAL_REQUEST_CELL,
-                        fields.approval_request,
-                        default_style="23",
-                    )
-                    for index, line in enumerate(body_lines):
-                        xml = _inline_string_cell(
-                            xml,
-                            f"A{_BODY_START_ROW + index}",
-                            line,
-                            default_style=_BODY_DEFAULT_STYLE,
-                        )
-                    content = xml.encode("utf-8")
-                target.writestr(item, content)
-    generated = output_buffer.getvalue()
-    with zipfile.ZipFile(io.BytesIO(generated), "r") as workbook:
-        if workbook.testzip() is not None:
-            raise ValueError("생성된 기안 초안 파일이 손상되었습니다.")
-    return generated
-
-
-def insert_proposal_title(template: bytes, title: str) -> bytes:
-    """구버전 호출자를 위해 제목만 지정하고 나머지 필드는 안전한 합성 문구로 채운다."""
-
-    return insert_proposal_fields(
-        template,
-        ProposalDraftFields(title=title, approval_request="검토 후 재가하여 주시기 바랍니다.", body="초안"),
-    )
-
-
 class ProposalDraftService:
     """LLM 구조화 생성, XLSX 삽입, SMB 신규 저장, 다운로드 등록을 연결한다."""
 
@@ -2606,14 +2552,6 @@ class ProposalDraftService:
         if not content.startswith(b"PK\x03\x04"):
             raise ProposalDraftError("proposal_template_invalid", "기안 초안 서식이 올바르지 않습니다.", 503)
         return content
-
-    def get_template_download(self) -> ProposalDraftDownload:
-        """호환성을 위해 아직 내용을 채우지 않은 원본 서식을 반환한다."""
-
-        return ProposalDraftDownload(
-            file_name=build_versioned_filename(_TEMPLATE_NAME, self._clock(), prefix=_PROPOSAL_PREFIX),
-            content=self._read_template(),
-        )
 
     def _verify_document(
         self,

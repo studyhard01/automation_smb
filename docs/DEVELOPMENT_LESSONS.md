@@ -13,6 +13,11 @@
 
 ## 현재 교훈
 
+### 2026-08-19 — 코드 정리는 현재 실행 그래프와 제품 경계를 함께 검증한다
+- 상황: Vue와 FastAPI의 경계가 불명확한 상태에서 오래된 정리 목록이 이후 활성화된 추출·MCP·기안 평가 파일까지 제거 대상으로 기록해, 문서만 믿고 일괄 삭제하면 현재 기능을 손상할 수 있었다.
+- 교훈: 과거 inventory는 실행 계획이 아니다. 현재 app router·import·테스트·UI 호출을 기준으로 도달 가능성을 다시 확인하고, 레거시는 코드·테스트·의존성·문서를 한 묶음으로 제거해야 한다.
+- 다음 적용: 구조 정리 전 현재 기능표와 import graph를 만들고 환경·데이터 파일은 제외한다. 정리 후 package discovery, pytest, Vite outDir, dependency lock, 품질 rubric, Docker health·OpenAPI·UI smoke를 같은 버전으로 검증한다.
+
 ### 2026-08-18 — 로컬 모델 timeout은 설치와 메모리 상주 상태를 분리해 정한다
 - 상황: Ollama 서버와 모델 목록은 정상이었지만 한 번에 한 모델만 상주해 임베딩과 생성 모델이 번갈아 cold start했고, 짧은 임베딩 제한이 이를 DB 503처럼 보이게 했다.
 - 교훈: 연결·설치 확인만으로 준비 상태를 판단하지 말고 `api/ps`의 상주 여부와 cold/warm 지연을 각각 측정해 단계별 timeout을 정하며, provider timeout은 저장소 장애·입력 검증과 다른 오류 코드로 반환해야 한다.
@@ -57,11 +62,6 @@
 - 상황: 사내 SSL 검사·container DNS·비보안 LAN Browser API 차이뿐 아니라 Compose 재생성 때 셸 전용 포트 값이 빠져 기존 8013이 기본 8011로 바뀌었다.
 - 교훈: build trust, container endpoint, secure-context API와 배포 시점의 일시 환경변수까지 하나의 재현 가능한 실행 계약으로 확인해야 한다.
 - 다음 적용: 공개 wheel host opt-in은 빌드 프로세스에만 두고, 재생성 전후 `docker compose config/ps`의 port·endpoint를 비교한 뒤 non-root·read-only·health·LAN 화면을 검증한다.
-
-### 2026-08-04 — 멀티스택 저장소는 물리 경계와 설정 소유권을 함께 드러낸다
-- 상황: Vue와 FastAPI의 물리 경계가 불명확했고, 제품 목표에서 제외한 실험 코드도 같은 package에 남아 현재 실행 경로와 향후 후보를 구분하기 어려웠다.
-- 교훈: 멀티스택 저장소는 `frontend/`·`backend/` 경계를 대칭적으로 두고, 새 수직 슬라이스를 먼저 연결·검증한 뒤 레거시의 import·dependency·문서·파일을 순서대로 제거해야 한다.
-- 다음 적용: 구조 이동과 제품 경계 변경 시 package discovery, pytest, Vite outDir, reload, dependency, 품질 rubric, canonical 문서를 함께 검증한다. 비활성 테스트는 glob 없이 제거 후보와 일치하는 exact list·고정 개수·pytest header로 드러내고, 새 실패를 자동 격리하거나 삭제 모델을 복원하지 않는다. 영구 삭제는 명시 승인을 받는다.
 
 ### 2026-08-04 — DB 확장 문법은 Client placeholder와 Driver 실행 계층까지 검증한다
 - 상황: PostgreSQL `pg_trgm`의 `%` 연산자가 psycopg placeholder parser와 충돌했고 Neo4j `Query` 객체가 managed transaction의 `run` 계약과 맞지 않았다.

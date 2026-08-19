@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import pytest
 
-from smb_finder.bot_core import ModelGatewayError, OllamaModelGateway
+from smb_finder.model_gateway import ModelGatewayError, OllamaModelGateway
 from smb_finder.config import Settings
 from smb_finder.llmops_multistore_search import (
     LlmopsMultiStoreFileSearcher,

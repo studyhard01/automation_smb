@@ -9,7 +9,6 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import quote
 from uuid import UUID, uuid4
 from xml.etree import ElementTree
 
@@ -19,7 +18,7 @@ from fastapi import FastAPI
 from pydantic import ValidationError
 from smbprotocol.exceptions import NtStatus, SMBOSError
 
-from smb_finder.bot_core import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
+from smb_finder.model_gateway import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
 from smb_finder.config import Settings
 from smb_finder.models import DocumentCitation, RetrievalScores
 from smb_finder.playground.document_api import DocumentRuntime
@@ -32,7 +31,6 @@ from smb_finder.playground.proposal_draft import (
     ProposalDraftService,
     ProposalEvidenceVerification,
     ProposalQuestionCandidate,
-    insert_proposal_fields,
 )
 from smb_finder.playground.upload_api import create_upload_router
 from smb_finder.playground.upload_models import FileUploadResponse
@@ -425,46 +423,6 @@ def test_proposal_draft_settings_rejects_absolute_or_parent_paths(tmp_path: Path
         assert response.json()["detail"]["code"] == "invalid_relative_directory"
 
 
-def test_proposal_draft_download_preserves_template_bytes_and_workbook_structure(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
-    )
-    created_at = datetime(2026, 7, 29, 15, 30, tzinfo=UTC)
-    service = ProposalDraftService(template_path=template_path, clock=lambda: created_at)
-    app = FastAPI()
-    app.include_router(create_upload_router(settings, UploadManager(settings, writer=StubWriter()), service))
-
-    response = _request(app, "GET", "/api/playground/drafts/proposal")
-
-    expected_name = "[기안] 기안지_초안_20260730_v1.0.xlsx"
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    assert response.headers["cache-control"] == "no-store"
-    assert response.headers["x-content-type-options"] == "nosniff"
-    assert f"filename*=UTF-8''{quote(expected_name, safe='')}" in response.headers["content-disposition"]
-    assert response.content == template_path.read_bytes()
-
-    with zipfile.ZipFile(io.BytesIO(response.content)) as workbook:
-        assert workbook.testzip() is None
-        root = ElementTree.fromstring(workbook.read("xl/workbook.xml"))
-    namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-    assert [node.attrib["name"] for node in root.findall("main:sheets/main:sheet", namespace)] == ["기안지"]
-
-
-def test_proposal_draft_download_hides_missing_template_path(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    service = ProposalDraftService(template_path=tmp_path / "internal" / "missing.xlsx")
-    app = FastAPI()
-    app.include_router(create_upload_router(settings, UploadManager(settings, writer=StubWriter()), service))
-
-    response = _request(app, "GET", "/api/playground/drafts/proposal")
-
-    assert response.status_code == 503
-    assert response.json()["detail"]["code"] == "proposal_template_unavailable"
-    assert str(tmp_path) not in response.text
-
-
 def test_local_proposal_generator_accepts_legacy_three_field_json_and_includes_evidence(tmp_path: Path) -> None:
     gateway = StubModelGateway(
         {
@@ -532,47 +490,6 @@ def test_local_proposal_generator_rejects_extra_json_field(tmp_path: Path) -> No
 
     assert raised.value.code == "proposal_llm_response_invalid"
     assert raised.value.status_code == 502
-
-
-def test_insert_proposal_fields_preserves_ooxml_and_writes_literal_cells() -> None:
-    template_path = (
-        Path(__file__).resolve().parents[1] / "src" / "smb_finder" / "playground" / "templates" / "proposal_draft.xlsx"
-    )
-
-    generated = insert_proposal_fields(
-        template_path.read_bytes(),
-        ProposalDraftFields(
-            title="=합성 & 자동화 <검토>",
-            approval_request="=검토 후 재가하여 주시기 바랍니다.",
-            body="=1. 합성 목적\n2. 합성 범위\n3. 합성 일정",
-        ),
-    )
-
-    with zipfile.ZipFile(template_path) as original, zipfile.ZipFile(io.BytesIO(generated)) as workbook:
-        assert workbook.testzip() is None
-        assert original.namelist() == workbook.namelist()
-        assert [name for name in original.namelist() if original.read(name) != workbook.read(name)] == [
-            "xl/worksheets/sheet1.xml"
-        ]
-        sheet = ElementTree.fromstring(workbook.read("xl/worksheets/sheet1.xml"))
-        namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-        cell = sheet.find(".//main:c[@r='C8']", namespace)
-        assert cell is not None
-        assert cell.attrib["s"] == "3"
-        assert cell.attrib["t"] == "inlineStr"
-        assert cell.findtext("main:is/main:t", namespaces=namespace) == "=합성 & 자동화 <검토>"
-        assert cell.find("main:f", namespace) is None
-        assert (
-            sheet.findtext(".//main:c[@r='A10']/main:is/main:t", namespaces=namespace)
-            == "=검토 후 재가하여 주시기 바랍니다."
-        )
-        assert sheet.findtext(".//main:c[@r='A15']/main:is/main:t", namespaces=namespace) == "=1. 합성 목적"
-        assert sheet.findtext(".//main:c[@r='A16']/main:is/main:t", namespaces=namespace) == "2. 합성 범위"
-        assert sheet.findtext(".//main:c[@r='A17']/main:is/main:t", namespaces=namespace) == "3. 합성 일정"
-        assert sheet.find(".//main:c[@r='A15']/main:f", namespace) is None
-        assert [node.attrib["ref"] for node in sheet.findall("main:mergeCells/main:mergeCell", namespace)].count(
-            "I13:S13"
-        ) == 1
 
 
 def test_proposal_draft_generation_calls_llm_saves_new_xlsx_and_returns_download(tmp_path: Path) -> None:

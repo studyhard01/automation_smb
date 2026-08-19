@@ -54,11 +54,16 @@ package discovery와 전체 저장소 품질 자동화를 소유하므로 명령
 두 프로세스를 별도 터미널에서 실행한다.
 
 ```powershell
-uv run --no-sync uvicorn smb_finder.api:app --app-dir backend/src --host 127.0.0.1 --port 8011 --reload --reload-dir backend/src
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\start_frontend.ps1 -Action Dev
+cd .\backend
+.\.venv\Scripts\Activate.ps1
+uvicorn main:app --reload --host 127.0.0.1 --port 8010
+
+# 별도 터미널
+cd .\frontend
+npm run dev
 ```
 
-Backend가 기본 `8011`이 아닌 포트에서 실행되면 Frontend 실행 전에 process 환경변수
+Backend가 기본 `8010`이 아닌 포트에서 실행되면 Frontend 실행 전에 process 환경변수
 `VITE_BACKEND_URL`을 해당 로컬 주소로 지정한다. 이 값은 DB 설정이나 자격증명이 아니며 Vite proxy target으로만 쓴다.
 
 ### 통합·운영

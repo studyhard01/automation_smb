@@ -118,11 +118,12 @@ pool은 warm 반복 측정에서 연결 비용이 병목으로 확인될 때 도
 backend/src/smb_finder/
   models.py             # 저장소 독립 Pydantic 요청/응답
   llmops_search.py      # PostgreSQL 파일 후보 검색
+  llmops_multistore_search.py # PostgreSQL·MinIO·Neo4j 후보 통합
   llmops_retrieval.py   # 선택 UUID 범위 Hybrid/RRF와 Citation
   llmops_artifacts.py   # MinIO get/stat 전용 adapter
   llmops_graph.py       # Neo4j read-only Graph adapter
-  playground/api.py    # 안전한 domain error → HTTP error Mapping
-  playground/agent.py  # no-answer, 근거 합성, Citation 조립
+  playground/document_api.py  # 안전한 domain error → HTTP error Mapping
+  playground/document_chat.py # no-answer, 근거 합성, Citation 조립
 ```
 
 adapter가 지켜야 할 규칙:

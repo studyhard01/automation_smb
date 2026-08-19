@@ -16,7 +16,6 @@ from fastapi.staticfiles import StaticFiles
 from .auth import AuthService, AuthSettings, PostgresAuthStore, SeeLisClient, create_auth_router
 from .auth.security import hash_password
 from .auth.store import AuthStoreError
-from .bot_core import OllamaModelGateway
 from .config import load_settings
 from .llmops_artifacts import LlmopsArtifactReader
 from .llmops_graph import LlmopsGraphReader
@@ -24,6 +23,7 @@ from .llmops_multistore_search import LlmopsMultiStoreFileSearcher, LocalSearchQ
 from .llmops_retrieval import LlmopsScopedRetriever
 from .llmops_search import LlmopsFileSearcher, LlmopsSearchError
 from .mcp_server import McpExactRoute, create_mcp_bundle
+from .model_gateway import OllamaModelGateway
 from .models import ApiErrorResponse
 from .playground.document_api import DocumentRuntime, create_document_router
 from .playground.upload_api import create_upload_router

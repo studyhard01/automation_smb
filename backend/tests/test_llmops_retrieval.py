@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from smb_finder.bot_core import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
+from smb_finder.model_gateway import ModelGatewayError, ModelGatewayResult, ModelTokenUsage
 from smb_finder.config import Settings
 from smb_finder.llmops_retrieval import LlmopsScopedRetriever, OllamaQueryEmbeddingClient, ScopedRetrievalResult
 from smb_finder.llmops_search import LlmopsSearchError
