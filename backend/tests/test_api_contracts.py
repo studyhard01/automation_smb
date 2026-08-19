@@ -4,10 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import subprocess
-import sys
-from pathlib import Path
 
 from smb_finder import api
 from smb_finder.config import Settings
@@ -78,41 +74,3 @@ def test_lifespan_owns_one_reused_model_gateway(monkeypatch) -> None:
     api._state.clear()
 
     asyncio.run(exercise())
-
-
-def test_mcp_defaults_to_disabled_with_a_reachable_metadata_budget() -> None:
-    settings = Settings(_env_file=None)
-
-    assert settings.mcp_enabled is False
-    assert settings.mcp_api_token == ""
-    assert settings.mcp_metadata_timeout_ms > 1000
-    assert settings.mcp_metadata_max_concurrency == 2
-
-
-def test_mcp_enable_gate_registers_only_the_exact_route_in_a_fresh_process() -> None:
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "MCP_ENABLED": "true",
-            "MCP_API_TOKEN": "test-only-placeholder",
-            "SKIP_POSTGRES": "true",
-        }
-    )
-    script = (
-        "from smb_finder import api; "
-        "assert api._mcp_bundle is not None; "
-        "assert [getattr(route, 'path', None) for route in api.app.router.routes].count('/mcp') == 1; "
-        "api._mcp_bundle.close()"
-    )
-
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[2],
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr

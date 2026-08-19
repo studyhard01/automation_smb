@@ -80,12 +80,6 @@ class Settings(BaseSettings):
     playground_agent_budget_ms: int = Field(default=30_000, ge=100)
     playground_agent_context_messages: int = Field(default=6, ge=0, le=20)
 
-    # MCP는 현재 문서 metadata 1개만 loopback에서 별도 token으로 공개한다.
-    mcp_enabled: bool = False
-    mcp_api_token: str = ""
-    mcp_metadata_timeout_ms: int = Field(default=1500, ge=1100, le=10_000)
-    mcp_metadata_max_concurrency: int = Field(default=2, ge=1, le=8)
-
     minio_endpoint: str = ""
     minio_secure: bool = False
     llmops_minio_bucket: str = ""

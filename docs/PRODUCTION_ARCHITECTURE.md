@@ -38,7 +38,7 @@ Compose가 host port를 게시한다. build context는 allowlist 방식이라 `.
 
 ## 이번 단계에서 제외한 구성
 
-- Langflow, LangGraph, MCP
+- 별도 workflow·graph orchestration runtime
 - 요청 시 SMB 전체 순회와 로컬 SQLite 인덱싱
 - Tool Lab, Skills CRUD, QC·핵형·NGS 보고서 데모
 - 외부 OpenAI provider와 외부 검색 API

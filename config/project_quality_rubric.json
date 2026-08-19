@@ -132,6 +132,10 @@
         "required_tokens": ["자연어로 파일 검색", "PostgreSQL", "MinIO", "Neo4j", "read-only", "backend/src/smb_finder/playground/document_chat.py", "scripts/evaluate_quality.py"],
         "forbidden_tokens": ["Langflow endpoint", "ToolCatalog"]
       },
+      "docs/README.md": {
+        "required_tokens": ["15분 인수인계 순서", "기능 계약", "검증과 운영", "문서 유지 원칙"],
+        "forbidden_tokens": []
+      },
       "AGENTS.md": {
         "required_tokens": ["합성 데이터", "Python 3.11", "p50 < 300ms", "p95 < 1s", "docs/DEVELOPMENT_LESSONS.md", "docs/PRODUCTION_ARCHITECTURE.md"],
         "forbidden_tokens": []

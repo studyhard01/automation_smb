@@ -6,8 +6,6 @@ import asyncio
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
-from typing import Any, cast
-from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -21,14 +19,12 @@ from .llmops_artifacts import LlmopsArtifactReader
 from .llmops_graph import LlmopsGraphReader
 from .llmops_multistore_search import LlmopsMultiStoreFileSearcher, LocalSearchQueryExpander
 from .llmops_retrieval import LlmopsScopedRetriever
-from .llmops_search import LlmopsFileSearcher, LlmopsSearchError
-from .mcp_server import McpExactRoute, create_mcp_bundle
+from .llmops_search import LlmopsFileSearcher
 from .model_gateway import OllamaModelGateway
 from .models import ApiErrorResponse
 from .playground.document_api import DocumentRuntime, create_document_router
 from .playground.upload_api import create_upload_router
 from .playground.upload_service import UploadManager
-from .tooling import MetadataReader
 
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -47,38 +43,6 @@ _auth_service = AuthService(
 )
 _upload_manager = UploadManager(_settings)
 _state: dict[str, object] = {}
-
-
-class _RuntimeMetadataReader:
-    """현재 lifespan이 소유한 PostgreSQL reader를 MCP 호출 시점에 해석한다."""
-
-    def get_document_metadata(
-        self,
-        doc_id: UUID,
-        revision_id: UUID | None = None,
-        *,
-        deadline: float,
-    ) -> dict[str, Any]:
-        candidate = _state.get("metadata_reader")
-        if candidate is None:
-            raise LlmopsSearchError(
-                "metadata_not_configured",
-                "문서 메타데이터 저장소가 구성되지 않았습니다.",
-            )
-        reader = cast(MetadataReader, candidate)
-        return reader.get_document_metadata(doc_id, revision_id, deadline=deadline)
-
-
-_mcp_bundle = (
-    create_mcp_bundle(
-        _RuntimeMetadataReader(),
-        bearer_token=_settings.mcp_api_token,
-        timeout_ms=_settings.mcp_metadata_timeout_ms,
-        max_concurrency=_settings.mcp_metadata_max_concurrency,
-    )
-    if _settings.mcp_enabled
-    else None
-)
 
 
 def _runtime() -> DocumentRuntime:
@@ -130,7 +94,6 @@ async def lifespan(_app: FastAPI):
         if _settings.llmops_db_configured:
             postgres_searcher = LlmopsFileSearcher(_settings)
             stack.callback(postgres_searcher.close)
-            _state["metadata_reader"] = postgres_searcher
 
             if _settings.ollama_base_url.strip() and _settings.embedding_model.strip():
                 scoped_retriever = LlmopsScopedRetriever(_settings)
@@ -154,17 +117,12 @@ async def lifespan(_app: FastAPI):
             stack.callback(file_searcher.close)
             _state["file_searcher"] = file_searcher
 
-        if _mcp_bundle is not None:
-            stack.callback(_mcp_bundle.close)
-            await stack.enter_async_context(_mcp_bundle.server.session_manager.run())
-
         _logger.info(
-            "서비스 준비 완료: postgresql=%s retrieval=%s minio=%s neo4j=%s mcp=%s",
+            "서비스 준비 완료: postgresql=%s retrieval=%s minio=%s neo4j=%s",
             "file_searcher" in _state,
             "scoped_retriever" in _state,
             "artifact_reader" in _state,
             "graph_reader" in _state,
-            _mcp_bundle is not None,
         )
         yield
 
@@ -229,7 +187,3 @@ async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSON
         retryable=True,
     )
     return JSONResponse(status_code=500, content=payload.model_dump())
-
-
-if _mcp_bundle is not None:
-    app.router.routes.append(McpExactRoute("/mcp", _mcp_bundle.app))

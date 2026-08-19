@@ -122,7 +122,7 @@ def test_active_runtime_has_no_external_llm_or_legacy_search_imports() -> None:
     chat_source = (REPO_ROOT / "backend" / "src" / "smb_finder" / "playground" / "document_chat.py").read_text(
         encoding="utf-8"
     )
-    assert "from .mcp_server import McpExactRoute, create_mcp_bundle" in api_source
+    assert "mcp_server" not in api_source
     assert "content_index" not in api_source
     assert "openai.com" not in chat_source
     assert "selected_files" in chat_source

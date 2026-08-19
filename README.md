@@ -75,7 +75,6 @@ automation_smb/
 │  │  │  ├─ proposal_context.py      # 기안 근거 예산·패킹
 │  │  │  └─ proposal_evidence.py     # 유형별 참고 문서 선별
 │  │  ├─ auth/                       # 로그인·세션·사용자·서비스 권한
-│  │  ├─ tooling/, mcp_server.py     # 선택적 read-only metadata MCP
 │  │  ├─ evaluation/                 # 기안 전용 합성 데이터 평가
 │  │  └─ web/                        # Vite production 산출물; 직접 수정 금지
 │  └─ tests/                         # 현재 기능만 검증하는 Backend 테스트
@@ -210,7 +209,6 @@ npm.cmd --prefix .\frontend run build
 | 생성 XLSX 다운로드 | `GET /api/playground/drafts/proposal/{draft_id}` |
 | 인증·사용자 관리 | `/api/auth/*`, `/api/users/*` |
 | 서비스 상태 | `GET /health` |
-| metadata MCP | `/mcp` — 기본 비활성, loopback와 token 필요 |
 
 ## 반드시 지켜야 하는 경계
 
@@ -225,26 +223,18 @@ npm.cmd --prefix .\frontend run build
 ## 현재 범위 밖
 
 - 로컬 SMB 전체 순회와 자체 SQLite 인덱싱
-- 범용 Tool/Skill 편집기와 LangGraph Studio 실험
-- QC 감사·핵형·NGS 보고서 데모
 - 외부 LLM provider
 - 문서 저장소 schema/object/graph 쓰기
 - 운영 SSO, 문서별 ACL 강제, 실제 의료데이터 운영
 
 ## 인수인계 시 읽을 문서
 
-1. [제품 목표와 다음 단계](docs/PRODUCT_DEVELOPMENT_PLAN.md)
-2. [현재 구현 상태](docs/IMPLEMENTATION_STATUS.md)
-3. [개발 환경](docs/DEVELOPMENT_SETUP.md)
-4. [DB 연동 계약](docs/DATASET_DB_INTEGRATION_PLAN.md)
-5. [Frontend 구조](docs/FRONTEND_ARCHITECTURE.md)
-6. [파일 첨부와 설정](docs/FILE_UPLOAD_AND_SETTINGS.md)
-7. [기안 생성 계약](docs/PROPOSAL_DRAFT.md)
-8. [기안 평가](docs/PROPOSAL_EVALUATION.md)
-9. [인증과 사용자 관리](docs/AUTHENTICATION_AND_USER_MANAGEMENT.md)
-10. [운영 아키텍처](docs/PRODUCTION_ARCHITECTURE.md)
-11. [품질 기준](docs/PROJECT_QUALITY_RUBRIC.md)
-12. [개발 교훈](docs/DEVELOPMENT_LESSONS.md)
+[문서 안내](docs/README.md)에 읽는 순서와 문서별 책임을 정리했다. 처음에는 다음 네 문서만 순서대로 읽는다.
+
+1. [현재 구현 상태](docs/IMPLEMENTATION_STATUS.md)
+2. [개발 환경](docs/DEVELOPMENT_SETUP.md)
+3. [운영 아키텍처](docs/PRODUCTION_ARCHITECTURE.md)
+4. [제품 목표와 다음 단계](docs/PRODUCT_DEVELOPMENT_PLAN.md)
 
 새 담당자는 먼저 `/health`와 `/api/playground/stores/status`로 연결 상태를 확인한 뒤, 합성 데이터로
 검색 → 선택 → 대화 → 요약 → 기안 생성 순서의 smoke를 수행하면 됩니다.

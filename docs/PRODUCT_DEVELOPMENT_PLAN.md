@@ -33,7 +33,6 @@
 - 구조화 기안 생성·필수정보 확인·수정본·XLSX 다운로드
 - 제한된 SMB 신규 파일 첨부와 기안 저장
 - 로그인·회원가입·관리자 사용자·서비스 권한
-- 선택적 loopback read-only MCP metadata tool
 - 기안 합성 데이터 평가와 품질 Gate
 
 문서 수집·변환·Chunk·Embedding 적재는 upstream 데이터 파이프라인이 소유한다. 이 저장소는 문서 저장소를 수정하지
@@ -41,7 +40,7 @@
 
 ## 3. 현재 제외
 
-- Langflow와 LangGraph Studio
+- 별도 시각형 workflow·graph orchestration runtime
 - 로컬 SMB 직접 순회·SQLite 인덱싱
 - 범용 Tool Lab과 Skill CRUD
 - QC 감사·핵형·NGS 보고서 데모
@@ -79,7 +78,7 @@
 
 - 실제 사용자가 승인한 산출물만 별도 vertical slice로 추가
 - 생성물 저장 위치·검토·승인·버전 정책 확정
-- 추가 MCP tool은 명확한 consumer가 생긴 뒤 최소 권한으로 추가
+- 새 외부 연동은 명확한 consumer와 최소 권한 계약이 생긴 뒤 별도 수직 슬라이스로 추가
 
 ## 5. 승인 Gate
 

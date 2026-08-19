@@ -16,7 +16,6 @@
 | 기안 수정 | 완료 | 원본 snapshot과 유형을 유지하고 별도 minor 수정본 생성 |
 | 기안 평가 | 완료 | 합성 dataset preflight, gold 비노출 live 실행, 온프레미스 Judge, XLSX·지연 평가 |
 | 로그인·회원가입·사용자 관리 | 완료 | 별도 PostgreSQL `auth` schema와 관리자·최고 관리자·서비스 권한 |
-| MCP metadata | 완료/기본 비활성 | loopback·token 보호 `/mcp`, UUID metadata tool 1개, bounded executor |
 | Playground 권한 강제 | 미완료 | 로그인·서비스 권한은 있으나 모든 Playground 업무 API에 principal 강제 전 |
 | 문서별 ACL·감사 | 미완료 | 운영 전 문서 권한과 감사 주체 설계 필요 |
 | Docker 패키징 | 완료 | Vue build와 non-root FastAPI runtime, healthcheck, LAN host port 지원 |
@@ -34,7 +33,6 @@
 - `playground/upload_*.py`: runtime 설정·SMB 첨부·업로드 근거
 - `playground/proposal_*.py`: 기안 근거·생성·검증·XLSX·수정·다운로드
 - `auth/`: 인증·세션·사용자·서비스 권한
-- `mcp_server.py`, `tooling/`: 선택적 read-only metadata MCP
 - `evaluation/proposal_*.py`: 기안 전용 합성 평가
 
 ## 현재 공개 API
@@ -56,7 +54,6 @@
 - `GET /api/auth/me`, `POST /api/auth/logout`
 - `GET /api/users`, `PATCH /api/users/{user_id}`
 - `GET /health`, `GET /playground`, `GET /login`, `GET /register`, `GET /user`
-- `/mcp` — 기본 비활성, OpenAPI 비노출
 
 ## 제거 대상 판정 결과
 
@@ -67,11 +64,12 @@
 - 이전 RAG·Telemetry·MLflow 문서 챗봇 평가
 - QC 감사·핵형·NGS 보고서 데모
 - 별도 LangGraph Studio integration과 dormant Bot Core graph scaffold
+- 기본 비활성 metadata MCP와 전용 tooling
 - 프런트에서 사용하지 않던 빈 기안 템플릿 API와 구 XLSX 삽입 호환 함수
 - 직접 실행 명령을 중복하던 Backend·Frontend PowerShell wrapper
+- 이전 문서 챗봇 평가 JSONL과 고립된 설문·중복 README
 
-현재 runtime에 필요한 `extract.py`, MCP/tooling, 기안 평가 모듈은 유지했다. 환경 파일과 실제 데이터·캐시는 정리
-대상에서 제외했다.
+현재 runtime에 필요한 `extract.py`와 기안 평가 모듈은 유지했다. 실제 데이터와 환경 파일은 정리 대상에서 제외했다.
 
 ## 알려진 후속 과제
 
@@ -84,9 +82,11 @@
 
 2026-08-19 구조 정리본에서 다음을 확인했다.
 
-- Ruff 통과, Backend 비통합 테스트 `271 passed`
+- Ruff 통과, Backend 비통합 테스트 `248 passed` (`StarletteDeprecationWarning` 1건)
 - Frontend typecheck 통과, Vitest `12 files / 71 tests passed`, production build 통과
 - 프로젝트 품질 평가 `85.00/100`, 목표 달성, hard gate 통과, 목표 미달 항목 없음
 - 합성 실측 baseline 미등록으로 evidence freshness는 `skipped`이며 운영 전 갱신 필요
 - Docker 이미지 build 및 컨테이너 health 통과, `/playground`와 OpenAPI 200
-- 합성 read-only 파일 검색 200, 3건, `150.7ms` (단일 smoke 값이며 p50/p95 baseline은 아님)
+- MCP package 미설치, `/mcp` 404, OpenAPI 미노출 확인
+- 합성 read-only 파일 검색 200, 3건, `174.7ms` (단일 smoke 값이며 p50/p95 baseline은 아님)
+- 문서는 `docs/README.md` 색인을 추가하고 약 3,300줄에서 약 1,300줄로 현재 계약 중심 압축
